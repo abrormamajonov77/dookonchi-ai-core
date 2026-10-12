@@ -15,12 +15,12 @@ export const InvoiceItemSchema = z.object({
 });
 
 export const InvoiceSchema = z.object({
+  total_amount: z.number().default(0),
+  discount: z.number().default(0),
+  table_text: z.string().default(''),
   supplier: z.string().optional().nullable(),
-  totalOnPaper: z.number().optional().nullable(),
-  discountOnPaper: z.number().optional().nullable(),
-  rawItems: z.array(z.string()).optional().nullable(),
-  supplierName: z.string().optional().nullable(),
   invoiceNo: z.string().optional().nullable(),
+  supplierName: z.string().optional().nullable(),
   grossTotal: z.number().optional().nullable(),
   discountAmount: z.number().optional().nullable(),
   netTotal: z.number().optional().nullable(),
@@ -29,6 +29,8 @@ export const InvoiceSchema = z.object({
   items: z.any().optional().nullable(), // Can be string[] or InvoiceItemSchema[]
   isCaptionOverride: z.boolean().optional(),
   isCashOverride: z.boolean().optional(),
+  exactSupplierId: z.string().optional().nullable(),
+  discountLabel: z.string().optional().nullable(),
 });
 
 export const VoiceIntentSchema = z.object({
@@ -79,27 +81,28 @@ export async function generateContentWithFallback(
 }
 
 export class AiService {
-    static async parseInvoiceImage(imageBuffer: Buffer, mimeType: string = 'image/jpeg', caption?: string): Promise<z.infer<typeof InvoiceSchema>> {
+  static async parseInvoiceImage(imageBuffer: Buffer, mimeType: string = 'image/jpeg', caption?: string): Promise<z.infer<typeof InvoiceSchema>> {
     return withRetry(async () => {
-      logger.info('Sending invoice image to Gemini for analysis');
-      const textPrompt = `Sen tezyurar hujjat skanerisansan (OCR).
-Vazifang: Ushbu nakladnoydan bor yozuvlarni qanday bo'lsa shunday ko'chirib berish. 
-HECH QANDAY QAYTA HISOBLASH, MATEMATIKA YOKI SOLISHTIRISH QILMA!
+      logger.info('Sending invoice image to Gemini for Pure OCR + Target Extraction');
+      const textPrompt = `Sen tezyurar va o'ta aniq hujjat skanerisansan (Pure OCR Mode).
+Vazifang: Ushbu nakladnoy/chek tasviridagi barcha jadval ma'lumotlarini qanday bo'lsa shundayligicha ko'chirib berish va pastki yakuniy summalarni ajratish.
 
-Faqat quyidagi ma'lumotlarni qat'iy JSON formatida qaytar:
-1. supplier: Firma yoki ta'minotchi nomi (chek yuqorisida yoki "ТП" qatorida).
-2. totalOnPaper: Chekning eng pastki qismida "ИТОГО / ВСЕГО / К ОПЛАТЕ" deb bosilgan yakuniy summa (faqat raqam).
-3. discountOnPaper: Agar qog'ozda "Скидка" katagida raqam bo'lsa, o'sha summa (yo'q bo'lsa 0).
-4. rawItems: Qog'ozdagi birinchi 3-4 ta tovar nomi va ularning qatoridagi yozuvlar.
+QAT'IY QOIDALAR:
+1. HECH QANDAY QAYTA HISOBLASH, MATEMATIKA, QATORLARNI YIG'ISH YOKI TEKSHIRISH QILMA! (No in-model arithmetic/reconciliation). Qatordagi sonlar qog'ozda qanday yozilgan bo'lsa, xuddi shunday so'zma-so'z ko'chir.
+2. Butun jadvalni boshidan oxirigacha birorta qatorini qoldirmasdan yoki qisqartirmasdan toza Markdown jadvali ("table_text") ko'rinishida ko'chir.
+3. Chekning eng pastki qismidagi yakuniy jami qatorlaridan FAQAT IKKITA maqsadli sonni ajratib ol:
+   - "total_amount": Chekning eng pastki qismida "ИТОГО / ВСЕГО / К ОПЛАТЕ" deb ko'rsatilgan yakuniy summa (faqat son).
+   - "discount": Agar qog'ozda "Скидка" katagida chegirma bo'lsa o'sha summa (yo'q bo'lsa 0).
+4. Chek yuqorisidagi ta'minotchi / firma nomini ("supplier") va nakladnoy raqamini ("invoiceNo") ham ajrat.
 
-Format (Faqat toza JSON, izohsiz):
+Javobni FAQAT quyidagi JSON formatida qaytar:
 {
-  "supplier": "string",
-  "totalOnPaper": 1280400,
-  "discountOnPaper": 39600,
-  "rawItems": ["Tovar 1 - 200 000", "Tovar 2 - 120 000"]
+  "total_amount": 1280400,
+  "discount": 0,
+  "table_text": "| № | Tovar nomi | Soni | Narxi | Summasi |\\n|---|---|---|---|---|\\n| 1 | Mahsulot 1 | 5 | 10000 | 50000 |",
+  "supplier": "Ta'minotchi nomi",
+  "invoiceNo": "12345"
 }`;
-
 
       const response = await generateContentWithFallback(async (modelName) => {
         return await ai.models.generateContent({
@@ -116,7 +119,7 @@ Format (Faqat toza JSON, izohsiz):
           config: {
             responseMimeType: 'application/json',
             temperature: 0.1,
-            maxOutputTokens: 800,
+            maxOutputTokens: 8192,
           }
         });
       });
@@ -126,17 +129,25 @@ Format (Faqat toza JSON, izohsiz):
       
       const parsed = JSON.parse(text);
       
-      // Adapt simplified schema to legacy internal handler formats
-      parsed.supplierName = parsed.supplier || parsed.supplierName;
-      if (caption) parsed.supplierName = caption;
-      parsed.discountAmount = parsed.discountOnPaper || parsed.discountAmount || 0;
-      parsed.grossTotal = parsed.totalOnPaper || parsed.grossTotal || 0;
+      parsed.total_amount = Number(parsed.total_amount ?? parsed.totalOnPaper ?? parsed.grossTotal ?? 0);
+      parsed.discount = Number(parsed.discount ?? parsed.discountOnPaper ?? parsed.discountAmount ?? 0);
+      parsed.table_text = String(parsed.table_text ?? '');
       
-      const combinedItems = parsed.rawItems || parsed.items || parsed.sampleItems;
-      parsed.sampleItems = Array.isArray(combinedItems) && typeof combinedItems[0] === 'string' 
-        ? combinedItems 
-        : [];
-      parsed.itemsCount = parsed.sampleItems.length;
+      // Adapt to legacy internal handler formats
+      parsed.supplierName = parsed.supplier || parsed.supplierName || "Noma'lum";
+      if (caption) parsed.supplierName = caption;
+      parsed.discountAmount = parsed.discount;
+      parsed.grossTotal = parsed.total_amount;
+      parsed.netTotal = parsed.total_amount - parsed.discount;
+      
+      // Extract sample items preview from table_text
+      const tableLines = parsed.table_text.split('\n').filter((l: string) => l.trim().startsWith('|') && !l.includes('---'));
+      const dataRows = tableLines.length > 1 ? tableLines.slice(1) : tableLines;
+      parsed.sampleItems = dataRows.slice(0, 4).map((row: string) => {
+        const cols = row.split('|').map((c: string) => c.trim()).filter(Boolean);
+        return cols[1] || cols[0] || row;
+      });
+      parsed.itemsCount = dataRows.length > 0 ? dataRows.length : 1;
       
       return InvoiceSchema.parse(parsed);
     }, 2, 1000, VISION_TIMEOUT_MS);
@@ -159,6 +170,9 @@ Javob faqat va faqat quyidagi JSON formatida bo'lsin:
 {
   "supplierName": "MCHJ Nomi",
   "invoiceNo": "12345",
+  "total_amount": 50000,
+  "discount": 0,
+  "table_text": "| Tovar | Soni | Narxi | Jami |",
   "items": [
     { "productName": "Tovar nomi", "quantity": 10, "unitPrice": 5000, "totalPrice": 50000 }
   ]
@@ -173,6 +187,7 @@ Matn:
           config: {
             responseMimeType: 'application/json',
             temperature: 0.1,
+            maxOutputTokens: 8192,
           }
         });
       });
@@ -181,6 +196,11 @@ Matn:
       if (!text) throw new Error('Empty response from Gemini');
       
       const parsed = JSON.parse(text);
+      parsed.total_amount = Number(parsed.total_amount ?? parsed.grossTotal ?? 0);
+      parsed.discount = Number(parsed.discount ?? parsed.discountAmount ?? 0);
+      parsed.grossTotal = parsed.total_amount;
+      parsed.discountAmount = parsed.discount;
+      parsed.table_text = String(parsed.table_text ?? '');
       return InvoiceSchema.parse(parsed);
     }, 2, 1000, TEXT_TIMEOUT_MS);
   }

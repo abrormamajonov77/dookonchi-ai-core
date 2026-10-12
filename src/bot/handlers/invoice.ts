@@ -82,7 +82,7 @@ async function processParsedInvoice(ctx: MyContext, invoiceData: any, imageUrl: 
   }
   editableText += `Raqam: ${invoiceData.invoiceNo || "Yo'q"}\n\n`;
 
-  let totalSum = invoiceData.grossTotal || 0;
+  let totalSum = invoiceData.total_amount ?? invoiceData.grossTotal ?? 0;
 
   if (invoiceData.sampleItems && invoiceData.sampleItems.length > 0) {
     editableText += `📦 Tovarlar (jami ${invoiceData.itemsCount || invoiceData.sampleItems.length} ta):\n`;
@@ -101,8 +101,10 @@ async function processParsedInvoice(ctx: MyContext, invoiceData: any, imageUrl: 
 
   // Sync back calculated total sum if it was empty
   invoiceData.grossTotal = totalSum;
-  const discount = invoiceData.discountAmount || 0;
+  invoiceData.total_amount = totalSum;
+  const discount = invoiceData.discount ?? invoiceData.discountAmount ?? 0;
   invoiceData.discountAmount = discount;
+  invoiceData.discount = discount;
 
   let text = invoiceData.isCashOverride ? `🧾 **Naqd Xarid Tahlili**\n\n` : `📄 **Nakladnoy Tahlili**\n\n`;
   text += `\`\`\`\n${editableText}\`\`\`\n`;
@@ -575,7 +577,9 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
       formattedReceipt += `📥 Kiritish usuli: 📷 Rasm / Matnli Nakladnoy\n`;
       formattedReceipt += `-----------------------------\n`;
 
-      if (invoiceData.sampleItems && invoiceData.sampleItems.length > 0) {
+      if (invoiceData.table_text) {
+        formattedReceipt += `${invoiceData.table_text}\n`;
+      } else if (invoiceData.sampleItems && invoiceData.sampleItems.length > 0) {
         for (let idx = 0; idx < invoiceData.sampleItems.length; idx++) {
           formattedReceipt += `  ${idx + 1}. ${invoiceData.sampleItems[idx]}\n`;
         }
