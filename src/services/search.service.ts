@@ -1,4 +1,5 @@
 import Fuse from 'fuse.js';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../database/prisma';
 import { TranslitService } from './translit.service';
 import { formatCompactAmount } from '../utils/formatters';
@@ -36,11 +37,11 @@ export class SearchService {
     const cleanQuery = TranslitService.toLatin(stemmedQuery).toLowerCase();
 
     // 2. Fetch all searchable entities
-    const [allSuppliers, allDebts, recentTransactions, recentCashTransactions] = await Promise.all([
+    const [allSuppliers, allDebts, recentTransactions, recentCashTransactions, allProducts] = await Promise.all([
       prisma.supplier.findMany({ where: { isActive: true } }),
       prisma.customerDebt.findMany({ where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] } } }),
       prisma.supplierTransaction.findMany({
-        where: { receiptData: { not: require('@prisma/client').Prisma.DbNull } },
+        where: { receiptData: { not: Prisma.DbNull } },
         take: 50, // Fetch top 50 recent
         orderBy: { date: 'desc' },
         include: { supplier: true }
@@ -49,6 +50,21 @@ export class SearchService {
         where: { items: { not: null } },
         take: 50,
         orderBy: { createdAt: 'desc' }
+      }),
+      prisma.product.findMany({
+        take: 50,
+        orderBy: { updatedAt: 'desc' },
+        include: {
+          invoiceItems: {
+            take: 1,
+            orderBy: { invoice: { createdAt: 'desc' } },
+            include: {
+              invoice: {
+                include: { supplier: true }
+              }
+            }
+          }
+        }
       })
     ]);
 
@@ -137,6 +153,28 @@ export class SearchService {
              }
           } catch(e) {}
        }
+    });
+
+    // Parse Product catalog items
+    allProducts.forEach(prod => {
+      const lastInvoiceItem = prod.invoiceItems?.[0];
+      const supplierName = lastInvoiceItem?.invoice?.supplier?.name || "Katalog";
+      const supplierId = lastInvoiceItem?.invoice?.supplierId || prod.id;
+      const date = lastInvoiceItem?.invoice?.createdAt || prod.updatedAt;
+      const unitPrice = Number(prod.lastPrice);
+      const quantity = lastInvoiceItem ? Number(lastInvoiceItem.quantity) : 1;
+
+      itemDocs.push({
+        type: 'ITEM',
+        id: supplierId,
+        productName: prod.name,
+        searchName: TranslitService.toLatin(prod.name).toLowerCase(),
+        partyName: supplierName,
+        date: date,
+        unitPrice: unitPrice,
+        quantity: quantity,
+        isCash: false
+      });
     });
 
     // 4. Initialize Fuse for each category

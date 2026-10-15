@@ -6,8 +6,12 @@ export class SupplierService {
    * Cleans and normalizes the supplier name for searching.
    */
   static normalizeName(name: string): string {
-    let cleanName = name.replace(/(aka|jon|xon|bek|dan|ga|ni|ning|dan yuk keldi|yuk keldi)$/i, '').trim();
-    return TranslitService.toLatin(cleanName).toLowerCase();
+    const latin = TranslitService.toLatin(name).toLowerCase().trim();
+    return latin
+      .replace(/(dan yuk keldi|yuk keldi)$/i, '')
+      .replace(/\s+(aka|oka|opa|toga|tog'a|amma|boy|xon|hon|mulla|jon|bek|akadan|okadan)(dan|ga|ni|ning)?$/i, '')
+      .replace(/(akadan|okadan|aka|oka|opa|toga|tog'a|amma|boy|xon|hon|mulla|jon|bek|dan|ga|ni|ning)$/i, '')
+      .trim();
   }
 
   /**
@@ -86,6 +90,11 @@ export class SupplierService {
       for (let i = 1; i < existingSuppliers.length; i++) {
         const dup = existingSuppliers[i];
         
+        await tx.invoice.updateMany({
+          where: { supplierId: dup.id },
+          data: { supplierId: primarySupplier.id }
+        });
+
         await tx.supplierTransaction.updateMany({
           where: { supplierId: dup.id },
           data: { supplierId: primarySupplier.id }
@@ -94,11 +103,14 @@ export class SupplierService {
         await tx.supplierPayment.updateMany({
            where: { supplierId: dup.id },
            data: { supplierId: primarySupplier.id }
-        }).catch(() => {}); // Optional in case model doesn't exist
+        }).catch(() => {});
         
         await tx.supplier.update({
           where: { id: primarySupplier.id },
-          data: { debtUzs: { increment: dup.debtUzs } }
+          data: { 
+            debtUzs: { increment: dup.debtUzs },
+            debtUsd: { increment: dup.debtUsd }
+          }
         });
         
         await tx.supplier.delete({ where: { id: dup.id } });

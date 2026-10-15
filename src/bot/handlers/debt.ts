@@ -137,8 +137,9 @@ debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
   const keyboard = new InlineKeyboard()
     .switchInlineCurrent("➕ Yangi qarz qo'shish", inlineTemplate)
     .row()
+    .text("💸 Qarz to'lash (Yopish)", `debt:pay:${firstId}`)
+    .row()
     .text("🔙 Orqaga", "debt:back");
-
 
   if (ctx.callbackQuery.message) {
     await ctx.api.editMessageText(ctx.chat!.id, ctx.callbackQuery.message.message_id, text, {
@@ -149,14 +150,22 @@ debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
 });
 
 debtHandler.callbackQuery('debt:back', async (ctx) => {
-  // Re-trigger the main list
-  ctx.message = { text: '👥 Nasiyadorlar' } as any; 
-  // Easy way is to just call the logic again, but since it's a composer, we can just edit message.
-  // I will just answer it and let the user click the menu again, or extract the list logic.
+  await sendDebtorsPage(ctx, 1, true);
+});
 
-  await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message!.message_id);
-  // We can just execute the hears handler manually or rewrite. Since we don't have access to the hears handler directly, let's just ask them to use the menu.
-  await ctx.reply("Iltimos, menyudan '👥 Nasiyadorlar' ni qayta tanlang.");
+// Trigger Customer Debt Repayment
+debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
+  const firstId = ctx.match[1];
+  const firstDebt = await prisma.customerDebt.findUnique({ where: { id: firstId } });
+  if (!firstDebt) return ctx.answerCallbackQuery("Mijoz topilmadi.");
+
+  ctx.session.step = 'DEBT_PAYMENT';
+  ctx.session.tempData = { customerName: firstDebt.customerName, firstId };
+
+  await ctx.reply(
+    `💸 **${firstDebt.customerName}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000 yoki 50 ming)`,
+    { parse_mode: 'Markdown' }
+  );
 });
 
 // Trigger Template
@@ -177,8 +186,90 @@ Shunda shablon matni avtomatik ravishda yozish maydoningizga tushadi va siz faqa
   await ctx.reply(template, { parse_mode: 'Markdown', reply_markup: templateKeyboard });
 });
 
-// Parse Text for Debt Template
+// Parse Text for Debt Template & Repayment
 debtHandler.on('message:text', async (ctx, next) => {
+  if (ctx.session.step === 'DEBT_PAYMENT') {
+    const rawText = ctx.message.text.trim();
+    if (rawText.startsWith('/')) return next();
+
+    let cleanNumber = rawText.replace(/\s+/g, '').replace(/\./g, '').replace(/,/g, '');
+    if (rawText.toLowerCase().includes('ming') || rawText.toLowerCase().includes('k')) {
+      cleanNumber = rawText.replace(/\D/g, '') + '000';
+    }
+    const payAmount = Number(cleanNumber.replace(/\D/g, ''));
+
+    if (!payAmount || payAmount <= 0 || isNaN(payAmount)) {
+      return ctx.reply("❌ To'g'ri to'lov summasini kiriting (masalan: 50000 yoki 50 ming). To'xtatish uchun /start.");
+    }
+
+    const { customerName } = ctx.session.tempData;
+
+    const remainingTotal = await prisma.$transaction(async (tx) => {
+      const activeDebts = await tx.customerDebt.findMany({
+        where: {
+          customerName,
+          status: { in: ['PENDING', 'PARTIALLY_PAID'] }
+        },
+        orderBy: { createdAt: 'asc' }
+      });
+
+      let unapplied = payAmount;
+      for (const debt of activeDebts) {
+        if (unapplied <= 0) break;
+        const remainingOnThis = Number(debt.amount) - Number(debt.paidAmount);
+        if (remainingOnThis <= 0) continue;
+
+        if (unapplied >= remainingOnThis) {
+          await tx.customerDebt.update({
+            where: { id: debt.id },
+            data: {
+              paidAmount: debt.amount,
+              status: 'PAID'
+            }
+          });
+          unapplied -= remainingOnThis;
+        } else {
+          await tx.customerDebt.update({
+            where: { id: debt.id },
+            data: {
+              paidAmount: { increment: unapplied },
+              status: 'PARTIALLY_PAID'
+            }
+          });
+          unapplied = 0;
+        }
+      }
+
+      const remainingDebts = await tx.customerDebt.findMany({
+        where: {
+          customerName,
+          status: { in: ['PENDING', 'PARTIALLY_PAID'] }
+        }
+      });
+
+      let sumRemaining = 0;
+      for (const d of remainingDebts) {
+        sumRemaining += (Number(d.amount) - Number(d.paidAmount));
+      }
+      return sumRemaining;
+    });
+
+    ctx.session.step = undefined;
+    ctx.session.tempData = undefined;
+
+    const keyboard = new InlineKeyboard()
+      .text("👥 Nasiyadorlar ro'yxatiga qaytish", "debt:back");
+
+    let replyMsg = `✅ **${customerName}** tomonidan **${formatMoney(payAmount)}** to'lov qabul qilindi!\n\n`;
+    if (remainingTotal > 0) {
+      replyMsg += `💰 **Qolgan nasiya summasi:** ${formatMoney(remainingTotal)}`;
+    } else {
+      replyMsg += `🎉 **${customerName} barcha qarzlarini to'liq yopdi!**`;
+    }
+
+    return ctx.reply(replyMsg, { parse_mode: 'Markdown', reply_markup: keyboard });
+  }
+
   if (ctx.session.step !== 'ADD_DEBT_TEMPLATE') return next();
 
   const text = ctx.message.text;

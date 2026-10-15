@@ -36,18 +36,30 @@ export async function handleSupplierPayment(ctx: any, rawName: string, amount: n
   if (existingSuppliers.length > 1) {
     for (let i = 1; i < existingSuppliers.length; i++) {
       const dup = existingSuppliers[i];
+      await prisma.invoice.updateMany({
+        where: { supplierId: dup.id },
+        data: { supplierId: primarySupplier.id }
+      });
       await prisma.supplierTransaction.updateMany({
         where: { supplierId: dup.id },
         data: { supplierId: primarySupplier.id }
       });
+      await prisma.supplierPayment.updateMany({
+        where: { supplierId: dup.id },
+        data: { supplierId: primarySupplier.id }
+      }).catch(() => {});
       await prisma.supplier.update({
         where: { id: primarySupplier.id },
-        data: { debtUzs: { increment: dup.debtUzs } }
+        data: { 
+          debtUzs: { increment: dup.debtUzs },
+          debtUsd: { increment: dup.debtUsd }
+        }
       });
       await prisma.supplier.delete({ where: { id: dup.id } });
     }
   }
 
+  const isUsd = currency === 'USD';
   const [, updatedSupplier] = await prisma.$transaction([
     prisma.supplierTransaction.create({
       data: {
@@ -60,17 +72,26 @@ export async function handleSupplierPayment(ctx: any, rawName: string, amount: n
     }),
     prisma.supplier.update({
       where: { id: primarySupplier.id },
-      data: { debtUzs: { decrement: amount } }
+      data: isUsd 
+        ? { debtUsd: { decrement: amount } }
+        : { debtUzs: { decrement: amount } }
     })
   ]);
 
-  // Yangilangan qarz summasini darhol ko'rsatish
-  return ctx.editMessageText(
+  const remainingText = isUsd
+    ? `${formatMoney(Number(updatedSupplier.debtUsd), 'USD')}`
+    : `${formatMoney(Number(updatedSupplier.debtUzs), 'UZS')}`;
+
+  const replyContent = 
     `✅ *To'lov muvaffaqiyatli saqlandi!*\n\n` +
     `🏢 Ta'minotchi: *${updatedSupplier.name}*\n` +
     `💸 To'langan summa: *-${formatMoney(amount, currency)}*\n` +
     `--------------------------------\n` +
-    `💰 *Qolgan umumiy qarzimiz: ${formatMoney(Number(updatedSupplier.debtUzs), 'UZS')}*`,
-    { parse_mode: 'Markdown' }
-  );
+    `💰 *Qolgan umumiy qarzimiz: ${remainingText}*`;
+
+  if (ctx.callbackQuery) {
+    return ctx.editMessageText(replyContent, { parse_mode: 'Markdown' });
+  } else {
+    return ctx.reply(replyContent, { parse_mode: 'Markdown' });
+  }
 }

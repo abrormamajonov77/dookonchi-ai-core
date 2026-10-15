@@ -1,7 +1,7 @@
 import PQueue from 'p-queue';
 import { logger } from '../config/logger';
 
-class QueueService {
+export class QueueService {
   private queues: Map<string, PQueue> = new Map();
 
   getQueue(userId: string | number): PQueue {

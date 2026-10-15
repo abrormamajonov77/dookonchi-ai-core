@@ -282,8 +282,8 @@ invoiceHandler.on('message:text', async (ctx, next) => {
     return next();
   }
 
-  // Explicit session steps take precedence over implicit drafts
-  if (ctx.session.step) return next();
+  // Explicit session steps take precedence over implicit drafts (except invoice-specific steps)
+  if (ctx.session.step && ctx.session.step !== 'await_invoice_discount' && ctx.session.step !== 'await_new_supplier_name_inv') return next();
 
   const activePending = await prisma.pendingAction.findFirst({
     where: {
@@ -330,9 +330,12 @@ invoiceHandler.on('message:text', async (ctx, next) => {
         matchedDiscount = true;
       } else if (fixedDiscountMatch) {
         let numericOnly = text.replace(/[^\d.,]/g, '').replace(',', '.');
-        if (numericOnly.length >= 3 && Number(numericOnly) < totalSum) {
-          discountAmount = parseFloat(numericOnly);
-          if (text.toLowerCase().includes('ming')) discountAmount *= 1000;
+        let parsedVal = parseFloat(numericOnly);
+        if (text.toLowerCase().includes('ming') || text.toLowerCase().includes('k')) {
+          parsedVal *= 1000;
+        }
+        if (!isNaN(parsedVal) && parsedVal > 0 && parsedVal < totalSum) {
+          discountAmount = parsedVal;
           matchedDiscount = true;
         }
       }
@@ -398,6 +401,8 @@ invoiceHandler.on('message:text', async (ctx, next) => {
           pData.botMessageId = sent.message_id;
           await prisma.pendingAction.update({ where: { id: pendingId }, data: { data: pData } });
         }
+        ctx.session.step = undefined;
+        ctx.session.tempData = null;
         return;
       }
       // Else if no discount matches and it's PENDING, treat it as supplier name!

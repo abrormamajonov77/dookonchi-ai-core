@@ -29,10 +29,14 @@ async function processIntent(ctx: MyContext, intentData: any) {
     if (intentData.intent === 'GET_DEBT_INFO') {
       const name = intentData.name || '';
       const supplier = await prisma.supplier.findFirst({
-        where: { name: { contains: name } }
+        where: { name: { contains: name, mode: 'insensitive' } }
       });
       if (supplier) {
-         return ctx.reply(`📊 **Qarz ma'lumoti:**\n\nTa'minotchi: ${supplier.name}\nQarz: ${formatMoney(supplier.debtUzs)}`);
+         let info = `📊 **Qarz ma'lumoti:**\n\nTa'minotchi: ${supplier.name}\nQarz: ${formatMoney(supplier.debtUzs, 'UZS')}`;
+         if (Number(supplier.debtUsd) !== 0) {
+           info += `\nQarz (USD): ${formatMoney(supplier.debtUsd, 'USD')}`;
+         }
+         return ctx.reply(info);
       } else {
          return ctx.reply(`🤷‍♂️ "${name}" ismli ta'minotchi (qarz) topilmadi.`);
       }
@@ -145,8 +149,8 @@ voiceHandler.on('message:text', async (ctx, next) => {
     return next(); 
   }
 
-  // Explicit session steps take precedence over implicit drafts
-  if (ctx.session.step) return next();
+  // Explicit session steps take precedence over implicit drafts (except voice-specific steps)
+  if (ctx.session.step && ctx.session.step !== 'await_new_supplier_name') return next();
 
   const activePending = await prisma.pendingAction.findFirst({
     where: {
@@ -319,10 +323,23 @@ voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
       const supplier = await SupplierService.getOrMergeSupplier(tx, data.name, data.exactSupplierId);
       
       const isIncoming = data.txType === 'INCOMING_GOODS';
-      
-      let currentDebt = Number(supplier.debtUzs);
-      if (isIncoming) currentDebt += Number(data.amount);
-      else currentDebt -= Number(data.amount);
+      const isUsd = (data.currency || 'UZS') === 'USD';
+      const amountNum = Number(data.amount);
+
+      let currentDebtUzs = Number(supplier.debtUzs);
+      let currentDebtUsd = Number(supplier.debtUsd);
+
+      if (isUsd) {
+        if (isIncoming) currentDebtUsd += amountNum;
+        else currentDebtUsd -= amountNum;
+      } else {
+        if (isIncoming) currentDebtUzs += amountNum;
+        else currentDebtUzs -= amountNum;
+      }
+
+      const postDebtText = isUsd
+        ? formatMoney(currentDebtUsd, 'USD')
+        : formatMoney(currentDebtUzs, 'UZS');
 
       formattedReceipt = `🧾 ELEKTRON NAKLADNOY\n`;
       formattedReceipt += `🏢 Ta'minotchi: ${data.name}\n`;
@@ -333,7 +350,7 @@ voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
       if (data.comment) formattedReceipt += `Izoh: ${data.comment}\n`;
       formattedReceipt += `-----------------------------\n`;
       formattedReceipt += `💰 Amaliyot summasi: ${formatMoney(data.amount, data.currency)}\n`;
-      formattedReceipt += `📦 Ushbu amaliyotdan keyingi qarz: ${formatMoney(currentDebt, 'UZS')}\n`;
+      formattedReceipt += `📦 Ushbu amaliyotdan keyingi qarz: ${postDebtText}\n`;
 
       const newTx = await tx.supplierTransaction.create({
         data: {
@@ -362,13 +379,17 @@ voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
 
       const updated = await tx.supplier.update({
         where: { id: supplier.id },
-        data: { debtUzs: currentDebt } 
+        data: { 
+          debtUzs: currentDebtUzs,
+          debtUsd: currentDebtUsd
+        } 
       });
-      finalDebt = Number(updated.debtUzs);
+      finalDebt = isUsd ? Number(updated.debtUsd) : Number(updated.debtUzs);
     });
 
     const typeLabel = data.txType === 'INCOMING_GOODS' ? 'Yuk olish' : "To'lov";
-    await ctx.editMessageText(`✅ ${typeLabel} saqlandi: ${data.name} (+${formatMoney(data.amount, data.currency)})\n🏢 ${data.name} oldidagi jami qarzimiz: ${formatMoney(finalDebt, 'UZS')}`);
+    const finalDebtStr = formatMoney(finalDebt, data.currency || 'UZS');
+    await ctx.editMessageText(`✅ ${typeLabel} saqlandi: ${data.name} (+${formatMoney(data.amount, data.currency)})\n🏢 ${data.name} oldidagi jami qarzimiz: ${finalDebtStr}`);
     
     await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
     ctx.session.step = undefined;

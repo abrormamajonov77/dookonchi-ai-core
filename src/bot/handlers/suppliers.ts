@@ -2,6 +2,8 @@ import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
 import { formatMoney, formatDate, formatCompactAmount } from '../../utils/formatters';
+import { SupplierService } from '../../services/supplier.service';
+import { cacheService } from '../../services/cache.service';
 
 export const suppliersHandler = new Composer<MyContext>();
 
@@ -345,6 +347,24 @@ suppliersHandler.callbackQuery(/^sup:photo:(.+)$/, async (ctx) => {
 });
 
 
+// Add New Supplier
+suppliersHandler.callbackQuery('sup:add', async (ctx) => {
+  if (ctx.user?.role !== 'OWNER') {
+    return ctx.answerCallbackQuery({ text: "Sizda ushbu amal uchun huquq yo'q!", show_alert: true });
+  }
+
+  ctx.session.step = 'SUPPLIER_ADD';
+  ctx.session.tempData = {};
+
+  await ctx.reply(
+    "➕ **Yangi ta'minotchi qo'shish**\n\n" +
+    "Ta'minotchi nomi va ixtiyoriy telefon raqamini kiriting:\n" +
+    "(Masalan: `Azamat Shakar +998901234567` yoki shunchaki `Azamat Shakar`)\n\n" +
+    "Bekor qilish uchun /start ni bosing.",
+    { parse_mode: 'Markdown' }
+  );
+});
+
 // Trigger Manual Payment
 suppliersHandler.callbackQuery(/^sup:pay:(.+)$/, async (ctx) => {
   const supplierId = ctx.match[1];
@@ -406,8 +426,64 @@ suppliersHandler.callbackQuery(/^sup:undo:(.+)$/, async (ctx) => {
   await sendSupplierDetails(ctx, transaction.supplierId, 'all', false); // Sends a new message with updated state
 });
 
-// Process Inputs (Goods & Payments)
+// Process Inputs (Add Supplier, Goods & Payments)
 suppliersHandler.on('message:text', async (ctx, next) => {
+  if (ctx.session.step === 'SUPPLIER_ADD') {
+    const rawText = ctx.message.text.trim();
+    if (rawText.startsWith('/')) return next();
+
+    // Parse phone if provided
+    const phoneMatch = rawText.match(/(\+?998\d{9}|\d{9})/);
+    const phone = phoneMatch ? phoneMatch[0] : null;
+    let name = rawText.replace(/(\+?998\d{9}|\d{9})/, '').trim();
+    name = SupplierService.cleanSupplierName(name);
+
+    if (!name || name.length < 2) {
+      return ctx.reply("❌ Ta'minotchi nomi kamida 2 ta harfdan iborat bo'lishi kerak. Iltimos qaytadan kiriting:");
+    }
+
+    const existing = await prisma.supplier.findFirst({
+      where: {
+        name: { equals: name, mode: 'insensitive' }
+      }
+    });
+
+    if (existing) {
+      if (!existing.isActive) {
+        await prisma.supplier.update({
+          where: { id: existing.id },
+          data: { isActive: true, phone: phone || existing.phone }
+        });
+        cacheService.invalidateSupplierNames();
+        ctx.session.step = undefined;
+        ctx.session.tempData = undefined;
+        await ctx.reply(`✅ Arxivlangan ta'minotchi (${existing.name}) qayta faollashtirildi!`);
+        return sendSupplierDetails(ctx, existing.id, 'all', false);
+      }
+      ctx.session.step = undefined;
+      ctx.session.tempData = undefined;
+      await ctx.reply(`⚠️ "${name}" nomli ta'minotchi allaqachon mavjud!`);
+      return sendSupplierDetails(ctx, existing.id, 'all', false);
+    }
+
+    const newSupplier = await prisma.supplier.create({
+      data: {
+        name,
+        phone,
+        debtUzs: 0,
+        debtUsd: 0,
+        isActive: true
+      }
+    });
+
+    cacheService.invalidateSupplierNames();
+    ctx.session.step = undefined;
+    ctx.session.tempData = undefined;
+
+    await ctx.reply(`✅ Yangi ta'minotchi muvaffaqiyatli qo'shildi: *${newSupplier.name}*`, { parse_mode: 'Markdown' });
+    return sendSupplierDetails(ctx, newSupplier.id, 'all', false);
+  }
+
   if (ctx.session.step !== 'SUPPLIER_PAYMENT' && ctx.session.step !== 'SUPPLIER_GOODS') return next();
 
   const rawText = ctx.message.text.trim();
