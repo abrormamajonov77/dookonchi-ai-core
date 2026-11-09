@@ -5,18 +5,18 @@
   "main": "dist/bot/index.js",
   "scripts": {
     "start": "node dist/bot/index.js",
-    "dev": "npx tsx watch src/bot/index.ts",
-    "build": "tsc",
+    "dev": "tsx watch src/bot/index.ts",
+    "build": "prisma generate && tsc",
     "postinstall": "prisma generate",
-    "test": "vitest run",
-    "prisma:generate": "prisma generate",
-    "prisma:push": "prisma db push"
+    "test": "vitest run"
   },
   "dependencies": {
     "@google/genai": "latest",
     "@grammyjs/runner": "^2.0.3",
     "@grammyjs/storage-prisma": "^2.4.2",
     "@prisma/client": "^6.0.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
     "dotenv": "^16.4.5",
     "fuse.js": "^7.5.0",
     "grammy": "^1.30.0",
@@ -24,15 +24,13 @@
     "p-queue": "^8.0.0",
     "pino": "^9.5.0",
     "pino-pretty": "^13.0.0",
+    "prisma": "^6.0.0",
     "sharp": "^0.33.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@types/node-cron": "^3.0.11",
-    "prisma": "^6.0.0",
-    "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
     "vitest": "^5.0.4"
   }
 }
