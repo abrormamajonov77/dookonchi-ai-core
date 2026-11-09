@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatMoney, formatDate, formatCompactAmount, escapeMarkdown } from '../src/utils/formatters';
+import { formatMoney, formatDate, formatCompactAmount, escapeMarkdown, parseAmount } from '../src/utils/formatters';
 import { levenshteinDistance, fuzzyMatch } from '../src/utils/fuzzy';
 
 describe('formatters', () => {
@@ -37,6 +37,15 @@ describe('formatters', () => {
 
   it('handles empty text in escapeMarkdown', () => {
     expect(escapeMarkdown('')).toBe('');
+  });
+
+  it('parses amount strings correctly', () => {
+    expect(parseAmount('500000')).toBe(500000);
+    expect(parseAmount('1.000.000')).toBe(1000000);
+    expect(parseAmount('500 ming')).toBe(500000);
+    expect(parseAmount('1 mln')).toBe(1000000);
+    expect(parseAmount('1.5 mln')).toBe(1500000);
+    expect(parseAmount('200$')).toBe(200);
   });
 });
 

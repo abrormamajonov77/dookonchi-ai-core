@@ -1,0 +1,23 @@
+name: Keep Alive Ping
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Cloud Server Health Endpoint
+        env:
+          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
+        run: |
+          if [ -z "$APP_HEALTH_URL" ]; then
+            echo "APP_HEALTH_URL secret is not set yet. Skipping."
+            exit 0
+          fi
+          echo "Pinging $APP_HEALTH_URL ..."
+          curl -fsSL --retry 3 --max-time 15 "$APP_HEALTH_URL"
+          echo ""
+          echo "Keep-alive ping succeeded!"

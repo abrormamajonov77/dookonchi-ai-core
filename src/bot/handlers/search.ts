@@ -1,6 +1,7 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
-import { SearchService } from '../../services/search.service';
+import { SearchService, SearchResult } from '../../services/search.service';
+import { formatDateShort } from '../../utils/formatters';
 
 export const searchHandler = new Composer<MyContext>();
 
@@ -11,76 +12,30 @@ searchHandler.hears('📝 Qidiruv', async (ctx) => {
 
 searchHandler.on('message:text', async (ctx, next) => {
   if (ctx.session.step !== 'SEARCH') return next();
-
   const query = ctx.message.text.trim();
-  
-  if (query.length < 2) {
-    return ctx.reply("Iltimos, kamida 2 ta harf yozing.");
+  if (query.length < 2) return ctx.reply('Iltimos, kamida 2 ta harf yozing.');
+
+  const r = await SearchService.multiSearch(query);
+  if (!r.suppliers.length && !r.customers.length && !r.transactions.length && !r.items.length) return ctx.reply('Hech narsa topilmadi.');
+
+  for (const item of r.items) {
+    const kb = !item.isCash ? new InlineKeyboard().text("📄 Nakladnoy chekini ko'rish", `sup:v:${item.id}`) : undefined;
+    await ctx.reply(`🔍 *Topilgan Tovar:* ${item.productName}\n📦 *Oxirgi partiya:* ${formatDateShort(item.date)}\n🏢 *Kimdan olingan:* ${item.partyName}\n💰 *Kirim narxi:* ${item.unitPrice.toLocaleString('uz-UZ')} UZS\n📊 *Kiritilgan miqdor:* ${item.quantity}`, { parse_mode: 'Markdown', reply_markup: kb });
   }
 
-  const results = await SearchService.multiSearch(query);
+  const kb = new InlineKeyboard();
+  const sec = (title: string, list: SearchResult[], btn: (x: SearchResult) => [string, string]) => {
+    if (!list.length) return `${title}\n(Natija yo'q)\n\n`;
+    list.forEach(x => kb.text(...btn(x)));
+    kb.row();
+    return `${title}\n${list.map(x => `• ${x.name} (${x.amountText})`).join('\n')}\n\n`;
+  };
 
-  const hasAnyResults = results.suppliers.length > 0 || results.customers.length > 0 || results.transactions.length > 0 || results.items.length > 0;
-
-  if (!hasAnyResults) {
-    return ctx.reply("Hech narsa topilmadi.");
-  }
-
-  if (results.items && results.items.length > 0) {
-    for (const item of results.items) {
-      let itemText = `🔍 *Topilgan Tovar:* ${item.productName}\n`;
-      itemText += `📦 *Oxirgi partiya:* ${new Intl.DateTimeFormat('uz-UZ', { dateStyle: 'short' }).format(item.date)}\n`;
-      itemText += `🏢 *Kimdan olingan:* ${item.partyName}\n`;
-      itemText += `💰 *Kirim narxi:* ${item.unitPrice.toLocaleString('uz-UZ')} UZS\n`;
-      itemText += `📊 *Kiritilgan miqdor:* ${item.quantity}\n`;
-
-      const itemKb = new InlineKeyboard();
-      if (!item.isCash) {
-        itemKb.text("📄 Nakladnoy chekini ko'rish", `sup:v:${item.id}`);
-      }
-      
-      await ctx.reply(itemText, { parse_mode: 'Markdown', reply_markup: itemKb.inline_keyboard.length > 0 ? itemKb : undefined });
-    }
-  }
-
-  let text = `🔍 *Boshqa qidiruv natijalari ("${query}"):*\n\n`;
-  const keyboard = new InlineKeyboard();
-
-  text += `🏢 *Ta'minotchilar:*\n`;
-  if (results.suppliers.length > 0) {
-    results.suppliers.forEach(r => {
-      text += `• ${r.name} (${r.amountText})\n`;
-      keyboard.text(`🏢 ${r.name.substring(0, 10)}`, `sup:v:${r.id}`);
-    });
-    keyboard.row();
-  } else {
-    text += `(Natija yo'q)\n`;
-  }
-  text += `\n`;
-
-  text += `👥 *Nasiyadorlar:*\n`;
-  if (results.customers.length > 0) {
-    results.customers.forEach(r => {
-      text += `• ${r.name} (${r.amountText})\n`;
-      keyboard.text(`👤 ${r.name.substring(0, 10)}`, `debt:v:${r.id}`);
-    });
-    keyboard.row();
-  } else {
-    text += `(Natija yo'q)\n`;
-  }
-  text += `\n`;
-
-  text += `🧾 *Oxirgi amaliyotlar / Cheklar:*\n`;
-  if (results.transactions.length > 0) {
-    results.transactions.forEach(r => {
-      text += `• ${r.name} (${r.amountText})\n`;
-      keyboard.text(`🧾 Ch: ${r.name.split('—')[1]?.substring(0, 8) || 'chek'}`, `sup:v:${r.id}`);
-    });
-    keyboard.row();
-  } else {
-    text += `(Natija yo'q)\n`;
-  }
+  const text = `🔍 *Boshqa qidiruv natijalari ("${query}"):*\n\n` +
+    sec("🏢 *Ta'minotchilar:*", r.suppliers, x => [`🏢 ${x.name.substring(0, 10)}`, `sup:v:${x.id}`]) +
+    sec('👥 *Nasiyadorlar:*', r.customers, x => [`👤 ${x.name.substring(0, 10)}`, `debt:v:${x.id}`]) +
+    sec('🧾 *Oxirgi amaliyotlar / Cheklar:*', r.transactions, x => [`🧾 Ch: ${x.name.split('—')[1]?.substring(0, 8) || 'chek'}`, `sup:v:${x.id}`]);
 
   ctx.session.step = undefined;
-  await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: keyboard });
+  await ctx.reply(text.trimEnd(), { parse_mode: 'Markdown', reply_markup: kb });
 });

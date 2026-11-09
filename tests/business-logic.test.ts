@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { parseShorthandTx } from '../src/bot/handlers/voice';
 
 describe('Customer Debt FIFO Repayment Logic', () => {
   interface MockDebt {
@@ -171,5 +172,72 @@ describe('Invoice Discount Calculation Logic', () => {
     const res = computeDiscount(500000, '120%');
     expect(res.discountAmount).toBe(500000);
     expect(res.netTotal).toBe(0);
+  });
+});
+
+describe('Shorthand Transaction Parsing Logic (Bozor slengi)', () => {
+  it('correctly parses negative payment prefix: -1.000.000 Milterdan', () => {
+    const res = parseShorthandTx('-1.000.000 Milterdan');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(1000000);
+    expect(res?.name).toBe('Milter');
+    expect(res?.currency).toBe('UZS');
+  });
+
+  it('correctly parses negative payment suffix: Milter -1.000.000', () => {
+    const res = parseShorthandTx('Milter -1.000.000');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(1000000);
+    expect(res?.name).toBe('Milter');
+  });
+
+  it('correctly parses positive incoming goods: +500 000 Milter', () => {
+    const res = parseShorthandTx('+500 000 Milter');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('INCOMING_GOODS');
+    expect(res?.amount).toBe(500000);
+    expect(res?.name).toBe('Milter');
+  });
+
+  it('correctly parses colloquial million: -1.5 mln Milterdan', () => {
+    const res = parseShorthandTx('-1.5 mln Milterdan');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(1500000);
+    expect(res?.name).toBe('Milter');
+  });
+
+  it('correctly parses USD shorthand: -200$ Akmal', () => {
+    const res = parseShorthandTx('-200$ Akmal');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(200);
+    expect(res?.currency).toBe('USD');
+    expect(res?.name).toBe('Akmal');
+  });
+
+  it('ignores debt inquiries like "Milterdan qancha qarzim bor?"', () => {
+    const res = parseShorthandTx('Milterdan qancha qarzim bor?');
+    expect(res).toBeNull();
+  });
+
+  it('correctly parses natural Uzbek deduction phrase: Azamatdan 500 ming ayir', () => {
+    const res = parseShorthandTx('Azamatdan 500 ming ayir');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(500000);
+    expect(res?.name).toBe('Azamat');
+    expect(res?.currency).toBe('UZS');
+  });
+
+  it('correctly parses natural Uzbek deduction phrase: Milterdan 1.5 mln ayirdim', () => {
+    const res = parseShorthandTx('Milterdan 1.5 mln ayirdim');
+    expect(res).not.toBeNull();
+    expect(res?.txType).toBe('PAYMENT');
+    expect(res?.amount).toBe(1500000);
+    expect(res?.name).toBe('Milter');
+    expect(res?.currency).toBe('UZS');
   });
 });

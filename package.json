@@ -2,11 +2,12 @@
   "name": "dookonchi-ai-core",
   "version": "1.0.0",
   "description": "Smart AI Yordamchi Bot",
-  "main": "src/bot/index.ts",
+  "main": "dist/bot/index.js",
   "scripts": {
-    "start": "npx tsx src/bot/index.ts",
+    "start": "node dist/bot/index.js",
     "dev": "npx tsx watch src/bot/index.ts",
     "build": "tsc",
+    "postinstall": "prisma generate",
     "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push"

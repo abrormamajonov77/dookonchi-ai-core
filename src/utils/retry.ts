@@ -1,30 +1,16 @@
-export async function withTimeout<T>(promise: Promise<T>, ms: number = 5000): Promise<T> {
-  let timeoutId: NodeJS.Timeout;
-  const timeoutPromise = new Promise<T>((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error('OPERATION_TIMEOUT')), ms);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+export async function withTimeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
+  let id: NodeJS.Timeout;
+  const timeout = new Promise<T>((_, rej) => { id = setTimeout(() => rej(new Error('OPERATION_TIMEOUT')), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(id!));
 }
 
-export async function withRetry<T>(
-  operation: () => Promise<T>,
-  maxRetries = 3,
-  baseDelayMs = 1000,
-  timeoutMs = 5000
-): Promise<T> {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      return await withTimeout(operation(), timeoutMs);
-    } catch (error) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        throw error;
-      }
-      const delay = baseDelayMs * Math.pow(2, attempt - 1);
-      console.warn(`[Retry] Operation failed, retrying in ${delay}ms (attempt ${attempt}/${maxRetries})...`, error);
-      await new Promise(resolve => setTimeout(resolve, delay));
+export async function withRetry<T>(op: () => Promise<T>, maxRetries = 3, baseDelayMs = 1000, timeoutMs = 5000): Promise<T> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try { return await withTimeout(op(), timeoutMs); }
+    catch (err) {
+      if (attempt >= maxRetries) throw err;
+      await new Promise(r => setTimeout(r, baseDelayMs * 2 ** (attempt - 1)));
     }
   }
-  throw new Error("Unreachable");
+  throw new Error('Unreachable');
 }

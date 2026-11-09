@@ -1,45 +1,17 @@
 export function levenshteinDistance(a: string, b: string): number {
-  const matrix = [];
-
-  // increment along the first column of each row
-  let i;
-  for (i = 0; i <= b.length; i++) {
-    matrix[i] = [i];
-  }
-
-  // increment each column in the first row
-  let j;
-  for (j = 0; j <= a.length; j++) {
-    matrix[0][j] = j;
-  }
-
-  // Fill in the rest of the matrix
-  for (i = 1; i <= b.length; i++) {
-    for (j = 1; j <= a.length; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, // substitution
-                                Math.min(matrix[i][j - 1] + 1, // insertion
-                                         matrix[i - 1][j] + 1)); // deletion
-      }
-    }
-  }
-
-  return matrix[b.length][a.length];
+  const m = Array.from({ length: b.length + 1 }, (_, i) => [i]);
+  for (let j = 0; j <= a.length; j++) m[0][j] = j;
+  for (let i = 1; i <= b.length; i++)
+    for (let j = 1; j <= a.length; j++)
+      m[i][j] = b[i - 1] === a[j - 1] ? m[i - 1][j - 1] : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
+  return m[b.length][a.length];
 }
 
 export function fuzzyMatch(input: string, choices: string[], threshold = 3): string {
-  let bestMatch = input;
-  let minDistance = Infinity;
-
-  for (const choice of choices) {
-    const distance = levenshteinDistance(input.toLowerCase(), choice.toLowerCase());
-    if (distance < minDistance) {
-      minDistance = distance;
-      bestMatch = choice;
-    }
+  let best = input, min = Infinity;
+  for (const c of choices) {
+    const d = levenshteinDistance(input.toLowerCase(), c.toLowerCase());
+    if (d < min) [min, best] = [d, c];
   }
-
-  return minDistance <= threshold ? bestMatch : input;
+  return min <= threshold ? best : input;
 }

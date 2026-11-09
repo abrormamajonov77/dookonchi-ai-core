@@ -1,105 +1,85 @@
 import cron from 'node-cron';
+import { Bot } from 'grammy';
 import { prisma } from '../database/prisma';
 import { env } from '../config/env';
-import { Bot } from 'grammy';
 import { MyContext } from '../bot/context';
 import { logger } from '../config/logger';
-import { formatMoney } from '../utils/formatters';
+import { formatMoney, getToday } from '../utils/formatters';
+import { ReportService } from './report.service';
+import { getReportKeyboard } from '../bot/handlers/report';
 
 export function startCronJobs(bot: Bot<MyContext>) {
-  const TIMEZONE = 'Asia/Tashkent';
+  const opts = { timezone: 'Asia/Tashkent' };
+  const notifyOwner = (text: string, replyMarkup?: any) =>
+    bot.api.sendMessage(env.OWNER_TELEGRAM_ID, text, {
+      parse_mode: 'Markdown',
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+    });
 
-  // 09:00 - Pending debts > 7 days notification
+  // Har dushanba ertalab soat 08:00 da — O'tgan haftaning to'liq moliyaviy hisoboti
+  cron.schedule('0 8 * * 1', async () => {
+    logger.info('Running cron: 08:00 Monday Weekly Financial Report');
+    try {
+      const reportText = await ReportService.generateReport('last_week');
+      await notifyOwner(reportText, getReportKeyboard('last_week'));
+    } catch (error) {
+      logger.error({ error }, 'Failed to send weekly financial report');
+    }
+  }, opts);
+
+  // Har oyning 1-sanasida ertalab soat 08:00 da — O'tgan oyning to'liq moliyaviy hisoboti
+  cron.schedule('0 8 1 * *', async () => {
+    logger.info('Running cron: 08:00 Monthly Financial Report');
+    try {
+      const reportText = await ReportService.generateReport('last_month');
+      await notifyOwner(reportText, getReportKeyboard('last_month'));
+    } catch (error) {
+      logger.error({ error }, 'Failed to send monthly financial report');
+    }
+  }, opts);
+
+  // Har kuni soat 09:00 da — 7 kundan oshgan eski nasiyalar eslatmasi
   cron.schedule('0 9 * * *', async () => {
     logger.info('Running cron: 09:00 Pending Debts');
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    const oldDebts = await prisma.customerDebt.findMany({
-      where: { 
-        status: { in: ['PENDING', 'PARTIALLY_PAID'] },
-        createdAt: { lte: sevenDaysAgo }
-      }
-    });
-
-    if (oldDebts.length > 0) {
-      let text = `⚠️ **Eski Nasiyalar (7 kundan oshgan)**\n\n`;
-      oldDebts.forEach((d: any) => {
-        text += `- ${d.customerName}: ${formatMoney(Number(d.amount) - Number(d.paidAmount), d.currency)}\n`;
+    try {
+      const oldDebts = await prisma.customerDebt.findMany({
+        where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] }, createdAt: { lte: new Date(Date.now() - 7 * 86400000) } }
       });
-      await bot.api.sendMessage(env.OWNER_TELEGRAM_ID, text, { parse_mode: 'Markdown' });
+      if (oldDebts.length) {
+        const lines = oldDebts.map(d => `- ${d.customerName}: ${formatMoney(Number(d.amount) - Number(d.paidAmount), d.currency)}`);
+        await notifyOwner(`⚠️ **Eski Nasiyalar (7 kundan oshgan)**\n\n${lines.join('\n')}`);
+      }
+    } catch (error) {
+      logger.error({ error }, 'Failed to send pending debts cron');
     }
-  }, { timezone: TIMEZONE });
+  }, opts);
 
-  // 20:00 - Reminder to submit Z-Report
+  // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma
   cron.schedule('0 20 * * *', async () => {
     logger.info('Running cron: 20:00 Z-Report Reminder');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const register = await prisma.dailyRegister.findUnique({
-      where: { date: today }
-    });
-
-    if (!register || !register.isClosed) {
-      // Notify all sellers and owner
-      const users = await prisma.user.findMany();
-      for (const u of users) {
-        try {
-          await bot.api.sendMessage(Number(u.telegramId), "⏰ Diqqat! Bugungi kassa hali yopilmagan. Iltimos Z-Hisobotni topshiring.");
-        } catch (e) {}
+    try {
+      const register = await prisma.dailyRegister.findUnique({ where: { date: getToday() } });
+      if (!register?.isClosed) {
+        for (const u of await prisma.user.findMany()) {
+          await bot.api.sendMessage(Number(u.telegramId), '⏰ Diqqat! Bugungi kassa hali yopilmagan. Iltimos Z-Hisobotni topshiring.').catch(() => { });
+        }
       }
+    } catch (error) {
+      logger.error({ error }, 'Failed to send Z-Report reminder');
     }
-  }, { timezone: TIMEZONE });
+  }, opts);
 
-  // 21:00 - Automated summary Z-Report calculation
+  // Har kuni soat 21:00 da — Kunlik yakuniy hisobot
   cron.schedule('0 21 * * *', async () => {
     logger.info('Running cron: 21:00 Daily Summary');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const register = await prisma.dailyRegister.findUnique({
-      where: { date: today }
-    });
-
-    let text = `📊 **Kunlik Yakuniy Hisobot**\n\n`;
-    if (register) {
-      text += `Naqd: ${formatMoney(register.cashUzs)}\n`;
-      text += `Click: ${formatMoney(register.clickAmount)}\n`;
-      text += `Terminal: ${formatMoney(register.terminalAmount)}\n`;
-      text += `Kassa Yopilgan: ${register.isClosed ? 'HA' : 'YO\'Q'}\n`;
-    } else {
-      text += `Bugun kassa ma'lumotlari kiritilmadi!\n`;
+    try {
+      const r = await prisma.dailyRegister.findUnique({ where: { date: getToday() } });
+      const body = r
+        ? `Naqd: ${formatMoney(r.cashUzs)}\nClick: ${formatMoney(r.clickAmount)}\nTerminal: ${formatMoney(r.terminalAmount)}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n`
+        : "Bugun kassa ma'lumotlari kiritilmadi!\n";
+      await notifyOwner(`📊 **Kunlik Yakuniy Hisobot**\n\n${body}`);
+    } catch (error) {
+      logger.error({ error }, 'Failed to send daily summary');
     }
-
-    await bot.api.sendMessage(env.OWNER_TELEGRAM_ID, text, { parse_mode: 'Markdown' });
-  }, { timezone: TIMEZONE });
-
-  // 1st of Month 08:00 - Monthly expenses report
-  cron.schedule('0 8 1 * *', async () => {
-    logger.info('Running cron: Monthly expenses');
-    const today = new Date();
-    const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0, 23, 59, 59);
-
-    const expenses = await prisma.expense.findMany({
-      where: { createdAt: { gte: startOfLastMonth, lte: endOfLastMonth } }
-    });
-
-    let total = 0;
-    const byCategory: Record<string, number> = {};
-    for (const exp of expenses) {
-      const amt = Number(exp.amount);
-      total += amt;
-      byCategory[exp.category] = (byCategory[exp.category] || 0) + amt;
-    }
-
-    let text = `📅 **O'tgan oy xarajatlari:**\n\n`;
-    for (const [cat, sum] of Object.entries(byCategory)) {
-      text += `🔹 ${cat}: ${formatMoney(sum)}\n`;
-    }
-    text += `\n**Jami: ${formatMoney(total)}**`;
-
-    await bot.api.sendMessage(env.OWNER_TELEGRAM_ID, text, { parse_mode: 'Markdown' });
-  }, { timezone: TIMEZONE });
+  }, opts);
 }

@@ -1,18 +1,12 @@
 import { GoogleGenAI } from '@google/genai';
+import { z } from 'zod';
 import { env } from '../config/env';
 import { withRetry } from '../utils/retry';
-import { z } from 'zod';
 import { logger } from '../config/logger';
 
 const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
-const MODEL = 'gemini-3.8-flash';
 
-export const InvoiceItemSchema = z.object({
-  productName: z.string(),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  totalPrice: z.number()
-});
+export const InvoiceItemSchema = z.object({ productName: z.string(), quantity: z.number(), unitPrice: z.number(), totalPrice: z.number() });
 
 export const InvoiceSchema = z.object({
   total_amount: z.number().default(0),
@@ -26,7 +20,7 @@ export const InvoiceSchema = z.object({
   netTotal: z.number().optional().nullable(),
   itemsCount: z.number().optional().nullable(),
   sampleItems: z.array(z.string()).optional().nullable(),
-  items: z.any().optional().nullable(), // Can be string[] or InvoiceItemSchema[]
+  items: z.any().optional().nullable(),
   isCaptionOverride: z.boolean().optional(),
   isCashOverride: z.boolean().optional(),
   exactSupplierId: z.string().optional().nullable(),
@@ -35,53 +29,72 @@ export const InvoiceSchema = z.object({
 
 export const VoiceIntentSchema = z.object({
   intent: z.enum(['ADD_EXPENSE', 'ADD_SUPPLIER_TX', 'ADD_CUSTOMER_DEBT', 'ADD_CASH_TX', 'SEARCH_PRODUCT', 'GET_DEBT_INFO', 'GENERAL_CHAT', 'UNKNOWN']),
-  txType: z.enum(['INCOMING_GOODS', 'PAYMENT']).optional().nullable().describe('Only required if intent is ADD_SUPPLIER_TX'),
+  txType: z.enum(['INCOMING_GOODS', 'PAYMENT']).optional().nullable(),
   amount: z.number().optional().nullable(),
   currency: z.enum(['UZS', 'USD']).nullable().optional().default('UZS'),
-  name: z.string().optional().nullable().describe('Supplier name, Customer name, or Product name depending on intent'),
-  category: z.string().optional().nullable().describe('Expense category if ADD_EXPENSE'),
+  name: z.string().optional().nullable(),
+  category: z.string().optional().nullable(),
   comment: z.string().optional().nullable(),
-  replyText: z.string().optional().nullable().describe('The free-form conversational AI response for GENERAL_CHAT intent'),
+  replyText: z.string().optional().nullable(),
 });
 
-import { fuzzyMatch } from '../utils/fuzzy';
-
-const KNOWN_PRODUCTS = [
-  "Donya", "Yarkoye", "Яркое", "Zateya", "Shedevr", "Oltin Kalit", "Shakar", "Un", 
-  "Ogorod", "Огород", "Bondtchel", "Бонджел", "Grand", "Halaca", "Pishloq", "Kolbasa"
-];
-
-const VISION_TIMEOUT_MS = 60000;
-const TEXT_TIMEOUT_MS = 10000;
+const INTENT_RULES = `Maqsadlar (intent):
+- ADD_EXPENSE: Xarajat kiritish (masalan: "Ijaraga 500 dollar berdim", "Elektrga 200 ming so'm to'ladim").
+- ADD_SUPPLIER_TX: Ta'minotchi bilan oldi-berdi amaliyoti (qarzga).
+  * Agar "Yuk keldi / yuk chiqdi / yuk oldik" yoki musbat amaliyot bo'lsa (masalan: "+1 000 000 Milter", "Milter +500 ming", "Milterdan 500 minglik yuk keldi") -> txType="INCOMING_GOODS".
+  * Agar "Pul berdik / to'ladik / to'lov qildim / qarzdan ayir / ayirdim" yoki manfiy amaliyot bo'lsa (masalan: "-1.000.000 Milterdan", "Milter -1.000.000", "-500 ming Akmal", "Milterdan 1 mln to'lov", "Azamatdan 500 ming ayir") -> txType="PAYMENT". Qarzdan ayirish amali!
+  MUHIM: "-1.000.000 Milterdan" yoki "Milter -1 mln" kabi yozuvlar qarz so'rash EMAS, balki qarzdan ayirish (to'lov / PAYMENT) amaliyotidir!
+- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim", "Naqd Nehir 200 ming"). MUHIM: Agar matnda "naqd" so'zi bo'lsa, uni albatta shu turkumga kirit.
+- ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi (masalan: "Rustam 50 ming so'mlik narsa oldi, yozib qo'y", "Akmal nasiya 100 ming").
+- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?").
+- GET_DEBT_INFO: FAQAT va FAQAT qarz miqdorini SO'RASH (masalan: "Milterdan qancha qarzim bor?", "Milter qarzi qancha?", "Akmalning qarzi qancha bo'ldi?"). Agar xabarda aniq amaliyot summasi yoki -/+ belgisi bo'lsa (masalan "-1 000 000"), bu qarz so'rash EMAS!
+- GENERAL_CHAT: Yuqoridagilardan tashqari erkin savdo, maslahat, yordam so'ralganda. Bunday holatda "replyText" ga o'zbek tilida to'liq maslahatchi sifatida professional javobni yoz.
+- UNKNOWN: Agar butunlay tushunarsiz yoki aloqasiz bo'lsa.
+Summalarni (amount) doim MUSBAT (Math.abs) qilib raqamda yoz. Valyutani (currency) UZS yoki USD qilib belgil.
+Ism/nomni (name) kirit (ta'minotchi, mijoz yoki tovar nomi). Javob faqat JSON formatda bo'lsin.`;
 
 export async function generateContentWithFallback(
   aiCall: (modelName: string) => Promise<any>,
-  models: string[] = ['gemini-3.8-flash']
+  models: string[] = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']
 ) {
   let lastError: any = null;
-
   for (const model of models) {
     for (let attempt = 1; attempt <= 2; attempt++) {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        return await aiCall(model);
+        return await Promise.race([
+          aiCall(model),
+          new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`Model ${model} request timed out (12s)`)), 12000); })
+        ]);
       } catch (error: any) {
         lastError = error;
-        const isBusy = error?.status === 503 || error?.message?.includes('503') || error?.status === 429 || error?.message?.includes('429');
-        if (isBusy && attempt < 2) {
-          logger.warn(`Model ${model} is busy (503/429), retrying attempt ${attempt + 1}...`);
-          await new Promise(res => setTimeout(res, 1500));
+        const isRetryable = [503, 429].includes(error?.status) || /503|429|timed out|fetch failed/i.test(error?.message || '');
+        if (isRetryable && attempt < 2) {
+          logger.warn(`Model ${model} busy/slow (${error?.message?.slice(0, 60)}), retrying...`);
+          await new Promise(res => setTimeout(res, 800));
           continue;
         }
-        logger.warn(`Model ${model} failed, switching to next model if available. Error: ${error?.message}`);
+        logger.warn(`Model ${model} failed: ${error?.message?.slice(0, 120)}`);
         break;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     }
   }
   throw lastError;
 }
 
+const askJson = async (parts: any[], maxOutputTokens?: number, models?: string[]) => {
+  const res = await generateContentWithFallback(
+    model => ai.models.generateContent({ model, contents: [{ role: 'user', parts }], config: { responseMimeType: 'application/json', temperature: 0.1, ...(maxOutputTokens ? { maxOutputTokens } : {}) } }),
+    models
+  );
+  if (!res.text) throw new Error('Empty response from Gemini');
+  return JSON.parse(res.text);
+};
+
 export class AiService {
-  static async parseInvoiceImage(imageBuffer: Buffer, mimeType: string = 'image/jpeg', caption?: string): Promise<z.infer<typeof InvoiceSchema>> {
+  static async parseInvoiceImage(imageBuffer: Buffer, mimeType = 'image/jpeg', caption?: string): Promise<z.infer<typeof InvoiceSchema>> {
     return withRetry(async () => {
       logger.info('Sending invoice image to Gemini for Pure OCR + Target Extraction');
       const textPrompt = `Sen tezyurar va o'ta aniq hujjat skanerisansan (Pure OCR Mode).
@@ -104,43 +117,15 @@ Javobni FAQAT quyidagi JSON formatida qaytar:
   "invoiceNo": "12345"
 }`;
 
-      const response = await generateContentWithFallback(async (modelName) => {
-        return await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: textPrompt },
-                { inlineData: { data: imageBuffer.toString('base64'), mimeType } }
-              ]
-            }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-            maxOutputTokens: 8192,
-          }
-        });
-      });
-
-      const text = response.text;
-      if (!text) throw new Error('Empty response from Gemini');
-      
-      const parsed = JSON.parse(text);
-      
+      const parsed = await askJson([{ text: textPrompt }, { inlineData: { data: imageBuffer.toString('base64'), mimeType } }], 8192, ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
       parsed.total_amount = Number(parsed.total_amount ?? parsed.totalOnPaper ?? parsed.grossTotal ?? 0);
       parsed.discount = Number(parsed.discount ?? parsed.discountOnPaper ?? parsed.discountAmount ?? 0);
       parsed.table_text = String(parsed.table_text ?? '');
-      
-      // Adapt to legacy internal handler formats
-      parsed.supplierName = parsed.supplier || parsed.supplierName || "Noma'lum";
-      if (caption) parsed.supplierName = caption;
+      parsed.supplierName = caption || parsed.supplier || parsed.supplierName || "Noma'lum";
       parsed.discountAmount = parsed.discount;
       parsed.grossTotal = parsed.total_amount;
       parsed.netTotal = parsed.total_amount - parsed.discount;
-      
-      // Extract sample items preview from table_text
+
       const tableLines = parsed.table_text.split('\n').filter((l: string) => l.trim().startsWith('|') && !l.includes('---'));
       const dataRows = tableLines.length > 1 ? tableLines.slice(1) : tableLines;
       parsed.sampleItems = dataRows.slice(0, 4).map((row: string) => {
@@ -148,155 +133,43 @@ Javobni FAQAT quyidagi JSON formatida qaytar:
         return cols[1] || cols[0] || row;
       });
       parsed.itemsCount = dataRows.length > 0 ? dataRows.length : 1;
-      
+
       return InvoiceSchema.parse(parsed);
-    }, 2, 1000, VISION_TIMEOUT_MS);
+    }, 2, 1000, 90000);
   }
 
   static async parseInvoiceText(invoiceText: string): Promise<z.infer<typeof InvoiceSchema>> {
     return withRetry(async () => {
-      const response = await generateContentWithFallback(async (modelName) => {
-        return await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Sen do'kon yordamchisisan. Foydalanuvchi quyidagi nakladnoy matnini tahrirlab yubordi. Undan ta'minotchi nomi, nakladnoy raqami va barcha tovarlarni, ularning sonini, donasi narxini va umumiy narxini JSON formatda ajratib ol.
+      const prompt = `Sen do'kon yordamchisisan. Foydalanuvchi quyidagi nakladnoy matnini tahrirlab yubordi. Undan ta'minotchi nomi, nakladnoy raqami va barcha tovarlarni, ularning sonini, donasi narxini va umumiy narxini JSON formatda ajratib ol.
 Qoida: Har bir qatorda quantity * unitPrice == totalPrice bo'lishi shart. Agar matnda totalPrice berilmagan bo'lsa, o'zing hisobla.
+Javob faqat quyidagi JSON formatida bo'lsin:
+{"supplierName":"MCHJ Nomi","invoiceNo":"12345","total_amount":50000,"discount":0,"table_text":"| Tovar | Soni | Narxi | Jami |","items":[{"productName":"Tovar nomi","quantity":10,"unitPrice":5000,"totalPrice":50000}]}
+Matn: "${invoiceText}"`;
 
-Javob faqat va faqat quyidagi JSON formatida bo'lsin:
-{
-  "supplierName": "MCHJ Nomi",
-  "invoiceNo": "12345",
-  "total_amount": 50000,
-  "discount": 0,
-  "table_text": "| Tovar | Soni | Narxi | Jami |",
-  "items": [
-    { "productName": "Tovar nomi", "quantity": 10, "unitPrice": 5000, "totalPrice": 50000 }
-  ]
-}
-
-Matn:
-"${invoiceText}"`
-                }
-              ]
-            }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-            maxOutputTokens: 8192,
-          }
-        });
-      });
-
-      const text = response.text;
-      if (!text) throw new Error('Empty response from Gemini');
-      
-      const parsed = JSON.parse(text);
-      parsed.total_amount = Number(parsed.total_amount ?? parsed.grossTotal ?? 0);
-      parsed.discount = Number(parsed.discount ?? parsed.discountAmount ?? 0);
-      parsed.grossTotal = parsed.total_amount;
-      parsed.discountAmount = parsed.discount;
+      const parsed = await askJson([{ text: prompt }], 8192, ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']);
+      parsed.grossTotal = parsed.total_amount = Number(parsed.total_amount ?? parsed.grossTotal ?? 0);
+      parsed.discountAmount = parsed.discount = Number(parsed.discount ?? parsed.discountAmount ?? 0);
       parsed.table_text = String(parsed.table_text ?? '');
       return InvoiceSchema.parse(parsed);
-    }, 2, 1000, TEXT_TIMEOUT_MS);
+    }, 2, 1000, 30000);
   }
 
-  static async parseVoiceNote(audioBuffer: Buffer, mimeType: string = 'audio/ogg'): Promise<z.infer<typeof VoiceIntentSchema>> {
+  static async parseVoiceNote(audioBuffer: Buffer, mimeType = 'audio/ogg'): Promise<z.infer<typeof VoiceIntentSchema>> {
     return withRetry(async () => {
       logger.info('Sending voice note to Gemini for analysis');
-      const response = await generateContentWithFallback(async (modelName) => {
-        return await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Sen do'kon yordamchisisan. Ovozli xabarni eshitib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.
-Maqsadlar (intent):
-- ADD_EXPENSE: Xarajat kiritish (masalan: "Ijaraga 500 dollar berdim", "Elektrga 200 ming so'm to'ladim").
-- ADD_SUPPLIER_TX: Ta'minotchi bilan oldi-berdi amaliyoti (qarzga). Agar "Yuk keldi / yuk chiqdi / yuk oldik" deyilgan bo'lsa txType="INCOMING_GOODS" bo'ladi. Agar "Pul berdik / to'ladik / to'lov qildim" deyilsa txType="PAYMENT" bo'ladi.
-- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim", "Naqd Nehir 200 ming"). MUHIM: Agar matnda "naqd" so'zi bo'lsa, uni albatta shu turkumga kirit.
-- ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi (masalan: "Rustam 50 ming so'mlik narsa oldi, yozib qo'y").
-- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?").
-- GET_DEBT_INFO: Qarz miqdorini so'rash (masalan: "Milterdan qancha qarzim bor?", "Akmalning qarzi qancha?").
-- GENERAL_CHAT: Yuqoridagilardan tashqari erkin savdo, maslahat, yordam so'ralganda (masalan: "Qanday qilib savdoni ko'paytirsam bo'ladi?"). Bunday holatda "replyText" ga o'zbek tilida to'liq yordamchi sifatidagi javobni qaytar.
-- UNKNOWN: Agar butunlay tushunarsiz yoki xato bo'lsa.
-
-Summalarni (amount) raqamda yoz. Valyutani (currency) UZS yoki USD qilib belgil.
-Ism/nomni (name) kirit (ta'minotchi, mijoz yoki tovar nomi).
-Javob faqat JSON formatda bo'lsin.`
-                },
-                {
-                  inlineData: {
-                    data: audioBuffer.toString('base64'),
-                    mimeType
-                  }
-                }
-              ]
-            }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-          }
-        });
-      });
-
-      const text = response.text;
-      if (!text) throw new Error('Empty response from Gemini');
-      
-      const parsed = JSON.parse(text);
-      return VoiceIntentSchema.parse(parsed);
-    }, 2, 1000, TEXT_TIMEOUT_MS);
+      return VoiceIntentSchema.parse(await askJson([
+        { text: `Sen do'kon yordamchisisan. Ovozli xabarni eshitib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.\n${INTENT_RULES}` },
+        { inlineData: { data: audioBuffer.toString('base64'), mimeType } }
+      ], undefined, ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash']));
+    }, 2, 1000, 30000);
   }
 
   static async parseTextIntent(textMessage: string): Promise<z.infer<typeof VoiceIntentSchema>> {
     return withRetry(async () => {
       logger.info('Sending text message to Gemini for intent analysis');
-      const response = await generateContentWithFallback(async (modelName) => {
-        return await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Sen do'kon yordamchisisan. Foydalanuvchining yozgan xabarini o'qib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.
-Maqsadlar (intent):
-- ADD_EXPENSE: Xarajat kiritish (masalan: "Ijaraga 500 dollar berdim", "Elektrga 200 ming so'm to'ladim").
-- ADD_SUPPLIER_TX: Ta'minotchi bilan oldi-berdi amaliyoti (qarzga). Agar "Yuk keldi / yuk chiqdi / yuk oldik" deyilgan bo'lsa txType="INCOMING_GOODS" bo'ladi. Agar "Pul berdik / to'ladik / to'lov qildim" deyilsa txType="PAYMENT" bo'ladi.
-- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim", "Naqd Nehir 200 ming"). MUHIM: Agar matnda "naqd" so'zi bo'lsa, uni albatta shu turkumga kirit.
-- ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi (masalan: "Rustam 50 ming so'mlik narsa oldi, yozib qo'y").
-- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?").
-- GET_DEBT_INFO: Qarz miqdorini so'rash (masalan: "Milterdan qancha qarzim bor?", "Akmalning qarzi qancha?").
-- GENERAL_CHAT: Yuqoridagilardan tashqari erkin savdo, maslahat, yordam so'ralganda. Bunday holatda "replyText" ga o'zbek tilida to'liq maslahatchi sifatida professional javobni yoz.
-- UNKNOWN: Agar butunlay tushunarsiz yoki aloqasiz bo'lsa.
-
-Summalarni (amount) raqamda yoz. Valyutani (currency) UZS yoki USD qilib belgil.
-Ism/nomni (name) kirit (ta'minotchi, mijoz yoki tovar nomi).
-Javob faqat JSON formatda bo'lsin.
-Xabar matni: "${textMessage}"`
-                }
-              ]
-            }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            temperature: 0.1,
-          }
-        });
-      });
-
-      const text = response.text;
-      if (!text) throw new Error('Empty response from Gemini');
-      
-      const parsed = JSON.parse(text);
-      return VoiceIntentSchema.parse(parsed);
-    }, 2, 1000, TEXT_TIMEOUT_MS);
+      return VoiceIntentSchema.parse(await askJson([
+        { text: `Sen do'kon yordamchisisan. Foydalanuvchining yozgan xabarini o'qib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.\n${INTENT_RULES}\nXabar matni: "${textMessage}"` }
+      ], undefined, ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash']));
+    }, 2, 1000, 30000);
   }
 }

@@ -1,6 +1,6 @@
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
 
@@ -47,51 +47,53 @@ model User {
 }
 
 model Supplier {
-  id          String            @id @default(uuid())
-  name        String            @unique
-  phone       String?
-  debtUzs     Decimal           @default(0) @db.Decimal(18, 2)
-  debtUsd     Decimal           @default(0) @db.Decimal(18, 2)
-  isActive    Boolean           @default(true)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  id        String   @id @default(uuid())
+  name      String   @unique
+  phone     String?
+  debtUzs   Decimal  @default(0) @db.Decimal(18, 2)
+  debtUsd   Decimal  @default(0) @db.Decimal(18, 2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  invoices    Invoice[]
-  payments    SupplierPayment[]
+  invoices     Invoice[]
+  payments     SupplierPayment[]
   transactions SupplierTransaction[]
 
   @@index([name])
+  @@index([isActive, debtUzs(sort: Desc)])
 }
 
 model Product {
-  id           String        @id @default(uuid())
+  id           String   @id @default(uuid())
   name         String
   searchTokens String
-  barcode      String?       @unique
-  lastPrice    Decimal       @default(0) @db.Decimal(18, 2)
-  currency     Currency      @default(UZS)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  barcode      String?  @unique
+  lastPrice    Decimal  @default(0) @db.Decimal(18, 2)
+  currency     Currency @default(UZS)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   invoiceItems InvoiceItem[]
 
   @@index([name])
   @@index([searchTokens])
+  @@index([updatedAt(sort: Desc)])
 }
 
 model Invoice {
-  id           String        @id @default(uuid())
-  invoiceNo    String?
-  supplierId   String
-  supplier     Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  totalAmount    Decimal       @db.Decimal(18, 2)
-  originalAmount Decimal?      @db.Decimal(18, 2)
-  discountAmount Decimal?      @db.Decimal(18, 2)
-  currency       Currency      @default(UZS)
+  id             String   @id @default(uuid())
+  invoiceNo      String?
+  supplierId     String
+  supplier       Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  totalAmount    Decimal  @db.Decimal(18, 2)
+  originalAmount Decimal? @db.Decimal(18, 2)
+  discountAmount Decimal? @db.Decimal(18, 2)
+  currency       Currency @default(UZS)
   rawImageUrl    String?
-  createdAt      DateTime      @default(now())
+  createdAt      DateTime @default(now())
 
-  items        InvoiceItem[]
+  items InvoiceItem[]
 
   @@index([supplierId])
   @@index([createdAt])
@@ -143,6 +145,8 @@ model SupplierTransaction {
 
   @@index([supplierId])
   @@index([date])
+  @@index([supplierId, date(sort: Desc)])
+  @@index([supplierId, type, date])
 }
 
 model CustomerDebt {
@@ -161,15 +165,17 @@ model CustomerDebt {
   @@index([customerName])
   @@index([dueDate])
   @@index([status])
+  @@index([status, customerName])
+  @@index([status, createdAt])
 }
 
 model Expense {
-  id        String          @id @default(uuid())
-  category  String          @default("Boshqa")
-  amount    Decimal         @db.Decimal(18, 2)
-  currency  Currency        @default(UZS)
+  id        String   @id @default(uuid())
+  category  String   @default("Boshqa")
+  amount    Decimal  @db.Decimal(18, 2)
+  currency  Currency @default(UZS)
   note      String?
-  createdAt DateTime        @default(now())
+  createdAt DateTime @default(now())
   createdBy String?
 
   @@index([createdAt])
@@ -226,13 +232,16 @@ model PendingAction {
 
   @@index([createdAt])
   @@index([userId])
+  @@index([userId, status, createdAt])
 }
 
 model ProcessedImage {
   id        String   @id @default(uuid())
   hash      String   @unique
   data      Json
+  fileHash  String?
+  fileId    String?
   createdAt DateTime @default(now())
-  
+
   @@index([hash])
 }
