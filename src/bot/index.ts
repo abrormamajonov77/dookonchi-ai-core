@@ -1,4 +1,7 @@
 import http from 'node:http';
+import { spawn, ChildProcess } from 'node:child_process';
+import path from 'node:path';
+import fs from 'node:fs';
 import { Bot, session, StorageAdapter } from 'grammy';
 import { run } from '@grammyjs/runner';
 import { PrismaAdapter } from '@grammyjs/storage-prisma';
@@ -59,7 +62,7 @@ const healthServer = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'alive',
-      service: 'dookonchi-ai-core',
+      services: ['dookonchi-ai-core', 'cryptohajmbot-watcher', 'cryptoavtoai-sniper'],
       uptime: Math.floor(process.uptime()),
       timestamp: new Date().toISOString()
     }));
@@ -72,6 +75,34 @@ const healthServer = http.createServer((req, res) => {
 healthServer.listen(PORT, '0.0.0.0', () => {
   logger.info(`🌐 Health-check server listening on port ${PORT} (/health)`);
 });
+
+// --- Spawn Python Crypto-Service in parallel ---
+let cryptoProcess: ChildProcess | null = null;
+const cryptoBotPath = path.resolve(process.cwd(), 'crypto-service', 'bot.py');
+
+if (fs.existsSync(cryptoBotPath) && (process.env.CRYPTO_SNIPER_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN)) {
+  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+  logger.info(`🚀 Starting Crypto Service (Python: ${cryptoBotPath})...`);
+  try {
+    cryptoProcess = spawn(pythonCmd, ['crypto-service/bot.py'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      stdio: ['ignore', 'inherit', 'inherit']
+    });
+
+    cryptoProcess.on('error', (err) => {
+      logger.error({ err }, 'Failed to start crypto python process');
+    });
+
+    cryptoProcess.on('exit', (code, signal) => {
+      logger.warn({ code, signal }, 'Crypto python process exited');
+    });
+  } catch (err) {
+    logger.error({ err }, 'Exception while spawning crypto service');
+  }
+} else {
+  logger.info('ℹ️ Crypto service skipped (no bot.py or tokens not set).');
+}
 
 // Self-Ping Keep-Alive (every 10 minutes)
 const keepAliveInterval = setInterval(async () => {
@@ -97,9 +128,16 @@ let isShuttingDown = false;
 const stopRunner = async (signal: string) => {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  logger.info({ signal }, 'Stopping bot and closing resources...');
+  logger.info({ signal }, 'Stopping bots and closing resources...');
   clearInterval(keepAliveInterval);
   healthServer.close();
+
+  if (cryptoProcess && !cryptoProcess.killed) {
+    try {
+      cryptoProcess.kill('SIGTERM');
+    } catch { }
+  }
+
   try {
     if (runner.isRunning()) await runner.stop();
     await bot.stop().catch(() => { });
