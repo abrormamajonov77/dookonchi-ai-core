@@ -21,24 +21,24 @@ load_dotenv()
 TOKEN = os.getenv('CRYPTO_SNIPER_BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
 
 # 2-Bot (Watcher)
-WATCHER_TOKEN = os.getenv('CRYPTO_WATCHER_BOT_TOKEN') or os.getenv('WATCHER_TOKEN') or os.getenv('BOT_TOKEN')
+WATCHER_TOKEN = os.getenv('CRYPTO_WATCHER_BOT_TOKEN') or os.getenv('WATCHER_TOKEN')
 GEMINI_KEY = os.getenv('GEMINI_API_KEY') or os.getenv('GEMINI_KEY')
 TARGET_CHANNEL = os.getenv('TARGET_CHANNEL', '@watcherguruuz')
 RSS_URL = os.getenv('RSS_URL', 'https://watcher.guru/news/feed')
 
-if not TOKEN or not WATCHER_TOKEN or not GEMINI_KEY:
-    print("XATOLIK: .env yoki Variables faylida tokenlar to'liq emas!")
-    print("Iltimos, TELEGRAM_BOT_TOKEN, BOT_TOKEN va GEMINI_KEY ni kiriting.")
+if not TOKEN:
+    print("XATOLIK: CRYPTO_SNIPER_BOT_TOKEN yoki TELEGRAM_BOT_TOKEN kiritilmagan!")
     exit(1)
 
-# Ikkita alohida bot yasaladi
+# Bot obyektlari
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
-watcher_bot = Bot(token=WATCHER_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+watcher_bot = Bot(token=WATCHER_TOKEN, default=DefaultBotProperties(parse_mode='HTML')) if WATCHER_TOKEN else None
 dp = Dispatcher()
 
 # --- WATCHER GURU BOT QISMI (YANGILIKLAR) ---
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash') if GEMINI_KEY else None
 
 def xotirani_oqish():
     if os.path.exists("oxirgi_yangilik.txt"):
@@ -57,6 +57,9 @@ def xotiraga_yozish(link):
         print(f"Xotiraga yozishda xatolik: {e}")
 
 async def check_news_loop():
+    if not watcher_bot or not model:
+        print("ℹ️ WatcherBot yoki Gemini kaliti sozlanmagan, yangiliklar moduli to'xtatildi.", flush=True)
+        return
     print("🚀 WatcherBot (2-motor) ishga tushdi! Sayt kuzatilmoqda...", flush=True)
     while True:
         try:
@@ -389,7 +392,10 @@ async def main():
     asyncio.create_task(scanner_loop())
     asyncio.create_task(background_checker())
     asyncio.create_task(weekly_reporter())
-    asyncio.create_task(check_news_loop())
+    if watcher_bot and model:
+        asyncio.create_task(check_news_loop())
+    else:
+        print("ℹ️ WatcherBot o'tkazib yuborildi (CRYPTO_WATCHER_BOT_TOKEN yoki GEMINI_API_KEY sozlanmagan).", flush=True)
     
     # Aiogram dp faqat SnayperBot (start komandasi) uchun ishlaydi
     await dp.start_polling(bot)

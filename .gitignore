@@ -21,6 +21,14 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+oxirgi_yangilik.txt
+users.json
+signals.json
+
 # System Files
 .DS_Store
 Thumbs.db

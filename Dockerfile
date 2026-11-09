@@ -31,5 +31,5 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-# Start both services: python in background, node in foreground
-CMD ["sh", "-c", "python3 crypto-service/bot.py & node dist/bot/index.js"]
+# Start service: Node.js supervises health-check server and crypto-service child process
+CMD ["node", "dist/bot/index.js"]
