@@ -1,38 +1,35 @@
 FROM node:20-bookworm-slim
 
-# Install Python3, pip and system tools
+WORKDIR /app
+
+# 1. System packages (python3, pip, git, build essentials for pandas_ta)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    build-essential \
+    python3-dev \
     openssl \
     ca-certificates \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-
-# 1. Install Node dependencies
+# 2. Install Node packages
 COPY package*.json ./
 COPY prisma ./prisma/
-RUN npm ci
+RUN npm install
 
-# 2. Install Python dependencies
+# 3. Install Python packages
 COPY crypto-service/requirements.txt ./crypto-service/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r crypto-service/requirements.txt
 
-# 3. Copy source files
-COPY tsconfig.json ./
-COPY src ./src/
+# 4. Copy precompiled dist and crypto-service
+COPY dist ./dist/
 COPY crypto-service ./crypto-service/
-
-# 4. Build TypeScript
-RUN npm run build
 
 ENV NODE_ENV=production
 ENV PORT=3000
 
 EXPOSE 3000
 
-# Start both Python crypto service and Node.js dookonchi bot simultaneously
+# Start both services: python in background, node in foreground
 CMD ["sh", "-c", "python3 crypto-service/bot.py & node dist/bot/index.js"]
