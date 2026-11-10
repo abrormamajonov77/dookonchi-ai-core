@@ -62,7 +62,7 @@ const healthServer = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'alive',
-      services: ['dookonchi-ai-core', 'cryptohajmbot-watcher', 'cryptoavtoai-sniper'],
+      services: ['dookonchi-ai-core', 'cryptoavtoai-sniper'],
       uptime: Math.floor(process.uptime()),
       timestamp: new Date().toISOString()
     }));

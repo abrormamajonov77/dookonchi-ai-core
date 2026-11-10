@@ -25,6 +25,7 @@ yarn-error.log*
 __pycache__/
 *.pyc
 *.pyo
+bot_data.db*
 oxirgi_yangilik.txt
 users.json
 signals.json
