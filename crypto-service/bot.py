@@ -5,14 +5,22 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
+import aiohttp
+import aiohttp.connector
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import feedparser
 from dotenv import load_dotenv
 
-import feedparser
-import google.generativeai as genai
+# Windows yoki cheklangan tarmoqlarda aiodns xatosini oldini olish
+try:
+    if hasattr(aiohttp.connector, 'DefaultResolver'):
+        aiohttp.connector.DefaultResolver = aiohttp.ThreadedResolver
+except Exception:
+    pass
 
 load_dotenv()
 
@@ -30,15 +38,47 @@ if not TOKEN:
     print("XATOLIK: CRYPTO_SNIPER_BOT_TOKEN yoki TELEGRAM_BOT_TOKEN kiritilmagan!")
     exit(1)
 
+# Windows va cheklangan tarmoqlarda barqaror DNS yechimi
+class CustomAiohttpSession(AiohttpSession):
+    async def create_session(self) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver()),
+            json_serialize=self.json_dumps,
+        )
+
 # Bot obyektlari
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
-watcher_bot = Bot(token=WATCHER_TOKEN, default=DefaultBotProperties(parse_mode='HTML')) if WATCHER_TOKEN else None
+bot = Bot(token=TOKEN, session=CustomAiohttpSession(), default=DefaultBotProperties(parse_mode='HTML'))
+watcher_bot = Bot(token=WATCHER_TOKEN, session=CustomAiohttpSession(), default=DefaultBotProperties(parse_mode='HTML')) if WATCHER_TOKEN else None
 dp = Dispatcher()
 
-# --- WATCHER GURU BOT QISMI (YANGILIKLAR) ---
+# --- GEMINI AI CLIENT SOZLAMALARI ---
+ai_client = None
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash') if GEMINI_KEY else None
+    try:
+        from google import genai
+        ai_client = genai.Client(api_key=GEMINI_KEY)
+    except Exception:
+        try:
+            import google.generativeai as legacy_genai
+            legacy_genai.configure(api_key=GEMINI_KEY)
+            ai_client = legacy_genai.GenerativeModel('gemini-3.5-flash')
+        except Exception:
+            ai_client = None
+
+def translate_title(title: str) -> str:
+    if not ai_client:
+        return title
+    prompt = f"Ushbu inglizcha moliyaviy yangilik sarlavhasini o'zbek tiliga professional, moliya jurnalistlari tilida tarjima qil. Ortiqcha gap qo'shma, faqat tarjimani ber.\nSarlavha: {title}"
+    try:
+        if hasattr(ai_client, 'models'):
+            res = ai_client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
+            return res.text.strip()
+        elif hasattr(ai_client, 'generate_content'):
+            res = ai_client.generate_content(prompt)
+            return res.text.strip()
+    except Exception as e:
+        print(f"⚠️ Tarjima xatosi: {e}", flush=True)
+    return title
 
 def xotirani_oqish():
     if os.path.exists("oxirgi_yangilik.txt"):
@@ -57,8 +97,8 @@ def xotiraga_yozish(link):
         print(f"Xotiraga yozishda xatolik: {e}")
 
 async def check_news_loop():
-    if not watcher_bot or not model:
-        print("ℹ️ WatcherBot yoki Gemini kaliti sozlanmagan, yangiliklar moduli to'xtatildi.", flush=True)
+    if not watcher_bot:
+        print("ℹ️ WatcherBot sozlanmagan, yangiliklar moduli to'xtatildi.", flush=True)
         return
     print("🚀 WatcherBot (2-motor) ishga tushdi! Sayt kuzatilmoqda...", flush=True)
     while True:
@@ -76,10 +116,7 @@ async def check_news_loop():
                     else:
                         print("🔔 Watcher: Yangi post topildi! Tarjima qilinmoqda...", flush=True)
                         title = latest_news.title
-                        prompt = f"Ushbu inglizcha moliyaviy yangilik sarlavhasini o'zbek tiliga professional, moliya jurnalistlari tilida tarjima qil. Ortiqcha gap qo'shma, faqat tarjimani ber.\nSarlavha: {title}"
-                        
-                        response = model.generate_content(prompt)
-                        tarjima = response.text.strip()
+                        tarjima = translate_title(title)
                         
                         xabar = f"📰 <b>{tarjima}</b>\n\n👉 <a href='{news_link}'>Batafsil o'qish</a>\n\n🇺🇿 {TARGET_CHANNEL}"
 
@@ -392,10 +429,10 @@ async def main():
     asyncio.create_task(scanner_loop())
     asyncio.create_task(background_checker())
     asyncio.create_task(weekly_reporter())
-    if watcher_bot and model:
+    if watcher_bot:
         asyncio.create_task(check_news_loop())
     else:
-        print("ℹ️ WatcherBot o'tkazib yuborildi (CRYPTO_WATCHER_BOT_TOKEN yoki GEMINI_API_KEY sozlanmagan).", flush=True)
+        print("ℹ️ WatcherBot o'tkazib yuborildi (CRYPTO_WATCHER_BOT_TOKEN sozlanmagan).", flush=True)
     
     # Aiogram dp faqat SnayperBot (start komandasi) uchun ishlaydi
     await dp.start_polling(bot)

@@ -1,6 +1,6 @@
 aiogram>=3.0.0
 ccxt
-google-generativeai
+google-genai
 feedparser
 python-dotenv
 pandas

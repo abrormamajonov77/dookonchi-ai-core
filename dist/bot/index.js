@@ -89,7 +89,7 @@ if (node_fs_1.default.existsSync(cryptoBotPath) && (process.env.CRYPTO_SNIPER_BO
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
     logger_1.logger.info(`🚀 Starting Crypto Service (Python: ${cryptoBotPath})...`);
     try {
-        cryptoProcess = (0, node_child_process_1.spawn)(pythonCmd, ['crypto-service/bot.py'], {
+        cryptoProcess = (0, node_child_process_1.spawn)(pythonCmd, ['-u', 'crypto-service/bot.py'], {
             cwd: process.cwd(),
             env: { ...process.env, PYTHONUNBUFFERED: '1' },
             stdio: ['ignore', 'inherit', 'inherit']
