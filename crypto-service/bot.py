@@ -41,10 +41,12 @@ if not TOKEN:
 # Windows va cheklangan tarmoqlarda barqaror DNS yechimi
 class CustomAiohttpSession(AiohttpSession):
     async def create_session(self) -> aiohttp.ClientSession:
-        return aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver()),
-            json_serialize=self.json_dumps,
-        )
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver()),
+                json_serialize=self.json_dumps,
+            )
+        return self._session
 
 # Bot obyektlari
 bot = Bot(token=TOKEN, session=CustomAiohttpSession(), default=DefaultBotProperties(parse_mode='HTML'))
@@ -71,8 +73,13 @@ def translate_title(title: str) -> str:
     prompt = f"Ushbu inglizcha moliyaviy yangilik sarlavhasini o'zbek tiliga professional, moliya jurnalistlari tilida tarjima qil. Ortiqcha gap qo'shma, faqat tarjimani ber.\nSarlavha: {title}"
     try:
         if hasattr(ai_client, 'models'):
-            res = ai_client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-            return res.text.strip()
+            for model_name in ('gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'):
+                try:
+                    res = ai_client.models.generate_content(model=model_name, contents=prompt)
+                    if res.text:
+                        return res.text.strip()
+                except Exception as e:
+                    print(f"⚠️ {model_name} tarjima xatosi: {e}", flush=True)
         elif hasattr(ai_client, 'generate_content'):
             res = ai_client.generate_content(prompt)
             return res.text.strip()
