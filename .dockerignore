@@ -5,7 +5,5 @@ dist
 .git
 tests
 *.log
-crypto-service/__pycache__
-crypto-service/**/__pycache__
-crypto-service/*.db*
+crypto-service
 

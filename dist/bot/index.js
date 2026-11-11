@@ -4,9 +4,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const node_http_1 = __importDefault(require("node:http"));
-const node_child_process_1 = require("node:child_process");
-const node_path_1 = __importDefault(require("node:path"));
-const node_fs_1 = __importDefault(require("node:fs"));
 const grammy_1 = require("grammy");
 const runner_1 = require("@grammyjs/runner");
 const storage_prisma_1 = require("@grammyjs/storage-prisma");
@@ -68,30 +65,23 @@ let isShuttingDown = false;
 let isStarting = true;
 let dbConnected = false;
 let runner = null;
-let cryptoProcess = null;
-let cryptoRestartTimer = null;
 let runnerRestartTimer = null;
-let cryptoRestartAttempts = 0;
-const cryptoBotPath = node_path_1.default.resolve(process.cwd(), 'crypto-service', 'bot.py');
-const isCryptoEnabled = () => node_fs_1.default.existsSync(cryptoBotPath) && Boolean(process.env.CRYPTO_SNIPER_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN);
+// Note: crypto-service (@Cryptoavtoai_bot) is frozen/isolated so server resources remain 100% dedicated to dookonchi-ai-core.
 const healthServer = node_http_1.default.createServer((req, res) => {
     const reqPath = (req.url || '/').split('?')[0];
     if (reqPath === '/health' || reqPath === '/') {
         const botRunning = runner ? runner.isRunning() : false;
-        const cryptoEnabled = isCryptoEnabled();
-        const cryptoRunning = Boolean(cryptoProcess && cryptoProcess.exitCode === null && !cryptoProcess.killed);
-        const statusCode = isStarting || botRunning ? 200 : 503;
+        const isHealthy = !isShuttingDown && (isStarting || botRunning || runnerRestartTimer !== null);
+        const statusCode = isHealthy ? 200 : 503;
         res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         if (req.method === 'HEAD') {
             res.end();
             return;
         }
         res.end(JSON.stringify({
-            status: isStarting ? 'starting' : botRunning ? 'alive' : 'degraded',
-            services: ['dookonchi-ai-core', 'cryptoavtoai-sniper'],
+            status: isHealthy ? 'ok' : 'degraded',
+            service: 'dookonchi-ai-core',
             botRunning,
-            cryptoEnabled,
-            cryptoRunning,
             dbConnected,
             uptime: Math.floor(process.uptime()),
             timestamp: new Date().toISOString()
@@ -102,51 +92,12 @@ const healthServer = node_http_1.default.createServer((req, res) => {
         res.end(JSON.stringify({ error: 'Not Found' }));
     }
 });
+healthServer.on('error', (err) => {
+    logger_1.logger.error({ err }, 'Health-check server error');
+});
 healthServer.listen(PORT, '0.0.0.0', () => {
     logger_1.logger.info(`🌐 Health-check server listening on port ${PORT} (/health)`);
 });
-// --- Spawn & supervise Python Crypto-Service in parallel ---
-function startCryptoService() {
-    if (isShuttingDown)
-        return;
-    if (!isCryptoEnabled()) {
-        logger_1.logger.info('ℹ️ Crypto service skipped (no bot.py or tokens not set).');
-        return;
-    }
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-    const startedAt = Date.now();
-    logger_1.logger.info(`🚀 Starting Crypto Service (Python: ${cryptoBotPath})...`);
-    try {
-        const child = (0, node_child_process_1.spawn)(pythonCmd, ['-u', 'crypto-service/bot.py'], {
-            cwd: process.cwd(),
-            env: { ...process.env, PYTHONUNBUFFERED: '1' },
-            stdio: ['ignore', 'inherit', 'inherit']
-        });
-        cryptoProcess = child;
-        child.on('error', (err) => {
-            logger_1.logger.error({ err }, 'Failed to start crypto python process');
-        });
-        child.on('exit', (code, signal) => {
-            if (cryptoProcess === child)
-                cryptoProcess = null;
-            if (isShuttingDown) {
-                logger_1.logger.info({ code, signal }, 'Crypto python process stopped during shutdown');
-                return;
-            }
-            if (Date.now() - startedAt > 60_000)
-                cryptoRestartAttempts = 0;
-            const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(cryptoRestartAttempts, 4));
-            cryptoRestartAttempts += 1;
-            logger_1.logger.error({ code, signal, restartInMs: delayMs, attempt: cryptoRestartAttempts }, 'Crypto python process exited unexpectedly; scheduling restart');
-            cryptoRestartTimer = setTimeout(startCryptoService, delayMs);
-            cryptoRestartTimer.unref();
-        });
-    }
-    catch (err) {
-        logger_1.logger.error({ err }, 'Exception while spawning crypto service');
-    }
-}
-startCryptoService();
 // Self-Ping Keep-Alive (every 10 minutes)
 const keepAliveInterval = setInterval(async () => {
     const rawBaseUrl = process.env.APP_URL ||
@@ -166,21 +117,13 @@ const stopRunner = async (signal, exitCode = 0) => {
     if (isShuttingDown)
         return;
     isShuttingDown = true;
-    logger_1.logger.info({ signal, exitCode }, 'Stopping bots and closing resources...');
+    logger_1.logger.info({ signal, exitCode }, 'Stopping Do\'konchi AI bot and closing resources...');
     const forceExit = setTimeout(() => process.exit(exitCode), 5000);
     forceExit.unref();
     clearInterval(keepAliveInterval);
-    if (cryptoRestartTimer)
-        clearTimeout(cryptoRestartTimer);
     if (runnerRestartTimer)
         clearTimeout(runnerRestartTimer);
     healthServer.close();
-    if (cryptoProcess && !cryptoProcess.killed) {
-        try {
-            cryptoProcess.kill('SIGTERM');
-        }
-        catch { }
-    }
     try {
         if (runner?.isRunning())
             await runner.stop();
@@ -195,6 +138,11 @@ const stopRunner = async (signal, exitCode = 0) => {
 function startBotRunner(attempt = 0) {
     if (isShuttingDown)
         return;
+    if (runnerRestartTimer) {
+        clearTimeout(runnerRestartTimer);
+        runnerRestartTimer = null;
+    }
+    const startedAt = Date.now();
     runner = (0, runner_1.run)(bot);
     logger_1.logger.info({ attempt }, '🤖 Smart AI Yordamchi Bot is running...');
     const task = runner.task();
@@ -203,23 +151,24 @@ function startBotRunner(attempt = 0) {
             .then(() => {
             if (isShuttingDown)
                 return;
-            logger_1.logger.error('Bot polling loop stopped unexpectedly; restarting in 5s...');
-            runnerRestartTimer = setTimeout(() => startBotRunner(attempt + 1), 5000);
+            const nextAttempt = Date.now() - startedAt > 60_000 ? 0 : attempt + 1;
+            logger_1.logger.error({ nextAttempt }, 'Bot polling loop stopped unexpectedly; restarting in 5s...');
+            runnerRestartTimer = setTimeout(() => startBotRunner(nextAttempt), 5000);
             runnerRestartTimer.unref();
         })
             .catch((err) => {
             if (isShuttingDown)
                 return;
             const code = err?.error_code ?? err?.status;
-            if (code === 409 && attempt < 10) {
-                const delayMs = Math.min(30_000, 5_000 * (attempt + 1));
-                logger_1.logger.warn({ err, attempt, delayMs }, 'Telegram 409 Conflict during polling; retrying...');
-                runnerRestartTimer = setTimeout(() => startBotRunner(attempt + 1), delayMs);
-                runnerRestartTimer.unref();
+            if (code === 401) {
+                logger_1.logger.fatal({ err }, 'Invalid BOT_TOKEN (401 Unauthorized); bot runner halted');
                 return;
             }
-            logger_1.logger.fatal({ err }, 'Fatal bot runner error; shutting down');
-            void stopRunner('RUNNER_FATAL', 1);
+            const nextAttempt = Date.now() - startedAt > 60_000 ? 1 : attempt + 1;
+            const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(nextAttempt - 1, 3));
+            logger_1.logger.warn({ err, code, attempt: nextAttempt, delayMs }, 'Bot polling runner interrupted; scheduling restart');
+            runnerRestartTimer = setTimeout(() => startBotRunner(nextAttempt), delayMs);
+            runnerRestartTimer.unref();
         });
     }
 }
@@ -242,14 +191,14 @@ async function bootstrap() {
     isStarting = false;
 }
 void bootstrap().catch((err) => {
-    logger_1.logger.fatal({ err }, 'Failed to bootstrap Smart AI Yordamchi Bot');
-    void stopRunner('BOOTSTRAP_ERROR', 1);
+    isStarting = false;
+    logger_1.logger.error({ err }, 'Error during Smart AI Yordamchi Bot bootstrap; retrying runner');
+    startBotRunner();
 });
 process.once('SIGINT', () => void stopRunner('SIGINT', 0));
 process.once('SIGTERM', () => void stopRunner('SIGTERM', 0));
 process.on('uncaughtException', (err) => {
-    logger_1.logger.fatal({ err }, 'Uncaught Exception');
-    void stopRunner('UNCAUGHT_EXCEPTION', 1);
+    logger_1.logger.error({ err }, 'Uncaught Exception');
 });
 process.on('unhandledRejection', (reason, promise) => {
     logger_1.logger.error({ err: reason, promise }, 'Unhandled Rejection');
