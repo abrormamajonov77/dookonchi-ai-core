@@ -123,46 +123,52 @@ async def weekly_reporter(telegram_notifier_func):
     Har yakshanba kechasi haftalik hisobot yuboradi.
     """
     while True:
-        now = datetime.now()
-        if now.weekday() == 6 and now.hour == 23 and 50 <= now.minute <= 59:
-            last_week_iso = (now - timedelta(days=7)).isoformat()
-            stats = await get_weekly_signals_stats(last_week_iso)
+        try:
+            now = datetime.now()
+            if now.weekday() == 6 and now.hour == 23 and 50 <= now.minute <= 59:
+                last_week_iso = (now - timedelta(days=7)).isoformat()
+                stats = await get_weekly_signals_stats(last_week_iso)
 
-            data = {
-                5: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-                3: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-                2: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-            }
+                data = {
+                    5: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                    3: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                    2: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                }
 
-            for row in stats:
-                stars, status, count = row[0], row[1], row[2]
-                if stars in data and status in data[stars]:
-                    data[stars][status] += count
+                for row in stats:
+                    stars, status, count = row[0], row[1], row[2]
+                    if stars in data and status in data[stars]:
+                        data[stars][status] += count
 
-            report_parts = ["📊 <b>HAFTALIK SAVDO HISOBOTI</b> 📊\n━━━━━━━━━━━━━━━━━━━━━\n"]
+                report_parts = ["📊 <b>HAFTALIK SAVDO HISOBOTI</b> 📊\n━━━━━━━━━━━━━━━━━━━━━\n"]
 
-            for star in [5, 3, 2]:
-                wins = data[star]['WIN']
-                losses = data[star]['LOSS']
-                bes = data[star]['BREAK_EVEN']
-                total = wins + losses + bes
+                for star in [5, 3, 2]:
+                    wins = data[star]['WIN']
+                    losses = data[star]['LOSS']
+                    bes = data[star]['BREAK_EVEN']
+                    total = wins + losses + bes
 
-                if total > 0:
-                    win_rate = (wins / total) * 100
-                    star_icon = "⭐⭐⭐⭐⭐ (Spot)" if star == 5 else "⭐⭐⭐ (Snayper)" if star == 3 else "⭐⭐ (Scalping)"
-                    report_parts.append(
-                        f"🔹 <b>{star_icon}</b>\n"
-                        f"Jami yopilgan: {total} ta\n"
-                        f"🎯 TP: {wins} | 🛑 SL: {losses} | 🛡 BE: {bes}\n"
-                        f"🏆 Aniqlik: <b>{win_rate:.1f}%</b>\n"
-                        "━━━━━━━━━━━━━━━━━━━━━\n"
-                    )
+                    if total > 0:
+                        win_rate = (wins / total) * 100
+                        star_icon = "⭐⭐⭐⭐⭐ (Spot)" if star == 5 else "⭐⭐⭐ (Snayper)" if star == 3 else "⭐⭐ (Scalping)"
+                        report_parts.append(
+                            f"🔹 <b>{star_icon}</b>\n"
+                            f"Jami yopilgan: {total} ta\n"
+                            f"🎯 TP: {wins} | 🛑 SL: {losses} | 🛡 BE: {bes}\n"
+                            f"🏆 Aniqlik: <b>{win_rate:.1f}%</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━━\n"
+                        )
 
-            if len(report_parts) > 1:
-                await telegram_notifier_func("".join(report_parts), None)
+                if len(report_parts) > 1:
+                    await telegram_notifier_func("".join(report_parts), None)
 
-            await asyncio.sleep(3600)
-        else:
+                await asyncio.sleep(3600)
+            else:
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Weekly reporter xatosi: {e}")
             await asyncio.sleep(60)
 
 
@@ -205,71 +211,77 @@ async def daily_reporter(telegram_notifier_func):
     Har kuni 17:00 da kunlik kreativ hisobot yuboradi.
     """
     while True:
-        now = datetime.now()
-        if now.hour == 17 and 0 <= now.minute <= 9:
-            yesterday_iso = (now - timedelta(days=1)).isoformat()
-            stats = await get_weekly_signals_stats(yesterday_iso)
-            data = {
-                5: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-                3: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-                2: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
-            }
-            total_signals = 0
+        try:
+            now = datetime.now()
+            if now.hour == 17 and 0 <= now.minute <= 9:
+                yesterday_iso = (now - timedelta(days=1)).isoformat()
+                stats = await get_weekly_signals_stats(yesterday_iso)
+                data = {
+                    5: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                    3: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                    2: {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0},
+                }
+                total_signals = 0
 
-            for row in stats:
-                stars, status, count = row[0], row[1], row[2]
-                if stars in data and status in data[stars]:
-                    data[stars][status] += count
-                    total_signals += count
+                for row in stats:
+                    stars, status, count = row[0], row[1], row[2]
+                    if stars in data and status in data[stars]:
+                        data[stars][status] += count
+                        total_signals += count
 
-            if total_signals > 0:
-                coin_stats = await get_daily_coin_stats(yesterday_iso)
-                coins_data = {5: {}, 3: {}, 2: {}}
+                if total_signals > 0:
+                    coin_stats = await get_daily_coin_stats(yesterday_iso)
+                    coins_data = {5: {}, 3: {}, 2: {}}
 
-                for row in coin_stats:
-                    stars, sym, status, count = row[0], row[1], row[2], row[3]
-                    if stars in coins_data:
-                        if sym not in coins_data[stars]:
-                            coins_data[stars][sym] = {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0}
-                        if status in coins_data[stars][sym]:
-                            coins_data[stars][sym][status] += count
+                    for row in coin_stats:
+                        stars, sym, status, count = row[0], row[1], row[2], row[3]
+                        if stars in coins_data:
+                            if sym not in coins_data[stars]:
+                                coins_data[stars][sym] = {'WIN': 0, 'LOSS': 0, 'BREAK_EVEN': 0}
+                            if status in coins_data[stars][sym]:
+                                coins_data[stars][sym][status] += count
 
-                report_parts = [
-                    "📊 <b>OXIRGI 24 SOATLIK SAVDO HISOBOTI</b> 📊\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                ]
-                stats_for_ai = ""
+                    report_parts = [
+                        "📊 <b>OXIRGI 24 SOATLIK SAVDO HISOBOTI</b> 📊\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    ]
+                    stats_for_ai = ""
 
-                for star in [5, 3, 2]:
-                    wins = data[star]['WIN']
-                    losses = data[star]['LOSS']
-                    bes = data[star]['BREAK_EVEN']
-                    total = wins + losses + bes
+                    for star in [5, 3, 2]:
+                        wins = data[star]['WIN']
+                        losses = data[star]['LOSS']
+                        bes = data[star]['BREAK_EVEN']
+                        total = wins + losses + bes
 
-                    if total > 0:
-                        win_rate = (wins / total) * 100
-                        star_icon = "⭐⭐⭐⭐⭐ (Spot)" if star == 5 else "⭐⭐⭐ (Snayper)" if star == 3 else "⭐⭐ (Scalping)"
-                        coins_text = "\n".join(
-                            f"🔸 {sym}: {cdata['WIN']}✅ | {cdata['LOSS']}❌ | {cdata['BREAK_EVEN']}🛡"
-                            for sym, cdata in coins_data[star].items()
-                        )
-                        stats_for_ai += f"{star} Yulduz: {wins} Foyda, {losses} Zarar. Winrate: {win_rate:.1f}%\n"
-                        report_parts.append(
-                            f"🔹 <b>{star_icon}</b>\n"
-                            f"Jami: {total} ta | 🎯 TP: {wins} | 🛑 SL: {losses} | 🛡 BE: {bes}\n"
-                            f"🏆 Aniqlik: <b>{win_rate:.1f}%</b>\n\n"
-                            f"🪙 <b>Tangalar bo'yicha:</b>\n"
-                            f"{coins_text}\n"
-                            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        )
+                        if total > 0:
+                            win_rate = (wins / total) * 100
+                            star_icon = "⭐⭐⭐⭐⭐ (Spot)" if star == 5 else "⭐⭐⭐ (Snayper)" if star == 3 else "⭐⭐ (Scalping)"
+                            coins_text = "\n".join(
+                                f"🔸 {sym}: {cdata['WIN']}✅ | {cdata['LOSS']}❌ | {cdata['BREAK_EVEN']}🛡"
+                                for sym, cdata in coins_data[star].items()
+                            )
+                            stats_for_ai += f"{star} Yulduz: {wins} Foyda, {losses} Zarar. Winrate: {win_rate:.1f}%\n"
+                            report_parts.append(
+                                f"🔹 <b>{star_icon}</b>\n"
+                                f"Jami: {total} ta | 🎯 TP: {wins} | 🛑 SL: {losses} | 🛡 BE: {bes}\n"
+                                f"🏆 Aniqlik: <b>{win_rate:.1f}%</b>\n\n"
+                                f"🪙 <b>Tangalar bo'yicha:</b>\n"
+                                f"{coins_text}\n"
+                                "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            )
 
-                ai_conclusion = await generate_ai_summary(stats_for_ai)
-                report_parts.append(
-                    "🤖 <b>AI Xulosasi:</b>\n"
-                    f"<i>💬 {ai_conclusion}</i>"
-                )
-                await telegram_notifier_func("".join(report_parts), None)
+                    ai_conclusion = await generate_ai_summary(stats_for_ai)
+                    report_parts.append(
+                        "🤖 <b>AI Xulosasi:</b>\n"
+                        f"<i>💬 {ai_conclusion}</i>"
+                    )
+                    await telegram_notifier_func("".join(report_parts), None)
 
-            await asyncio.sleep(3600)
-        else:
+                await asyncio.sleep(3600)
+            else:
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Daily reporter xatosi: {e}")
             await asyncio.sleep(60)

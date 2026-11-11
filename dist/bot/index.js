@@ -64,12 +64,35 @@ bot.use(async (ctx, next) => {
 bot.use(start_1.startHandler, invoice_1.invoiceHandler, debt_1.debtHandler, suppliers_1.suppliersHandler, cash_1.cashHandler, expense_1.expenseHandler, search_1.searchHandler, closing_1.closingHandler, report_1.reportHandler, voice_1.voiceHandler);
 bot.on('message', (ctx) => ctx.reply("🤔 Tushunmadim. Pastdagi menyudan kerakli bo'limni tanlang yoki shunchaki ovozli xabar / nakladnoy rasmini yuboring."));
 const PORT = Number(process.env.PORT) || 3000;
+let isShuttingDown = false;
+let isStarting = true;
+let dbConnected = false;
+let runner = null;
+let cryptoProcess = null;
+let cryptoRestartTimer = null;
+let runnerRestartTimer = null;
+let cryptoRestartAttempts = 0;
+const cryptoBotPath = node_path_1.default.resolve(process.cwd(), 'crypto-service', 'bot.py');
+const isCryptoEnabled = () => node_fs_1.default.existsSync(cryptoBotPath) && Boolean(process.env.CRYPTO_SNIPER_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN);
 const healthServer = node_http_1.default.createServer((req, res) => {
-    if (req.url === '/health' || req.url === '/') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+    const reqPath = (req.url || '/').split('?')[0];
+    if (reqPath === '/health' || reqPath === '/') {
+        const botRunning = runner ? runner.isRunning() : false;
+        const cryptoEnabled = isCryptoEnabled();
+        const cryptoRunning = Boolean(cryptoProcess && cryptoProcess.exitCode === null && !cryptoProcess.killed);
+        const statusCode = isStarting || botRunning ? 200 : 503;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        if (req.method === 'HEAD') {
+            res.end();
+            return;
+        }
         res.end(JSON.stringify({
-            status: 'alive',
-            services: ['dookonchi-ai-core', 'cryptohajmbot-watcher', 'cryptoavtoai-sniper'],
+            status: isStarting ? 'starting' : botRunning ? 'alive' : 'degraded',
+            services: ['dookonchi-ai-core', 'cryptoavtoai-sniper'],
+            botRunning,
+            cryptoEnabled,
+            cryptoRunning,
+            dbConnected,
             uptime: Math.floor(process.uptime()),
             timestamp: new Date().toISOString()
         }));
@@ -82,32 +105,48 @@ const healthServer = node_http_1.default.createServer((req, res) => {
 healthServer.listen(PORT, '0.0.0.0', () => {
     logger_1.logger.info(`🌐 Health-check server listening on port ${PORT} (/health)`);
 });
-// --- Spawn Python Crypto-Service in parallel ---
-let cryptoProcess = null;
-const cryptoBotPath = node_path_1.default.resolve(process.cwd(), 'crypto-service', 'bot.py');
-if (node_fs_1.default.existsSync(cryptoBotPath) && (process.env.CRYPTO_SNIPER_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN)) {
+// --- Spawn & supervise Python Crypto-Service in parallel ---
+function startCryptoService() {
+    if (isShuttingDown)
+        return;
+    if (!isCryptoEnabled()) {
+        logger_1.logger.info('ℹ️ Crypto service skipped (no bot.py or tokens not set).');
+        return;
+    }
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const startedAt = Date.now();
     logger_1.logger.info(`🚀 Starting Crypto Service (Python: ${cryptoBotPath})...`);
     try {
-        cryptoProcess = (0, node_child_process_1.spawn)(pythonCmd, ['-u', 'crypto-service/bot.py'], {
+        const child = (0, node_child_process_1.spawn)(pythonCmd, ['-u', 'crypto-service/bot.py'], {
             cwd: process.cwd(),
             env: { ...process.env, PYTHONUNBUFFERED: '1' },
             stdio: ['ignore', 'inherit', 'inherit']
         });
-        cryptoProcess.on('error', (err) => {
+        cryptoProcess = child;
+        child.on('error', (err) => {
             logger_1.logger.error({ err }, 'Failed to start crypto python process');
         });
-        cryptoProcess.on('exit', (code, signal) => {
-            logger_1.logger.warn({ code, signal }, 'Crypto python process exited');
+        child.on('exit', (code, signal) => {
+            if (cryptoProcess === child)
+                cryptoProcess = null;
+            if (isShuttingDown) {
+                logger_1.logger.info({ code, signal }, 'Crypto python process stopped during shutdown');
+                return;
+            }
+            if (Date.now() - startedAt > 60_000)
+                cryptoRestartAttempts = 0;
+            const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(cryptoRestartAttempts, 4));
+            cryptoRestartAttempts += 1;
+            logger_1.logger.error({ code, signal, restartInMs: delayMs, attempt: cryptoRestartAttempts }, 'Crypto python process exited unexpectedly; scheduling restart');
+            cryptoRestartTimer = setTimeout(startCryptoService, delayMs);
+            cryptoRestartTimer.unref();
         });
     }
     catch (err) {
         logger_1.logger.error({ err }, 'Exception while spawning crypto service');
     }
 }
-else {
-    logger_1.logger.info('ℹ️ Crypto service skipped (no bot.py or tokens not set).');
-}
+startCryptoService();
 // Self-Ping Keep-Alive (every 10 minutes)
 const keepAliveInterval = setInterval(async () => {
     const rawBaseUrl = process.env.APP_URL ||
@@ -123,16 +162,18 @@ const keepAliveInterval = setInterval(async () => {
     }
 }, 10 * 60 * 1000);
 keepAliveInterval.unref();
-const runner = (0, runner_1.run)(bot);
-(0, cron_service_1.startCronJobs)(bot);
-logger_1.logger.info('🤖 Smart AI Yordamchi Bot is running...');
-let isShuttingDown = false;
-const stopRunner = async (signal) => {
+const stopRunner = async (signal, exitCode = 0) => {
     if (isShuttingDown)
         return;
     isShuttingDown = true;
-    logger_1.logger.info({ signal }, 'Stopping bots and closing resources...');
+    logger_1.logger.info({ signal, exitCode }, 'Stopping bots and closing resources...');
+    const forceExit = setTimeout(() => process.exit(exitCode), 5000);
+    forceExit.unref();
     clearInterval(keepAliveInterval);
+    if (cryptoRestartTimer)
+        clearTimeout(cryptoRestartTimer);
+    if (runnerRestartTimer)
+        clearTimeout(runnerRestartTimer);
     healthServer.close();
     if (cryptoProcess && !cryptoProcess.killed) {
         try {
@@ -141,7 +182,7 @@ const stopRunner = async (signal) => {
         catch { }
     }
     try {
-        if (runner.isRunning())
+        if (runner?.isRunning())
             await runner.stop();
         await bot.stop().catch(() => { });
     }
@@ -149,9 +190,67 @@ const stopRunner = async (signal) => {
         logger_1.logger.error({ err }, 'Error stopping bot runner');
     }
     await prisma_1.prisma.$disconnect().catch(() => { });
-    process.exit(0);
+    process.exit(exitCode);
 };
-process.once('SIGINT', () => stopRunner('SIGINT'));
-process.once('SIGTERM', () => stopRunner('SIGTERM'));
-process.on('uncaughtException', (err) => logger_1.logger.error(err, 'Uncaught Exception'));
-process.on('unhandledRejection', (reason, promise) => logger_1.logger.error({ reason, promise }, 'Unhandled Rejection'));
+function startBotRunner(attempt = 0) {
+    if (isShuttingDown)
+        return;
+    runner = (0, runner_1.run)(bot);
+    logger_1.logger.info({ attempt }, '🤖 Smart AI Yordamchi Bot is running...');
+    const task = runner.task();
+    if (task) {
+        task
+            .then(() => {
+            if (isShuttingDown)
+                return;
+            logger_1.logger.error('Bot polling loop stopped unexpectedly; restarting in 5s...');
+            runnerRestartTimer = setTimeout(() => startBotRunner(attempt + 1), 5000);
+            runnerRestartTimer.unref();
+        })
+            .catch((err) => {
+            if (isShuttingDown)
+                return;
+            const code = err?.error_code ?? err?.status;
+            if (code === 409 && attempt < 10) {
+                const delayMs = Math.min(30_000, 5_000 * (attempt + 1));
+                logger_1.logger.warn({ err, attempt, delayMs }, 'Telegram 409 Conflict during polling; retrying...');
+                runnerRestartTimer = setTimeout(() => startBotRunner(attempt + 1), delayMs);
+                runnerRestartTimer.unref();
+                return;
+            }
+            logger_1.logger.fatal({ err }, 'Fatal bot runner error; shutting down');
+            void stopRunner('RUNNER_FATAL', 1);
+        });
+    }
+}
+async function bootstrap() {
+    try {
+        await prisma_1.prisma.$connect();
+        await prisma_1.prisma.$queryRaw `SELECT 1`;
+        dbConnected = true;
+        logger_1.logger.info('🗄️ PostgreSQL database connection verified.');
+    }
+    catch (err) {
+        dbConnected = false;
+        logger_1.logger.error({ err }, '❌ Initial database connection check failed (will retry on requests)');
+    }
+    await bot.api
+        .deleteWebhook({ drop_pending_updates: false })
+        .catch((err) => logger_1.logger.warn({ err }, 'Failed to delete webhook before starting polling'));
+    (0, cron_service_1.startCronJobs)(bot);
+    startBotRunner();
+    isStarting = false;
+}
+void bootstrap().catch((err) => {
+    logger_1.logger.fatal({ err }, 'Failed to bootstrap Smart AI Yordamchi Bot');
+    void stopRunner('BOOTSTRAP_ERROR', 1);
+});
+process.once('SIGINT', () => void stopRunner('SIGINT', 0));
+process.once('SIGTERM', () => void stopRunner('SIGTERM', 0));
+process.on('uncaughtException', (err) => {
+    logger_1.logger.fatal({ err }, 'Uncaught Exception');
+    void stopRunner('UNCAUGHT_EXCEPTION', 1);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    logger_1.logger.error({ err: reason, promise }, 'Unhandled Rejection');
+});

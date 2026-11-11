@@ -11,10 +11,10 @@ jobs:
     steps:
       - name: Ping Cloud Server Health Endpoint
         env:
-          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL }}
+          APP_HEALTH_URL: ${{ secrets.APP_HEALTH_URL || vars.APP_HEALTH_URL }}
         run: |
           if [ -z "$APP_HEALTH_URL" ]; then
-            echo "APP_HEALTH_URL secret is not set yet. Skipping."
+            echo "APP_HEALTH_URL secret/variable is not set yet. Skipping."
             exit 0
           fi
           echo "Pinging $APP_HEALTH_URL ..."

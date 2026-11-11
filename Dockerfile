@@ -1,8 +1,8 @@
-FROM node:20-bookworm-slim
+FROM node:20-trixie-slim
 
 WORKDIR /app
 
-# 1. System packages (python3, pip, git, build essentials for pandas_ta)
+# 1. System packages (python3 >= 3.12 for pandas_ta, pip, build essentials)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -22,9 +22,11 @@ RUN npm install
 COPY crypto-service/requirements.txt ./crypto-service/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r crypto-service/requirements.txt
 
-# 4. Copy precompiled dist and crypto-service
-COPY dist ./dist/
+# 4. Copy TypeScript sources, config, and crypto-service, then build inside container
+COPY tsconfig.json ./
+COPY src ./src/
 COPY crypto-service ./crypto-service/
+RUN npm run build
 
 ENV NODE_ENV=production
 ENV PORT=3000

@@ -40,6 +40,7 @@ class CustomAiohttpSession(AiohttpSession):
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver()),
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
                 json_serialize=self.json_dumps,
             )
         return self._session
@@ -128,22 +129,40 @@ async def send_to_all_users(text, symbol=None, reply_to_message_ids=None):
     return sent_messages
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error("Background task %s failed with unhandled exception", task.get_name(), exc_info=exc)
+
+
 async def main():
     logger.info("Cryptoavtoai bot tizimlari ishga tushirilmoqda...")
     await init_db()
 
-    await bot.delete_webhook(drop_pending_updates=False)
-    logger.info("✅ Webhook tozalandi, polling rejimiga o'tildi.")
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        logger.info("✅ Webhook tozalandi, polling rejimiga o'tildi.")
+    except Exception as e:
+        logger.warning(f"Webhook tozalashda vaqtinchalik xatolik (polling davom etadi): {e}")
 
-    asyncio.create_task(sniper_scanner_loop(mexc, send_to_all_users))
-    asyncio.create_task(spot_scanner_loop(mexc, send_to_all_users))
-    asyncio.create_task(background_checker(mexc, send_to_all_users))
-    asyncio.create_task(weekly_reporter(send_to_all_users))
-    asyncio.create_task(daily_reporter(send_to_all_users))
+    bg_tasks = [
+        asyncio.create_task(sniper_scanner_loop(mexc, send_to_all_users), name="sniper_scanner"),
+        asyncio.create_task(spot_scanner_loop(mexc, send_to_all_users), name="spot_scanner"),
+        asyncio.create_task(background_checker(mexc, send_to_all_users), name="monitor_checker"),
+        asyncio.create_task(weekly_reporter(send_to_all_users), name="weekly_reporter"),
+        asyncio.create_task(daily_reporter(send_to_all_users), name="daily_reporter"),
+    ]
+    for task in bg_tasks:
+        task.add_done_callback(_log_task_exception)
 
     try:
         await dp.start_polling(bot)
     finally:
+        for task in bg_tasks:
+            task.cancel()
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
         await mexc.close()
         await bot.session.close()
 
@@ -153,3 +172,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot to'xtatildi (KeyboardInterrupt).")
+    except Exception:
+        logger.exception("Cryptoavtoai bot kritik xatolik bilan to'xtadi")
+        sys.exit(1)
