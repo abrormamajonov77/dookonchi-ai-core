@@ -84,22 +84,30 @@ model Product {
 }
 
 model Invoice {
-  id             String   @id @default(uuid())
-  invoiceNo      String?
-  supplierId     String
-  supplier       Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  totalAmount    Decimal  @db.Decimal(18, 2)
-  originalAmount Decimal? @db.Decimal(18, 2)
-  discountAmount Decimal? @db.Decimal(18, 2)
-  currency       Currency @default(UZS)
-  verbatimText   String?
-  rawImageUrl    String?
-  createdAt      DateTime @default(now())
+  id                 String   @id @default(uuid())
+  invoiceNo          String?
+  supplierId         String
+  supplier           Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  totalAmount        Decimal  @db.Decimal(18, 2)
+  originalAmount     Decimal? @db.Decimal(18, 2)
+  discountAmount     Decimal? @db.Decimal(18, 2)
+  currency           Currency @default(UZS)
+  paymentType        String   @default("CREDIT")
+  paidCashAmount     Decimal  @default(0) @db.Decimal(18, 2)
+  creditAmount       Decimal  @default(0) @db.Decimal(18, 2)
+  imageHash          String?  @db.VarChar(64)
+  contentFingerprint String?  @db.VarChar(128)
+  verbatimText       String?
+  rawImageUrl        String?
+  createdAt          DateTime @default(now())
 
   items InvoiceItem[]
 
   @@index([supplierId])
   @@index([createdAt])
+  @@index([imageHash])
+  @@index([contentFingerprint])
+  @@index([paymentType, createdAt])
 }
 
 model InvoiceItem {
@@ -211,15 +219,36 @@ model CashTransaction {
 }
 
 model DailyRegister {
-  id             String   @id @default(uuid())
-  date           DateTime @unique @db.Date
-  cashUzs        Decimal  @default(0) @db.Decimal(18, 2)
-  cashUsd        Decimal  @default(0) @db.Decimal(18, 2)
-  clickAmount    Decimal  @default(0) @db.Decimal(18, 2)
-  terminalAmount Decimal  @default(0) @db.Decimal(18, 2)
-  isClosed       Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                       String   @id @default(uuid())
+  date                     DateTime @unique @db.Date
+  cashUzs                  Decimal  @default(0) @db.Decimal(18, 2)
+  cashUsd                  Decimal  @default(0) @db.Decimal(18, 2)
+  cashRemainingInDrawer    Decimal  @default(0) @db.Decimal(18, 2)
+  clickAmount              Decimal  @default(0) @db.Decimal(18, 2)
+  terminalAmount           Decimal  @default(0) @db.Decimal(18, 2)
+  dailyCashPurchasesUzs    Decimal  @default(0) @db.Decimal(18, 2)
+  dailySupplierPaymentsUzs Decimal  @default(0) @db.Decimal(18, 2)
+  dailySupplierPaymentsUsd Decimal  @default(0) @db.Decimal(18, 2)
+  totalDailySalesUzs       Decimal  @default(0) @db.Decimal(18, 2)
+  isClosed                 Boolean  @default(false)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
+model ZReport {
+  id                       String   @id @default(uuid())
+  date                     DateTime @unique @db.Date
+  terminalAmount           Decimal  @default(0) @db.Decimal(18, 2)
+  clickAmount              Decimal  @default(0) @db.Decimal(18, 2)
+  cashRemainingInDrawer    Decimal  @default(0) @db.Decimal(18, 2)
+  dailyCashPurchasesUzs    Decimal  @default(0) @db.Decimal(18, 2)
+  dailySupplierPaymentsUzs Decimal  @default(0) @db.Decimal(18, 2)
+  dailySupplierPaymentsUsd Decimal  @default(0) @db.Decimal(18, 2)
+  totalDailySalesUzs       Decimal  @default(0) @db.Decimal(18, 2)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([date])
 }
 
 model AuditLog {

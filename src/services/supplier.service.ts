@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database/prisma';
 import { TranslitService } from './translit.service';
@@ -8,10 +9,98 @@ import {
   formatDate,
   formatSupplierDebtLine,
   formatTotalDebtBlock,
+  reconcileInvoiceTotals,
 } from '../utils/formatters';
 import { buildVerbatimTableText, InvoiceItemSchema, ParsedInvoiceItem } from './ai.service';
 
 export class SupplierService {
+  static computeImageHash(buffer: Buffer): string {
+    return crypto.createHash('sha256').update(buffer).digest('hex');
+  }
+
+  static computeContentFingerprint(params: {
+    supplierName: string;
+    currency: 'UZS' | 'USD';
+    finalTotal: number;
+    items?: Array<{ rawName?: string; productName?: string; normalizedName?: string; quantity?: number; lineTotal?: number; totalPrice?: number }>;
+  }): string {
+    const normSupp = this.normalizeName(params.supplierName || "noma'lum");
+    const items = params.items || [];
+    const first3 = items
+      .slice(0, 3)
+      .map((it) => {
+        const n = TranslitService.toLatin(it.normalizedName || it.rawName || it.productName || '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+        const q = Number(it.quantity || 1);
+        const tot = Number(it.lineTotal ?? it.totalPrice ?? 0).toFixed(2);
+        return `${n}:${q}:${tot}`;
+      })
+      .join(';');
+    const rawStr = `${normSupp}|${params.currency}|${Number(params.finalTotal || 0).toFixed(2)}|${items.length}|${first3}`;
+    return crypto.createHash('sha256').update(rawStr).digest('hex');
+  }
+
+  static formatDuplicateWarningMessage(existingInvoice: any): string {
+    const cur: 'UZS' | 'USD' = existingInvoice.currency === 'USD' ? 'USD' : 'UZS';
+    const supName = existingInvoice.supplier?.name || "Noma'lum";
+    const dt = formatDate(existingInvoice.createdAt);
+    return (
+      `⛔️ DIQQAT! Bu nakladnoy oldin kiritilgan, ikkinchi marta kiritish mumkin emas!\n` +
+      `🏢 Ta'minotchi: ${supName}\n` +
+      `💰 Summasi: ${formatCurrency(existingInvoice.totalAmount, cur)} (${dt})\n` +
+      `🕒 Oldin kiritilgan vaqti: ${dt}`
+    );
+  }
+
+  static async checkDuplicateInvoice(params: {
+    imageHash?: string | null;
+    contentFingerprint?: string | null;
+  }) {
+    if (params.imageHash) {
+      const byHash = await prisma.invoice.findFirst({
+        where: { imageHash: params.imageHash },
+        include: { supplier: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (byHash) {
+        return {
+          isDuplicate: true as const,
+          stage: 'IMAGE_HASH' as const,
+          existingInvoice: byHash,
+          warningText: this.formatDuplicateWarningMessage(byHash),
+        };
+      }
+    }
+
+    if (params.contentFingerprint) {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const byFingerprint = await prisma.invoice.findFirst({
+        where: {
+          contentFingerprint: params.contentFingerprint,
+          createdAt: { gte: thirtyDaysAgo },
+        },
+        include: { supplier: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (byFingerprint) {
+        return {
+          isDuplicate: true as const,
+          stage: 'CONTENT_FINGERPRINT' as const,
+          existingInvoice: byFingerprint,
+          warningText: this.formatDuplicateWarningMessage(byFingerprint),
+        };
+      }
+    }
+
+    return {
+      isDuplicate: false as const,
+      stage: null,
+      existingInvoice: null,
+      warningText: null,
+    };
+  }
   static normalizeName(name: string): string {
     return TranslitService.toLatin(name)
       .toLowerCase()
@@ -195,7 +284,7 @@ export class SupplierService {
 
   /**
    * MODUL 2, 3, 4: Create a saved Invoice with Verbatim text, InvoiceItems, SupplierTransaction,
-   * and update Supplier UZS / USD debt inside a Prisma $transaction.
+   * Anti-Duplicate Guard (imageHash & contentFingerprint), and Cash/Credit accounting inside a Prisma $transaction.
    */
   static async createInvoiceWithItems(params: {
     supplierId?: string;
@@ -203,7 +292,15 @@ export class SupplierService {
     invoiceNo?: string | null;
     rawTotal: number;
     discountInput?: number | string | null;
+    discountPercent?: number | string | null;
+    printedFinalTotal?: number | null;
     currency?: 'UZS' | 'USD';
+    paymentType?: 'CASH' | 'CREDIT' | 'PARTIAL';
+    paidCashAmount?: number;
+    creditAmount?: number;
+    imageHash?: string | null;
+    contentFingerprint?: string | null;
+    forceOverrideDuplicate?: boolean;
     items?: Array<Partial<ParsedInvoiceItem> & { productName?: string; rawName?: string; unitPrice: number; quantity?: number; unit?: string; lineTotal?: number; totalPrice?: number; currency?: 'UZS' | 'USD' }>;
     verbatimText?: string;
     photoFileId?: string | null;
@@ -211,7 +308,6 @@ export class SupplierService {
     createdAt?: Date;
   }) {
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
-    const math = calculateDiscountedTotal(params.rawTotal, params.discountInput);
     const createdAt = params.createdAt || new Date();
 
     const normalizedItems: ParsedInvoiceItem[] = (params.items || []).map((it) =>
@@ -220,6 +316,65 @@ export class SupplierService {
         currency: it.currency || currency,
       })
     );
+
+    const itemsSum = normalizedItems.reduce((acc, it) => acc + Number(it.lineTotal || 0), 0);
+    const reconciled =
+      params.printedFinalTotal !== undefined || params.discountPercent !== undefined
+        ? reconcileInvoiceTotals({
+            rows: normalizedItems,
+            itemsSum,
+            subtotalBeforeDiscount: params.rawTotal,
+            discountPercent: params.discountPercent,
+            discountAmount: params.discountInput,
+            printedFinalTotal: params.printedFinalTotal,
+          })
+        : calculateDiscountedTotal(params.rawTotal, params.discountInput);
+
+    const math = {
+      rawTotal: reconciled.rawTotal,
+      discountAmount: reconciled.discountAmount,
+      finalTotal: reconciled.finalTotal,
+    };
+
+    const paymentType: 'CASH' | 'CREDIT' | 'PARTIAL' = params.paymentType || 'CREDIT';
+    const paidCashAmount =
+      paymentType === 'CASH'
+        ? math.finalTotal
+        : paymentType === 'PARTIAL'
+        ? Math.min(math.finalTotal, Math.max(0, Number((params.paidCashAmount || 0).toFixed(2))))
+        : 0;
+    const creditAmount =
+      paymentType === 'CASH'
+        ? 0
+        : paymentType === 'PARTIAL'
+        ? Math.max(0, Number((math.finalTotal - paidCashAmount).toFixed(2)))
+        : math.finalTotal;
+
+    const imageHash = params.imageHash || null;
+    const contentFingerprint =
+      params.contentFingerprint ||
+      this.computeContentFingerprint({
+        supplierName: params.supplierName,
+        currency,
+        finalTotal: math.finalTotal,
+        items: normalizedItems,
+      });
+
+    // MODUL 3: Anti-Duplicate Invoice Guard (2-stage check before saving)
+    if (!params.forceOverrideDuplicate) {
+      const dupCheck = await this.checkDuplicateInvoice({ imageHash, contentFingerprint });
+      if (dupCheck.isDuplicate && dupCheck.existingInvoice) {
+        return {
+          isDuplicate: true as const,
+          duplicateStage: dupCheck.stage,
+          warningText: dupCheck.warningText,
+          existingInvoice: dupCheck.existingInvoice,
+          supplier: dupCheck.existingInvoice.supplier,
+          invoice: dupCheck.existingInvoice,
+          transaction: null as any,
+        };
+      }
+    }
 
     const verbatimText =
       params.verbatimText ||
@@ -231,6 +386,7 @@ export class SupplierService {
           ? await tx.supplier.findUnique({ where: { id: params.supplierId } })
           : null;
 
+        // Only add `creditAmount` to supplier debt (`0` when `paymentType === 'CASH'`)
         if (!supplier) {
           const found = await tx.supplier.findFirst({
             where: { name: { equals: params.supplierName.trim(), mode: 'insensitive' } },
@@ -240,15 +396,15 @@ export class SupplierService {
               where: { id: found.id },
               data:
                 currency === 'USD'
-                  ? { debtUsd: Number((Number(found.debtUsd) + math.finalTotal).toFixed(2)), isActive: true }
-                  : { debtUzs: Number((Number(found.debtUzs) + math.finalTotal).toFixed(2)), isActive: true },
+                  ? { debtUsd: Number((Number(found.debtUsd) + creditAmount).toFixed(2)), isActive: true }
+                  : { debtUzs: Number((Number(found.debtUzs) + creditAmount).toFixed(2)), isActive: true },
             });
           } else {
             supplier = await tx.supplier.create({
               data: {
                 name: params.supplierName.trim(),
-                debtUzs: currency === 'UZS' ? math.finalTotal : 0,
-                debtUsd: currency === 'USD' ? math.finalTotal : 0,
+                debtUzs: currency === 'UZS' ? creditAmount : 0,
+                debtUsd: currency === 'USD' ? creditAmount : 0,
                 isActive: true,
               },
             });
@@ -258,8 +414,8 @@ export class SupplierService {
             where: { id: supplier.id },
             data:
               currency === 'USD'
-                ? { debtUsd: Number((Number(supplier.debtUsd) + math.finalTotal).toFixed(2)), isActive: true }
-                : { debtUzs: Number((Number(supplier.debtUzs) + math.finalTotal).toFixed(2)), isActive: true },
+                ? { debtUsd: Number((Number(supplier.debtUsd) + creditAmount).toFixed(2)), isActive: true }
+                : { debtUzs: Number((Number(supplier.debtUzs) + creditAmount).toFixed(2)), isActive: true },
           });
         }
 
@@ -271,11 +427,29 @@ export class SupplierService {
             discountAmount: math.discountAmount,
             totalAmount: math.finalTotal,
             currency,
+            paymentType,
+            paidCashAmount,
+            creditAmount,
+            imageHash,
+            contentFingerprint,
             verbatimText: verbatimText || null,
             rawImageUrl: params.rawImageUrl || null,
             createdAt,
           },
         });
+
+        if (paidCashAmount > 0) {
+          await tx.cashTransaction.create({
+            data: {
+              partyName: supplier.name,
+              amount: paidCashAmount,
+              currency,
+              items: JSON.stringify(normalizedItems),
+              createdBy: 'Bot',
+              createdAt,
+            },
+          });
+        }
 
         if (normalizedItems.length > 0) {
           for (const item of normalizedItems) {
@@ -356,7 +530,7 @@ export class SupplierService {
             date: createdAt,
             photoFileId: params.photoFileId || null,
             formattedReceipt,
-            description: `Nakladnoy ${params.invoiceNo || ''}`.trim(),
+            description: `Nakladnoy ${params.invoiceNo || ''} (${paymentType})`.trim(),
             receiptData: {
               invoiceId: invoice.id,
               supplierName: supplier.name,
@@ -364,6 +538,9 @@ export class SupplierService {
               rawTotal: math.rawTotal,
               discountAmount: math.discountAmount,
               finalTotal: math.finalTotal,
+              paymentType,
+              paidCashAmount,
+              creditAmount,
               currency,
               verbatimText,
               items: normalizedItems,
@@ -372,9 +549,74 @@ export class SupplierService {
         });
 
         cacheService.invalidateSupplierNames();
-        return { supplier, invoice, transaction };
+        return {
+          isDuplicate: false as const,
+          duplicateStage: null,
+          warningText: null,
+          existingInvoice: null,
+          supplier,
+          invoice,
+          transaction,
+        };
       },
-      { maxWait: 10000, timeout: 30000 }
+      { maxWait: 15000, timeout: 30000 }
+    );
+  }
+
+  /**
+   * MODUL 5.1: Record a supplier payment inside a Prisma $transaction,
+   * saving to `SupplierPayment` and `SupplierTransaction` and subtracting from `debtUzs` or `debtUsd`.
+   */
+  static async recordSupplierPayment(params: {
+    supplierId?: string;
+    supplierName: string;
+    amount: number;
+    currency?: 'UZS' | 'USD';
+    comment?: string | null;
+    createdAt?: Date;
+  }) {
+    const currency: 'UZS' | 'USD' = params.currency || 'UZS';
+    const isUsd = currency === 'USD';
+    const amount = Math.max(0, Number(Math.abs(params.amount || 0).toFixed(2)));
+    const createdAt = params.createdAt || new Date();
+
+    return prisma.$transaction(
+      async (tx) => {
+        const supplier = await this.getOrMergeSupplier(tx, params.supplierName, params.supplierId);
+        const newDebtUzs = Number((Number(supplier.debtUzs) - (isUsd ? 0 : amount)).toFixed(2));
+        const newDebtUsd = Number((Number(supplier.debtUsd) - (isUsd ? amount : 0)).toFixed(2));
+
+        const [payment, transaction, updatedSupplier] = await Promise.all([
+          tx.supplierPayment.create({
+            data: {
+              supplierId: supplier.id,
+              amount,
+              currency,
+              comment: params.comment || "Ta'minotchiga to'lov",
+              createdAt,
+            },
+          }),
+          tx.supplierTransaction.create({
+            data: {
+              supplierId: supplier.id,
+              type: 'PAYMENT',
+              amount,
+              currency,
+              date: createdAt,
+              sourceType: 'MANUAL',
+              description: params.comment || "Ta'minotchiga to'lov",
+            },
+          }),
+          tx.supplier.update({
+            where: { id: supplier.id },
+            data: { debtUzs: newDebtUzs, debtUsd: newDebtUsd },
+          }),
+        ]);
+
+        cacheService.invalidateSupplierNames();
+        return { supplier: updatedSupplier, payment, transaction };
+      },
+      { maxWait: 15000, timeout: 30000 }
     );
   }
 

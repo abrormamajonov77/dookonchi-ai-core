@@ -1,13 +1,23 @@
+const INT_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'decimal',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+
+const DEC_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'decimal',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+INT_FORMATTER.format(0);
+DEC_FORMATTER.format(0);
+
 export const formatSom = (amount: any): string => {
   const num = Number(amount);
   if (isNaN(num)) return "0 so'm";
   const rounded = Number(num.toFixed(2));
   const hasCents = rounded % 1 !== 0;
-  return `${new Intl.NumberFormat('en-US', {
-    style: 'decimal',
-    minimumFractionDigits: hasCents ? 2 : 0,
-    maximumFractionDigits: 2,
-  }).format(rounded)} so'm`;
+  return `${(hasCents ? DEC_FORMATTER : INT_FORMATTER).format(rounded)} so'm`;
 };
 
 export const formatUsd = (amount: any, withUsdtTag = false): string => {
@@ -15,11 +25,7 @@ export const formatUsd = (amount: any, withUsdtTag = false): string => {
   if (isNaN(num)) return withUsdtTag ? '$0.00 (USDT)' : '$0.00';
   const rounded = Number(num.toFixed(2));
   const sign = rounded < 0 ? '-' : '';
-  const absFormatted = new Intl.NumberFormat('en-US', {
-    style: 'decimal',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(Math.abs(rounded));
+  const absFormatted = DEC_FORMATTER.format(Math.abs(rounded));
   return `${sign}$${absFormatted}${withUsdtTag ? ' (USDT)' : ''}`;
 };
 
@@ -243,8 +249,180 @@ export function calculateDiscountedTotal(
   };
 }
 
+export interface ReconcileInvoiceTotalsInput {
+  rows?: Array<{ lineTotal?: number; totalPrice?: number } | string>;
+  itemsSum?: number;
+  subtotalBeforeDiscount?: number | null;
+  discountPercent?: number | string | null;
+  discountAmount?: number | string | null;
+  printedFinalTotal?: number | null;
+}
+
+export interface ReconcileInvoiceTotalsResult {
+  rawTotal: number;
+  discountPercent: number;
+  discountAmount: number;
+  finalTotal: number;
+  alreadyDeductedOnPaper: boolean;
+}
+
+/**
+ * MODUL 2: Double-Discount Guard (`reconcileInvoiceTotals`).
+ * Prevents deducting a discount a second time when `printedFinalTotal` on the paper receipt
+ * already has the discount subtracted (e.g. 2,000,000 - 5% = 1,900,000 printed on receipt).
+ */
+export function reconcileInvoiceTotals(input: ReconcileInvoiceTotalsInput): ReconcileInvoiceTotalsResult {
+  let computedItemsSum = Number(input.itemsSum || 0);
+  if (!computedItemsSum && Array.isArray(input.rows) && input.rows.length > 0) {
+    computedItemsSum = input.rows.reduce((sum: number, r: any) => {
+      if (typeof r === 'string') {
+        const parts = r.split('|').map((p) => p.trim());
+        const lastCol = parts[parts.length - 1] || '0';
+        return sum + parseCurrencyAndAmount(lastCol).amount;
+      }
+      return sum + Number(r?.lineTotal ?? r?.totalPrice ?? 0);
+    }, 0);
+  }
+  const itemsSum = Math.max(0, Number(computedItemsSum.toFixed(2)));
+  const subtotalBeforeDiscount = Math.max(0, Number(Number(input.subtotalBeforeDiscount || 0).toFixed(2)));
+  const printedFinalTotal = Math.max(0, Number(Number(input.printedFinalTotal || 0).toFixed(2)));
+
+  let discountPercent = 0;
+  if (typeof input.discountPercent === 'number') {
+    discountPercent = Math.max(0, input.discountPercent);
+  } else if (typeof input.discountPercent === 'string') {
+    const m = input.discountPercent.match(/(\d+(?:[.,]\d+)?)/);
+    if (m) discountPercent = parseFloat(m[1].replace(',', '.')) || 0;
+  }
+
+  let explicitDiscountAmount = 0;
+  if (typeof input.discountAmount === 'number') {
+    explicitDiscountAmount = Math.max(0, Number(input.discountAmount.toFixed(2)));
+  } else if (typeof input.discountAmount === 'string') {
+    const str = input.discountAmount.trim();
+    if (str.includes('%') && !discountPercent) {
+      const m = str.match(/(\d+(?:[.,]\d+)?)\s*%/);
+      if (m) discountPercent = parseFloat(m[1].replace(',', '.')) || 0;
+    } else {
+      explicitDiscountAmount = parseCurrencyAndAmount(str).amount;
+    }
+  }
+
+  // 1. Determine rawTotal before discount
+  let rawTotal = 0;
+  if (itemsSum > 0 && printedFinalTotal > 0 && printedFinalTotal < itemsSum) {
+    rawTotal = Math.max(subtotalBeforeDiscount, itemsSum);
+  } else if (subtotalBeforeDiscount > 0) {
+    rawTotal = Math.max(subtotalBeforeDiscount, itemsSum);
+  } else if (itemsSum > 0) {
+    rawTotal = itemsSum;
+  } else {
+    rawTotal = printedFinalTotal;
+  }
+  rawTotal = Number(rawTotal.toFixed(2));
+
+  // 2. Double-Deduction Prevention when discountPercent > 0
+  if (discountPercent > 0) {
+    // If rawTotal was only populated from printedFinalTotal (no itemsSum and no subtotalBeforeDiscount),
+    // kept as rawTotal; otherwise rawTotal is the pre-discount sum (e.g. 2,000,000).
+    const expectedDiscount = Number(((rawTotal * discountPercent) / 100).toFixed(2));
+    const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
+
+    if (
+      printedFinalTotal > 0 &&
+      (Math.abs(printedFinalTotal - expectedFinal) <= 1 || printedFinalTotal < rawTotal)
+    ) {
+      // Discount was ALREADY subtracted on the paper receipt! Do NOT deduct 5% a second time.
+      const finalTotal = Math.abs(printedFinalTotal - expectedFinal) <= 1 ? expectedFinal : printedFinalTotal;
+      const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
+      return {
+        rawTotal,
+        discountPercent,
+        discountAmount,
+        finalTotal,
+        alreadyDeductedOnPaper: true,
+      };
+    }
+
+    // Printed final total equals rawTotal or is 0 -> deduct once
+    return {
+      rawTotal,
+      discountPercent,
+      discountAmount: expectedDiscount,
+      finalTotal: expectedFinal,
+      alreadyDeductedOnPaper: false,
+    };
+  }
+
+  // 3. Double-Deduction Prevention when explicitDiscountAmount > 0
+  if (explicitDiscountAmount > 0) {
+    const expectedDiscount = Math.min(rawTotal, explicitDiscountAmount);
+    const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
+
+    if (
+      printedFinalTotal > 0 &&
+      (Math.abs(printedFinalTotal - expectedFinal) <= 1 || printedFinalTotal < rawTotal)
+    ) {
+      const finalTotal = Math.abs(printedFinalTotal - expectedFinal) <= 1 ? expectedFinal : printedFinalTotal;
+      const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
+      const inferredPercent = rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
+      return {
+        rawTotal,
+        discountPercent: inferredPercent,
+        discountAmount,
+        finalTotal,
+        alreadyDeductedOnPaper: true,
+      };
+    }
+
+    const inferredPercent = rawTotal > 0 ? Number(((expectedDiscount / rawTotal) * 100).toFixed(2)) : 0;
+    return {
+      rawTotal,
+      discountPercent: inferredPercent,
+      discountAmount: expectedDiscount,
+      finalTotal: expectedFinal,
+      alreadyDeductedOnPaper: false,
+    };
+  }
+
+  // 4. If printedFinalTotal < rawTotal even without explicit discount field
+  if (printedFinalTotal > 0 && printedFinalTotal < rawTotal) {
+    const discountAmount = Number((rawTotal - printedFinalTotal).toFixed(2));
+    const inferredPercent = rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
+    return {
+      rawTotal,
+      discountPercent: inferredPercent,
+      discountAmount,
+      finalTotal: printedFinalTotal,
+      alreadyDeductedOnPaper: true,
+    };
+  }
+
+  return {
+    rawTotal,
+    discountPercent: 0,
+    discountAmount: 0,
+    finalTotal: rawTotal,
+    alreadyDeductedOnPaper: false,
+  };
+}
+
 export const getToday = () => {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   return d;
 };
+
+export function getTashkentDayRange(now: Date = new Date()): { startOfDay: Date; endOfDay: Date; dateKey: Date } {
+  // Tashkent is UTC+5
+  const tashkentOffsetMs = 5 * 60 * 60 * 1000;
+  const tashkentTime = new Date(now.getTime() + tashkentOffsetMs);
+  const year = tashkentTime.getUTCFullYear();
+  const month = tashkentTime.getUTCMonth();
+  const day = tashkentTime.getUTCDate();
+
+  const startOfDay = new Date(Date.UTC(year, month, day, 0, 0, 0, 0) - tashkentOffsetMs);
+  const endOfDay = new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - tashkentOffsetMs);
+  const dateKey = getToday();
+  return { startOfDay, endOfDay, dateKey };
+}

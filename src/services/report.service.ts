@@ -1,7 +1,39 @@
 import { prisma } from '../database/prisma';
-import { formatMoney, formatDateShort } from '../utils/formatters';
+import { formatMoney, formatDateShort, formatSom, getTashkentDayRange } from '../utils/formatters';
 
 export type ReportPeriod = 'current_week' | 'last_week' | 'current_month' | 'last_month';
+
+export interface CashVsCreditAnalytics {
+  cashTotal: number;
+  creditTotal: number;
+  grandTotal: number;
+  cashPercent: number;
+  creditPercent: number;
+  progressBar: string;
+  diffAmount: number;
+  diffPercent: number;
+  formattedBlock: string;
+}
+
+export interface ZReportInput {
+  terminalAmount: number;
+  clickAmount: number;
+  cashRemainingInDrawer: number;
+  now?: Date;
+}
+
+export interface ZReportResult {
+  date: Date;
+  terminalAmount: number;
+  clickAmount: number;
+  cashRemainingInDrawer: number;
+  dailyCashPurchasesUzs: number;
+  dailyCashPurchasesCount: number;
+  dailySupplierPaymentsUzs: number;
+  dailySupplierPaymentsCount: number;
+  totalDailySalesUzs: number;
+  formattedText: string;
+}
 
 export interface PeriodRange {
   period: ReportPeriod;
@@ -131,6 +163,197 @@ const formatSignedMoney = (amount: number, currency: 'UZS' | 'USD' = 'UZS'): str
 };
 
 export class ReportService {
+  /**
+   * MODUL 4: Calculate 100% Cash vs. Credit Purchase Analytics, 10-block visual progress bar,
+   * and directional difference analysis.
+   */
+  static calculateCashVsCreditAnalytics(params: {
+    cashTotal: number;
+    creditTotal: number;
+  }): CashVsCreditAnalytics {
+    const cashTotal = Math.max(0, Number(Number(params.cashTotal || 0).toFixed(2)));
+    const creditTotal = Math.max(0, Number(Number(params.creditTotal || 0).toFixed(2)));
+    const grandTotal = Number((cashTotal + creditTotal).toFixed(2));
+
+    const cashPercent = grandTotal > 0 ? Math.round((cashTotal / grandTotal) * 100) : 0;
+    const creditPercent = grandTotal > 0 ? 100 - cashPercent : 0;
+
+    const greenBlocks = grandTotal > 0 ? Math.max(0, Math.min(10, Math.round(cashPercent / 10))) : 0;
+    const orangeBlocks = 10 - greenBlocks;
+    const progressBar = `[${'🟩'.repeat(greenBlocks)}${'🟧'.repeat(orangeBlocks)}]`;
+
+    const diffAmount = Number(Math.abs(creditTotal - cashTotal).toFixed(2));
+    const diffPercent = Math.abs(creditPercent - cashPercent);
+
+    let directionSentence = '';
+    if (grandTotal === 0) {
+      directionSentence = `Ushbu davrda xaridlar qayd etilmagan.`;
+    } else if (creditTotal > cashTotal) {
+      directionSentence = `Nasiya xaridlar naqd xaridlardan ${formatSom(diffAmount)}ga (${diffPercent}% ga) ko'p. Do'kon aylanmasida nasiya ulushi ustunlik qilmoqda.`;
+    } else if (cashTotal > creditTotal) {
+      directionSentence = `Naqd xaridlar nasiya xaridlardan ${formatSom(diffAmount)}ga (${diffPercent}% ga) ko'p. Do'kon aylanmasida naqd xarid ulushi ustunlik qilmoqda.`;
+    } else {
+      directionSentence = `Naqd va nasiya xaridlar teng muvozanatda (50% / 50%).`;
+    }
+
+    const formattedBlock = [
+      `📊 XARIDLAR TAHLILI (NAQD VS. NASIYA — 100%):`,
+      `📦 Jami olingan yuklar (100%): ${formatSom(grandTotal)}`,
+      `├── 💵 Naqdga olingan: ${formatSom(cashTotal)} (${cashPercent}%)`,
+      `└── 📝 Nasiyaga (qarzga) olingan: ${formatSom(creditTotal)} (${creditPercent}%)`,
+      `${progressBar} (${cashPercent}% Naqd / ${creditPercent}% Nasiya)`,
+      `🧭 YO'NALISH VA TAFOVUT: ${directionSentence}`,
+    ].join('\n');
+
+    return {
+      cashTotal,
+      creditTotal,
+      grandTotal,
+      cashPercent,
+      creditPercent,
+      progressBar,
+      diffAmount,
+      diffPercent,
+      formattedBlock,
+    };
+  }
+
+  /**
+   * MODUL 5: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
+   * for the current Tashkent day (`UTC+5`).
+   */
+  static async generateAndSaveZReport(input: ZReportInput): Promise<ZReportResult> {
+    const now = input.now || new Date();
+    const { startOfDay, endOfDay, dateKey } = getTashkentDayRange(now);
+
+    const terminalAmount = Math.max(0, Number(Number(input.terminalAmount || 0).toFixed(2)));
+    const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
+    const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
+
+    const [cashInvoices, supplierPayments] = await Promise.all([
+      prisma.invoice.findMany({
+        where: {
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+          paidCashAmount: { gt: 0 },
+        },
+        select: { paidCashAmount: true },
+      }),
+      prisma.supplierPayment.findMany({
+        where: {
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+        },
+        select: { amount: true },
+      }),
+    ]);
+
+    const dailyCashPurchasesUzs = Number(
+      cashInvoices.reduce((acc, inv) => acc + Number(inv.paidCashAmount || 0), 0).toFixed(2)
+    );
+    const dailyCashPurchasesCount = cashInvoices.length;
+
+    const dailySupplierPaymentsUzs = Number(
+      supplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
+    );
+    const dailySupplierPaymentsCount = supplierPayments.length;
+
+    const totalDailySalesUzs = Number(
+      (
+        terminalAmount +
+        clickAmount +
+        cashRemainingInDrawer +
+        dailyCashPurchasesUzs +
+        dailySupplierPaymentsUzs
+      ).toFixed(2)
+    );
+
+    const dateFormatted = new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      timeZone: 'Asia/Tashkent',
+    }).format(now);
+
+    const formattedText = [
+      `🧾 KUNLIK Z-OTCHYOT (KASSA YOPILISHI)`,
+      `📅 Sana: ${dateFormatted}`,
+      ``,
+      `1️⃣ 💳 Terminal: ${formatSom(terminalAmount)}`,
+      `2️⃣ 📱 Click / O'tkazma: ${formatSom(clickAmount)}`,
+      `3️⃣ 💵 Kassadagi qoldiq naqd pul: ${formatSom(cashRemainingInDrawer)}`,
+      `4️⃣ 📦 Bugun naqdga olingan yuklar (avtomat): +${formatSom(dailyCashPurchasesUzs)} (${dailyCashPurchasesCount} ta nakladnoy)`,
+      `5️⃣ 🤝 Bugun ta'minotchilarga berilgan pul (avtomat): +${formatSom(dailySupplierPaymentsUzs)} (${dailySupplierPaymentsCount} ta to'lov)`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `💰 BUGUNGI JAMI SAVDO (1+2+3+4+5): ${formatSom(totalDailySalesUzs)}`,
+    ].join('\n');
+
+    await prisma.$transaction(
+      async (tx) => {
+        await Promise.all([
+          tx.zReport.upsert({
+            where: { date: dateKey },
+            create: {
+              date: dateKey,
+              terminalAmount,
+              clickAmount,
+              cashRemainingInDrawer,
+              dailyCashPurchasesUzs,
+              dailySupplierPaymentsUzs,
+              totalDailySalesUzs,
+            },
+            update: {
+              terminalAmount,
+              clickAmount,
+              cashRemainingInDrawer,
+              dailyCashPurchasesUzs,
+              dailySupplierPaymentsUzs,
+              totalDailySalesUzs,
+            },
+          }),
+          tx.dailyRegister.upsert({
+            where: { date: dateKey },
+            create: {
+              date: dateKey,
+              cashUzs: cashRemainingInDrawer,
+              cashRemainingInDrawer,
+              clickAmount,
+              terminalAmount,
+              dailyCashPurchasesUzs,
+              dailySupplierPaymentsUzs,
+              totalDailySalesUzs,
+              isClosed: true,
+            },
+            update: {
+              cashUzs: cashRemainingInDrawer,
+              cashRemainingInDrawer,
+              clickAmount,
+              terminalAmount,
+              dailyCashPurchasesUzs,
+              dailySupplierPaymentsUzs,
+              totalDailySalesUzs,
+              isClosed: true,
+            },
+          }),
+        ]);
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
+
+    return {
+      date: dateKey,
+      terminalAmount,
+      clickAmount,
+      cashRemainingInDrawer,
+      dailyCashPurchasesUzs,
+      dailyCashPurchasesCount,
+      dailySupplierPaymentsUzs,
+      dailySupplierPaymentsCount,
+      totalDailySalesUzs,
+      formattedText,
+    };
+  }
+
   static getPeriodRange(period: ReportPeriod, now: Date = new Date()): PeriodRange {
     const year = now.getFullYear();
     const month = now.getMonth();
@@ -371,6 +594,11 @@ export class ReportService {
       ? ` (${formatSignedMoney(m.netSupplierDebtChangeUzs, 'UZS')}${m.netSupplierDebtChangeUsd !== 0 ? `, ${formatSignedMoney(m.netSupplierDebtChangeUsd, 'USD')}` : ''})`
       : ' (O\'zgarishsiz)';
 
+    const cashVsCredit = this.calculateCashVsCreditAnalytics({
+      cashTotal: m.cashPurchasesUzs,
+      creditTotal: m.incomingGoodsUzs,
+    });
+
     lines.push(
       `├ 📦 Nasiyaga kelgan tovar (${m.incomingGoodsCount} ta): **${formatDualCurrency(m.incomingGoodsUzs, m.incomingGoodsUsd)}**`,
       `├ 📊 JAMI QARZ (UZS): **${formatMoney(m.totalSupplierDebtUzs, 'UZS')}**`,
@@ -379,6 +607,8 @@ export class ReportService {
       '',
       `🛒 **3. NAQD TOVAR XARIDLARI**`,
       `└ 💵 Naqdga olingan tovar (${m.cashPurchasesCount} ta): **${formatMoney(m.cashPurchasesUzs, 'UZS')}**`,
+      '',
+      cashVsCredit.formattedBlock,
       '',
       `👥 **4. MIJOZLAR NASIYASI**`,
       `├ 📤 Yangi berilgan nasiya: **${formatDualCurrency(m.newCustomerDebtUzs, m.newCustomerDebtUsd)}**`,
@@ -421,6 +651,7 @@ export class ReportService {
     const [
       registers,
       supplierTransactions,
+      invoicesInPeriod,
       supplierAggregate,
       cashTransactions,
       newCustomerDebts,
@@ -434,7 +665,17 @@ export class ReportService {
       }),
       prisma.supplierTransaction.findMany({
         where: { date: { gte: startDate, lte: endDate } },
-        select: { type: true, amount: true, currency: true, supplier: { select: { name: true } } }
+        select: {
+          type: true,
+          amount: true,
+          currency: true,
+          invoiceId: true,
+          supplier: { select: { name: true } }
+        }
+      }),
+      prisma.invoice.findMany({
+        where: { createdAt: { gte: startDate, lte: endDate } },
+        select: { id: true, paymentType: true, paidCashAmount: true, creditAmount: true, totalAmount: true, currency: true }
       }),
       prisma.supplier.aggregate({
         where: { isActive: true },
@@ -462,10 +703,17 @@ export class ReportService {
       })
     ]);
 
+    const cashInvoiceIds = new Set(
+      invoicesInPeriod.filter((inv) => inv.paymentType === 'CASH').map((inv) => inv.id)
+    );
+    const filteredSupplierTransactions = supplierTransactions.filter(
+      (tx) => !(tx.type === 'INCOMING_GOODS' && tx.invoiceId && cashInvoiceIds.has(tx.invoiceId))
+    );
+
     const metrics = this.aggregateReportData(
       {
         registers,
-        supplierTransactions,
+        supplierTransactions: filteredSupplierTransactions,
         totalSupplierDebtUzs: Number(supplierAggregate._sum.debtUzs || 0),
         totalSupplierDebtUsd: Number(supplierAggregate._sum.debtUsd || 0),
         cashTransactions,
@@ -476,6 +724,29 @@ export class ReportService {
       },
       totalDays
     );
+
+    // Ensure invoices created directly via Invoice table (paidCashAmount / creditAmount) are also reflected
+    const invoiceCashSumUzs = invoicesInPeriod
+      .filter((i) => i.currency === 'UZS')
+      .reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
+    const invoiceCreditSumUzs = invoicesInPeriod
+      .filter((i) => i.currency === 'UZS')
+      .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
+
+    if (invoiceCashSumUzs > metrics.cashPurchasesUzs) {
+      metrics.cashPurchasesUzs = invoiceCashSumUzs;
+      metrics.cashPurchasesCount = Math.max(
+        metrics.cashPurchasesCount,
+        invoicesInPeriod.filter((i) => Number(i.paidCashAmount || 0) > 0).length
+      );
+    }
+    if (invoiceCreditSumUzs > metrics.incomingGoodsUzs) {
+      metrics.incomingGoodsUzs = invoiceCreditSumUzs;
+      metrics.incomingGoodsCount = Math.max(
+        metrics.incomingGoodsCount,
+        invoicesInPeriod.filter((i) => Number(i.creditAmount || 0) > 0).length
+      );
+    }
 
     return this.formatReportMessage(range, metrics);
   }

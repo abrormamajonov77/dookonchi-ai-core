@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.invoiceHandler = void 0;
 exports.buildEditableInvoiceText = buildEditableInvoiceText;
+exports.buildPendingPreviewMessage = buildPendingPreviewMessage;
 const grammy_1 = require("grammy");
 const ai_service_1 = require("../../services/ai.service");
 const image_service_1 = require("../../services/image.service");
@@ -47,15 +48,20 @@ function buildPendingPreviewMessage(invoiceData, editableText) {
     const rawTotal = Number(invoiceData.rawTotal ?? invoiceData.grossTotal ?? invoiceData.total_amount ?? 0);
     const discount = Number(invoiceData.discountAmount ?? invoiceData.discount ?? 0);
     const math = (0, formatters_1.calculateDiscountedTotal)(rawTotal, discount);
+    const percentText = invoiceData.discountLabel ||
+        (invoiceData.discountPercent && Number(invoiceData.discountPercent) > 0 ? `${invoiceData.discountPercent}%` : '');
     const title = invoiceData.isCashOverride ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**' : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
     let text = `${title}\n\n\`\`\`\n${editableText}\`\`\`\n`;
     text += `💱 Valyuta: **${currency === 'USD' ? 'USD ($)' : "UZS (so'm)"}**\n`;
-    text += `💰 Asl summa: **${(0, formatters_1.formatCurrency)(math.rawTotal, currency)}**\n`;
+    text += `📦 Tovarlarning asl summasi: **${(0, formatters_1.formatCurrency)(math.rawTotal, currency)}**\n`;
     if (math.discountAmount > 0) {
-        const label = invoiceData.discountLabel ? ` (${invoiceData.discountLabel})` : '';
+        const label = percentText ? ` (${percentText})` : '';
         text += `🏷 Skidka${label}: **-${(0, formatters_1.formatCurrency)(math.discountAmount, currency)}**\n`;
     }
-    text += `💳 Yakuniy summa: **${(0, formatters_1.formatCurrency)(math.finalTotal, currency)}**\n`;
+    else {
+        text += `🏷 Skidka: **0**\n`;
+    }
+    text += `💰 Skidkadan keyingi yakuniy summa (Itogo): **${(0, formatters_1.formatCurrency)(math.finalTotal, currency)}**\n`;
     if (invoiceData.isCashOverride) {
         text += `📦 Amal turi: 💵 Naqd xarid (Qarzga ta'sir qilmaydi)\n`;
     }
@@ -88,11 +94,41 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
         }
     }
     const { editableText, totalSum } = buildEditableInvoiceText(invoiceData, false);
-    const math = (0, formatters_1.calculateDiscountedTotal)(totalSum, invoiceData.discountLabel ?? invoiceData.discountAmount ?? invoiceData.discount ?? 0);
+    const math = (0, formatters_1.calculateDiscountedTotal)(totalSum, invoiceData.discountAmount ?? invoiceData.discount ?? 0);
     invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
     invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
     invoiceData.finalTotal = invoiceData.netTotal = math.finalTotal;
     invoiceData.currency = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
+    const contentFingerprint = supplier_service_1.SupplierService.computeContentFingerprint({
+        supplierName: invoiceData.supplierName || "Noma'lum",
+        currency: invoiceData.currency,
+        finalTotal: math.finalTotal,
+        items: Array.isArray(invoiceData.items) ? invoiceData.items : [],
+    });
+    invoiceData.contentFingerprint = contentFingerprint;
+    // MODUL 3: Stage 2 Anti-Duplicate Content Fingerprint check
+    if (!invoiceData.forceOverrideDuplicate) {
+        const dupCheck = await supplier_service_1.SupplierService.checkDuplicateInvoice({
+            imageHash: invoiceData.imageHash || null,
+            contentFingerprint,
+        });
+        if (dupCheck.isDuplicate && dupCheck.warningText) {
+            const pendingAction = await prisma_1.prisma.pendingAction.create({
+                data: {
+                    userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+                    type: 'INVOICE',
+                    data: { data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+                },
+            });
+            const dupKb = (0, inline_1.getDuplicateInvoiceWarningKeyboard)(pendingAction.id);
+            if (statusMsgId && ctx.chat?.id) {
+                return ctx.api
+                    .editMessageText(ctx.chat.id, statusMsgId, dupCheck.warningText, { reply_markup: dupKb })
+                    .catch(() => ctx.reply(dupCheck.warningText, { reply_markup: dupKb }));
+            }
+            return ctx.reply(dupCheck.warningText, { reply_markup: dupKb });
+        }
+    }
     const pendingAction = await prisma_1.prisma.pendingAction.create({
         data: {
             userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
@@ -124,7 +160,6 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
 }
 async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
     await (0, telegram_1.withChatAction)(ctx, 'upload_photo', async () => {
-        // MODUL 6: Instant status feedback message
         const statusMsg = await ctx.reply('⚡️ Nakladnoy kserokopiya qilinmoqda...').catch(() => null);
         try {
             const file = await ctx.api.getFile(fileId);
@@ -135,11 +170,47 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
                 (0, telegram_1.downloadTelegramFile)(file.file_path),
                 cache_service_1.cacheService.getSupplierNames(),
             ]);
-            const imageHash = image_service_1.ImageService.getImageHash(buffer);
-            // Parallel hash lookup and Sharp in-memory compression pipeline
-            const [processedBuffer] = await Promise.all([
-                image_service_1.ImageService.optimizeForFastOCR(buffer),
-            ]);
+            // MODUL 1: High-contrast B&W scanner buffer (<60 KB in <150 ms)
+            const processedBuffer = await image_service_1.ImageService.optimizeForFastOCR(buffer);
+            const imageHash = image_service_1.ImageService.getImageHash(processedBuffer);
+            // MODUL 3: Stage 1 ImageHash check before calling AI
+            const stage1Dup = await supplier_service_1.SupplierService.checkDuplicateInvoice({ imageHash });
+            if (stage1Dup.isDuplicate && stage1Dup.warningText && stage1Dup.existingInvoice) {
+                const dupInvoiceData = {
+                    supplierName: stage1Dup.existingInvoice.supplier?.name || "Noma'lum",
+                    exactSupplierId: stage1Dup.existingInvoice.supplierId,
+                    invoiceNo: stage1Dup.existingInvoice.invoiceNo,
+                    rawTotal: Number(stage1Dup.existingInvoice.originalAmount ?? stage1Dup.existingInvoice.totalAmount),
+                    discountAmount: Number(stage1Dup.existingInvoice.discountAmount ?? 0),
+                    finalTotal: Number(stage1Dup.existingInvoice.totalAmount),
+                    currency: stage1Dup.existingInvoice.currency,
+                    verbatimText: stage1Dup.existingInvoice.verbatimText || '',
+                    imageHash,
+                    forceOverrideDuplicate: true,
+                };
+                const pendingAction = await prisma_1.prisma.pendingAction.create({
+                    data: {
+                        userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+                        type: 'INVOICE',
+                        data: {
+                            data: dupInvoiceData,
+                            imageUrl: file.file_path,
+                            photoFileId: fileId,
+                            userPhotoMsgId: ctx.message?.message_id || null,
+                        },
+                    },
+                });
+                const dupKb = (0, inline_1.getDuplicateInvoiceWarningKeyboard)(pendingAction.id);
+                if (statusMsg && ctx.chat?.id) {
+                    await ctx.api
+                        .editMessageText(ctx.chat.id, statusMsg.message_id, stage1Dup.warningText, { reply_markup: dupKb })
+                        .catch(() => ctx.reply(stage1Dup.warningText, { reply_markup: dupKb }));
+                }
+                else {
+                    await ctx.reply(stage1Dup.warningText, { reply_markup: dupKb });
+                }
+                return;
+            }
             const caption = ctx.message?.caption?.trim() || '';
             const invoiceData = await ai_service_1.AiService.parseInvoiceImage(processedBuffer, 'image/jpeg', caption);
             invoiceData.imageHash = imageHash;
@@ -176,9 +247,10 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
 exports.invoiceHandler.on('message:photo', async (ctx) => {
     if (!ctx.user)
         return;
-    const photo = ctx.message.photo.pop();
+    const photos = ctx.message.photo;
+    const photo = photos[Math.min(photos.length - 1, 2)];
     if (photo)
-        await handleInvoiceImageUpload(ctx, photo.file_id, 'image/webp', 'Nakladnoyni');
+        await handleInvoiceImageUpload(ctx, photo.file_id, 'image/jpeg', 'Nakladnoyni');
 });
 exports.invoiceHandler.on('message:document', async (ctx, next) => {
     if (!ctx.user || !ctx.message.document.mime_type?.startsWith('image/'))
@@ -536,6 +608,26 @@ const extractPendingInvoice = async (ctx, pendingId) => {
         supplierName: invoiceData.supplierName || "Umumiy Ta'minotchi",
     };
 };
+exports.invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
+    const pendingId = ctx.match[1];
+    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    if (!pendingAction)
+        return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
+    const pData = pendingAction.data;
+    const invoiceData = pData.data || {};
+    invoiceData.forceOverrideDuplicate = true;
+    await prisma_1.prisma.pendingAction.update({
+        where: { id: pendingId },
+        data: { data: { ...pData, data: invoiceData } },
+    });
+    const actionId = `i_${pendingId}`;
+    ctx.session.step = actionId;
+    const { editableText } = buildEditableInvoiceText(invoiceData);
+    const text = buildPendingPreviewMessage(invoiceData, editableText);
+    const kb = (0, inline_1.getInvoiceConfirmationKeyboard)(actionId, editableText, invoiceData.currency || 'UZS');
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => { });
+    await ctx.answerCallbackQuery({ text: "✅ Qayta kiritishga ruxsat berildi. To'lov turini tanlang." });
+});
 exports.invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
     const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
     if (!extracted)
@@ -551,21 +643,31 @@ exports.invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => 
             rawTotal: totalSum,
             discountInput: discountAmount,
             currency,
+            paymentType: 'CREDIT',
+            paidCashAmount: 0,
+            creditAmount: finalPayable,
+            imageHash: invoiceData.imageHash || null,
+            contentFingerprint: invoiceData.contentFingerprint || null,
+            forceOverrideDuplicate: !!invoiceData.forceOverrideDuplicate,
             items: Array.isArray(invoiceData.items) ? invoiceData.items : [],
             verbatimText: invoiceData.verbatimText || invoiceData.table_text || '',
             photoFileId: pData.photoFileId || null,
             rawImageUrl: pData.imageUrl || null,
         });
+        if (result.isDuplicate && result.warningText) {
+            await ctx.editMessageText(result.warningText, { reply_markup: undefined });
+            return;
+        }
         const finalDebt = currency === 'USD' ? Number(result.supplier.debtUsd) : Number(result.supplier.debtUzs);
         await Promise.all([
-            ctx.editMessageText(`✅ **Nakladnoy muvaffaqiyatli saqlandi!**\n\n` +
+            ctx.editMessageText(`✅ **Nakladnoy (📝 Nasiyaga) muvaffaqiyatli saqlandi!**\n\n` +
                 `🏢 Ta'minotchi: **${result.supplier.name}**\n` +
-                `💰 Asl summa: **${(0, formatters_1.formatCurrency)(totalSum, currency)}**\n` +
+                `📦 Tovarlarning asl summasi: **${(0, formatters_1.formatCurrency)(totalSum, currency)}**\n` +
                 (discountAmount > 0 ? `🏷 Skidka: **-${(0, formatters_1.formatCurrency)(discountAmount, currency)}**\n` : '') +
-                `📥 Yangi kirim: **+${(0, formatters_1.formatCurrency)(finalPayable, currency)}**\n` +
+                `💰 Skidkadan keyingi yakuniy summa (Itogo): **+${(0, formatters_1.formatCurrency)(finalPayable, currency)}**\n` +
                 `📊 **Yakuniy qarz qoldig'i (${currency}):** **${(0, formatters_1.formatCurrency)(finalDebt, currency)}**`, {
                 parse_mode: 'Markdown',
-                reply_markup: (0, inline_1.getSavedInvoiceCardKeyboard)(result.invoice.id, result.supplier.id, pData.photoFileId, result.transaction.id),
+                reply_markup: (0, inline_1.getSavedInvoiceCardKeyboard)(result.invoice.id, result.supplier.id, pData.photoFileId, result.transaction?.id),
             }),
             (0, telegram_1.safeDelete)(ctx, ctx.chat?.id, pData.userPhotoMsgId),
         ]);
@@ -580,29 +682,42 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
     const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
     if (!extracted)
         return;
-    const { pData, invoiceData, finalPayable, currency, supplierName } = extracted;
+    const { pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
     try {
-        const today = (0, formatters_1.getToday)();
-        await prisma_1.prisma.$transaction([
-            prisma_1.prisma.cashTransaction.create({
-                data: {
-                    partyName: supplierName,
-                    amount: finalPayable,
-                    currency,
-                    items: JSON.stringify(invoiceData.items || invoiceData.sampleItems || []),
-                    createdBy: ctx.user?.name || 'Bot',
-                },
-            }),
-            prisma_1.prisma.dailyRegister.upsert({
-                where: { date: today },
-                create: currency === 'USD' ? { date: today, cashUsd: -finalPayable } : { date: today, cashUzs: -finalPayable },
-                update: currency === 'USD'
-                    ? { cashUsd: { decrement: finalPayable } }
-                    : { cashUzs: { decrement: finalPayable } },
-            }),
-        ]);
+        const result = await supplier_service_1.SupplierService.createInvoiceWithItems({
+            supplierId: invoiceData.exactSupplierId && invoiceData.exactSupplierId !== 'CREATE_NEW'
+                ? invoiceData.exactSupplierId
+                : undefined,
+            supplierName,
+            invoiceNo: invoiceData.invoiceNo,
+            rawTotal: totalSum,
+            discountInput: discountAmount,
+            currency,
+            paymentType: 'CASH',
+            paidCashAmount: finalPayable,
+            creditAmount: 0,
+            imageHash: invoiceData.imageHash || null,
+            contentFingerprint: invoiceData.contentFingerprint || null,
+            forceOverrideDuplicate: !!invoiceData.forceOverrideDuplicate,
+            items: Array.isArray(invoiceData.items) ? invoiceData.items : [],
+            verbatimText: invoiceData.verbatimText || invoiceData.table_text || '',
+            photoFileId: pData.photoFileId || null,
+            rawImageUrl: pData.imageUrl || null,
+        });
+        if (result.isDuplicate && result.warningText) {
+            await ctx.editMessageText(result.warningText, { reply_markup: undefined });
+            return;
+        }
         await Promise.all([
-            ctx.editMessageText(`✅ Naqd xarid saqlandi: ${supplierName} (${(0, formatters_1.formatCurrency)(finalPayable, currency)}). Bugungi naqd aylanmaga qo'shildi.`),
+            ctx.editMessageText(`✅ **Nakladnoy (💵 Naqdga) muvaffaqiyatli saqlandi!**\n\n` +
+                `🏢 Ta'minotchi: **${result.supplier.name}**\n` +
+                `📦 Tovarlarning asl summasi: **${(0, formatters_1.formatCurrency)(totalSum, currency)}**\n` +
+                (discountAmount > 0 ? `🏷 Skidka: **-${(0, formatters_1.formatCurrency)(discountAmount, currency)}**\n` : '') +
+                `💵 Naqd to'langan summa (Itogo): **${(0, formatters_1.formatCurrency)(finalPayable, currency)}**\n` +
+                `📊 Qarzga yozilmadi (0). Bugungi Z-Otchyot naqd xaridlariga qo'shildi.`, {
+                parse_mode: 'Markdown',
+                reply_markup: (0, inline_1.getSavedInvoiceCardKeyboard)(result.invoice.id, result.supplier.id, pData.photoFileId, result.transaction?.id),
+            }),
             (0, telegram_1.safeDelete)(ctx, ctx.chat?.id, pData.userPhotoMsgId),
         ]);
         ctx.session.step = undefined;

@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getDiscountConfirmationKeyboard = exports.getTemplateConfirmKeyboard = void 0;
 exports.getConfirmationKeyboard = getConfirmationKeyboard;
 exports.getInvoiceConfirmationKeyboard = getInvoiceConfirmationKeyboard;
+exports.getDuplicateInvoiceWarningKeyboard = getDuplicateInvoiceWarningKeyboard;
 exports.getSavedInvoiceCardKeyboard = getSavedInvoiceCardKeyboard;
 exports.addPaginationRow = addPaginationRow;
 exports.addTwoColButtons = addTwoColButtons;
@@ -34,11 +35,16 @@ function getInvoiceConfirmationKeyboard(actionId, copyTextContent, currency = 'U
         .row()
         .text(`💱 Valyutani o'zgartirish (UZS ↔ USD) [${currency}]`, `toggle_invoice_currency:p_${pendingRef}`)
         .row()
-        .text('📦 Nasiyaga (Qarzimizga yozish)', `confirm_invdebt_${actionId}`)
-        .row()
-        .text('💵 Naqdga (Faqat naqd arxiviga)', `confirm_invcash_${actionId}`)
+        .text('📝 Nasiyaga olindi', `confirm_invdebt_${actionId}`)
+        .text('💵 Naqdga olindi', `confirm_invcash_${actionId}`)
         .row()
         .text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+function getDuplicateInvoiceWarningKeyboard(pendingId) {
+    return new grammy_1.InlineKeyboard()
+        .text("⚠️ Bu haqiqatan yangi yuk (baribir qo'shish)", `force_dup_inv:${pendingId}`)
+        .row()
+        .text('❌ Bekor qilish', `cancel_i_${pendingId}`);
 }
 const getDiscountConfirmationKeyboard = (actionId, finalPayable, isCash, currency = 'UZS') => {
     const pendingRef = actionId.replace(/^i_/, '');

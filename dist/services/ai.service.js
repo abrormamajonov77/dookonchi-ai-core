@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AiService = exports.VoiceIntentSchema = exports.InvoiceSchema = exports.InvoiceItemSchema = void 0;
 exports.generateContentWithFallback = generateContentWithFallback;
+exports.parseCompactScannerRows = parseCompactScannerRows;
 exports.parseVerbatimTableToItems = parseVerbatimTableToItems;
 exports.buildVerbatimTableText = buildVerbatimTableText;
 exports.normalizeVerbatimInvoice = normalizeVerbatimInvoice;
@@ -48,24 +49,32 @@ exports.InvoiceItemSchema = zod_1.z
 exports.InvoiceSchema = zod_1.z.object({
     total_amount: zod_1.z.number().default(0),
     rawTotal: zod_1.z.number().optional().nullable(),
+    subtotalBeforeDiscount: zod_1.z.number().optional().nullable(),
+    discountPercent: zod_1.z.number().optional().nullable(),
     discount: zod_1.z.number().default(0),
     finalTotal: zod_1.z.number().optional().nullable(),
+    printedFinalTotal: zod_1.z.number().optional().nullable(),
     currency: zod_1.z.enum(['UZS', 'USD']).default('UZS'),
     verbatimText: zod_1.z.string().default(''),
     table_text: zod_1.z.string().default(''),
     supplier: zod_1.z.string().optional().nullable(),
     invoiceNo: zod_1.z.string().optional().nullable(),
+    invoiceNumber: zod_1.z.string().optional().nullable(),
+    invoiceDate: zod_1.z.string().optional().nullable(),
     supplierName: zod_1.z.string().optional().nullable(),
     grossTotal: zod_1.z.number().optional().nullable(),
     discountAmount: zod_1.z.number().optional().nullable(),
     netTotal: zod_1.z.number().optional().nullable(),
     itemsCount: zod_1.z.number().optional().nullable(),
     sampleItems: zod_1.z.array(zod_1.z.string()).optional().nullable(),
+    rows: zod_1.z.array(zod_1.z.string()).optional().nullable(),
     items: zod_1.z.any().optional().nullable(),
     isCaptionOverride: zod_1.z.boolean().optional(),
     isCashOverride: zod_1.z.boolean().optional(),
     exactSupplierId: zod_1.z.string().optional().nullable(),
     discountLabel: zod_1.z.string().optional().nullable(),
+    imageHash: zod_1.z.string().optional().nullable(),
+    contentFingerprint: zod_1.z.string().optional().nullable(),
 });
 exports.VoiceIntentSchema = zod_1.z.object({
     intent: zod_1.z.enum([
@@ -103,33 +112,27 @@ VALYUTA VA SENT QOIDASI:
 - "102 dollar 17 sent", "102.17$", "102,17 USDT" kabi summalarda kasr qismini (sentlarni, masalan 102.17) ASLO yaxlitlama, aynan 102.17 qilib qaytar!
 Summalarni (amount) doim MUSBAT (Math.abs) qilib raqamda yoz. Valyutani (currency) UZS yoki USD qilib belgil.
 Ism/nomni (name) kirit (ta'minotchi, mijoz yoki tovar nomi). Javob faqat JSON formatda bo'lsin.`;
-const VERBATIM_OCR_SYSTEM_PROMPT = `Sen tezyurar va o'ta aniq hujjat skanerisansan (100% Verbatim Kserokopiya OCR Mode).
+const COMPACT_SCANNER_PROMPT = `Sen ultra-tezkor kassa skaner apparatisansan (<=3s Single-Pass Scanner Mode).
 QOIDA:
-1. Nakladnoydagi BARCHA qatorlarni 1-qatordan oxirgi qatorgacha hech bir so'zni qisqartirmasdan, 100% birga-bir "Kserokopiya" (Verbatim) shaklida o'qi!
-2. Har bir qatorda: № | Mahsulotning nakladnoydagi aniq nomi | Soni / O'lchov birligi | 1 dona narxi (Kelish narxi) | Qator jami summasi to'liq chiqishi shart (valyutasi bilan: so'm yoki $).
-3. AI qatorlarni bir-biriga qo'shib ichki kalkulyatsiya qilmasin (vaqt ketmasligi va adashmasligi uchun), faqat nakladnoyda yozilgan raqamlarni shundayligicha ko'chirsin va eng pastdagi Umumiy summa (rawTotal), Skidka (discount), To'lanadigan yakuniy summa (finalTotal) hamda Valyuta (currency: "UZS" | "USD") ni ajratib bersin.
-4. VALYUTA QOIDASI: Agar nakladnoyda $, USD, USDT, у.е. belgisi bo'lsa yoki narxlar kichik kasr sonlarda (masalan, 1.25, 102.17) yozilgan bo'lsa, currency: 'USD' qaytar va kasr qismini (sentlarni, masalan .17) aslo yaxlitlama!
+1. Nakladnoydagi BARCHA qatorlarni 1-qatordan oxirgi qatorgacha hech bir so'zni qisqartirmasdan o'qi.
+2. Uzun jadval yozma! Faqat "rows" massivida har bir qatorni "№|Nomi|Soni va birligi|1 dona narxi|Qator jami summasi" formatida qaytar.
+3. Eng pastdagi skidkagacha bo'lgan jami summani (subtotalBeforeDiscount), skidka foizini (discountPercent), skidka summasini (discountAmount) va qog'ozda yozilgan yakuniy summani (printedFinalTotal) yoz.
+4. Agar $, USD, USDT, у.е. bo'lsa yoki narxlar kichik kasr sonlarda (1.25, 102.17) bo'lsa -> currency="USD", aks holda "UZS". Sentlarni aslo yaxlitlama!
 
-Javobni FAQAT quyidagi JSON formatida qaytar:
+Javobni FAQAT ushbu qisqa JSON formatda qaytar:
 {
-  "supplier": "Ta'minotchi nomi",
-  "invoiceNo": "12345",
+  "supplierName": "Milter",
+  "invoiceNumber": "145",
+  "invoiceDate": "2026-11-14",
   "currency": "UZS",
-  "rawTotal": 1280400,
-  "discount": 0,
-  "finalTotal": 1280400,
-  "verbatimText": "| № | Mahsulot nomi | Soni | Narxi | Summasi |\\n|---|---|---|---|---|\\n| 1 | Marvari shokolad | 10 korobka | 45,000 so'm | 450,000 so'm |",
-  "items": [
-    {
-      "rawName": "Marvari shokolad",
-      "normalizedName": "marvari shokolad",
-      "quantity": 10,
-      "unit": "korobka",
-      "unitPrice": 45000,
-      "lineTotal": 450000,
-      "currency": "UZS"
-    }
-  ]
+  "rows": [
+    "1|Marvari shokolad|10 kor|45000|450000",
+    "2|Milter Mayonez 500g|20 dona|15000|300000"
+  ],
+  "subtotalBeforeDiscount": 2000000,
+  "discountPercent": 5,
+  "discountAmount": 100000,
+  "printedFinalTotal": 1900000
 }`;
 async function generateContentWithFallback(aiCall, models = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']) {
     let lastError = null;
@@ -169,7 +172,9 @@ const askJson = async (parts, maxOutputTokens, models) => {
         contents: [{ role: 'user', parts }],
         config: {
             responseMimeType: 'application/json',
-            temperature: 0.1,
+            temperature: 0,
+            topK: 1,
+            thinkingConfig: { thinkingBudget: 0 },
             ...(maxOutputTokens ? { maxOutputTokens } : {}),
         },
     }), models);
@@ -177,6 +182,51 @@ const askJson = async (parts, maxOutputTokens, models) => {
         throw new Error('Empty response from Gemini');
     return JSON.parse(res.text);
 };
+/**
+ * MODUL 1.3: Ultra-fast (<0.001s) Node.js parser for compact scanner `rows` ("№|Nomi|Soni|Narxi|Summasi").
+ */
+function parseCompactScannerRows(rows, defaultCurrency = 'UZS') {
+    if (!Array.isArray(rows) || rows.length === 0)
+        return [];
+    const items = [];
+    for (const rawRow of rows) {
+        if (!rawRow || typeof rawRow !== 'string')
+            continue;
+        const cols = rawRow
+            .split('|')
+            .map((c) => c.trim())
+            .filter((c) => c.length > 0);
+        if (cols.length < 2)
+            continue;
+        const firstIsIndex = /^\d+\.?$/.test(cols[0]) && cols.length >= 4;
+        const rawName = (firstIsIndex ? cols[1] : cols[0]) || "Noma'lum tovar";
+        const qtyCol = (firstIsIndex ? cols[2] : cols[1]) || '1 dona';
+        const priceCol = (firstIsIndex ? cols[3] : cols[2]) || '0';
+        const totalCol = (firstIsIndex ? cols[4] : cols[3]) || '';
+        const qtyMatch = qtyCol.match(/(\d+(?:[.,]\d+)?)\s*(.*)/);
+        const quantity = qtyMatch ? parseFloat(qtyMatch[1].replace(',', '.')) || 1 : 1;
+        const unit = (qtyMatch?.[2] || '').replace(/[xх*]/gi, '').trim() || 'dona';
+        const parsedPrice = (0, formatters_1.parseCurrencyAndAmount)(priceCol);
+        const itemCurrency = parsedPrice.currency === 'USD' || /\$/i.test(priceCol) || /\$/i.test(totalCol) ? 'USD' : defaultCurrency;
+        const unitPrice = Number(parsedPrice.amount.toFixed(2));
+        const parsedTotal = totalCol ? (0, formatters_1.parseCurrencyAndAmount)(totalCol).amount : Number((quantity * unitPrice).toFixed(2));
+        const lineTotal = Number((parsedTotal > 0 ? parsedTotal : quantity * unitPrice).toFixed(2));
+        const cleanRawName = rawName.trim();
+        const normalizedName = translit_service_1.TranslitService.toLatin(cleanRawName).toLowerCase().trim() || cleanRawName.toLowerCase();
+        items.push({
+            rawName: cleanRawName,
+            normalizedName,
+            productName: cleanRawName,
+            quantity,
+            unit,
+            unitPrice,
+            lineTotal,
+            totalPrice: lineTotal,
+            currency: itemCurrency,
+        });
+    }
+    return items;
+}
 function parseVerbatimTableToItems(tableText, defaultCurrency = 'UZS') {
     if (!tableText || !tableText.trim())
         return [];
@@ -186,7 +236,6 @@ function parseVerbatimTableToItems(tableText, defaultCurrency = 'UZS') {
         .filter(Boolean);
     const extracted = [];
     for (const line of lines) {
-        // Skip markdown header separator lines like |---|---|
         if (/^\|?[\s\-:|]+\|?$/.test(line))
             continue;
         if (line.includes('|')) {
@@ -196,13 +245,11 @@ function parseVerbatimTableToItems(tableText, defaultCurrency = 'UZS') {
                 .filter(Boolean);
             if (cols.length < 2)
                 continue;
-            // Skip table header row
             const joinedLower = cols.join(' ').toLowerCase();
             if ((joinedLower.includes('mahsulot') || joinedLower.includes('tovar') || joinedLower.includes('наименование')) &&
                 (joinedLower.includes('narx') || joinedLower.includes('soni') || joinedLower.includes('цена') || joinedLower.includes('сумма'))) {
                 continue;
             }
-            // Determine column positions: either [No, Name, Qty, UnitPrice, LineTotal] or [Name, Qty, UnitPrice, LineTotal]
             const firstIsIndex = /^\d+\.?$/.test(cols[0]) && cols.length >= 4;
             const nameCol = firstIsIndex ? cols[1] : cols[0];
             const qtyCol = firstIsIndex ? cols[2] : cols[1] || '1';
@@ -246,11 +293,14 @@ function normalizeVerbatimInvoice(raw, caption) {
     const parsedCaptionCurrency = caption ? (0, formatters_1.parseCurrencyAndAmount)(caption) : null;
     let currency = raw.currency === 'USD' ||
         parsedCaptionCurrency?.currency === 'USD' ||
-        /\$|usd|usdt|у\.е/i.test(String(raw.verbatimText || raw.table_text || ''))
+        /\$|usd|usdt|у\.е/i.test(String(raw.verbatimText || raw.table_text || (raw.rows || []).join(' ')))
         ? 'USD'
         : 'UZS';
     let items = [];
-    if (Array.isArray(raw.items) && raw.items.length > 0) {
+    if (Array.isArray(raw.rows) && raw.rows.length > 0) {
+        items = parseCompactScannerRows(raw.rows, currency);
+    }
+    else if (Array.isArray(raw.items) && raw.items.length > 0) {
         items = raw.items.map((it) => exports.InvoiceItemSchema.parse({
             ...it,
             currency: it.currency === 'USD' ? 'USD' : currency,
@@ -263,23 +313,41 @@ function normalizeVerbatimInvoice(raw, caption) {
         currency = 'USD';
     }
     const itemsSum = items.reduce((acc, it) => acc + Number(it.lineTotal || it.totalPrice || 0), 0);
-    const rawTotalCandidate = Number(raw.rawTotal ?? raw.originalAmount ?? raw.grossTotal ?? raw.total_amount ?? (itemsSum > 0 ? itemsSum : 0));
-    const rawDiscountInput = raw.discountLabel ?? raw.discount ?? raw.discountAmount ?? 0;
-    const mathResult = (0, formatters_1.calculateDiscountedTotal)(rawTotalCandidate, rawDiscountInput);
+    const subtotalBeforeDiscount = Number(raw.subtotalBeforeDiscount ?? raw.rawTotal ?? raw.originalAmount ?? raw.grossTotal ?? raw.total_amount ?? 0);
+    const printedFinalTotal = Number(raw.printedFinalTotal ?? raw.finalTotal ?? raw.netTotal ?? subtotalBeforeDiscount ?? itemsSum ?? 0);
+    const discountPercent = raw.discountPercent ?? null;
+    const discountAmountInput = raw.discountLabel ?? raw.discountAmount ?? raw.discount ?? 0;
+    // MODUL 2: Double-Discount Guard reconciliation
+    const reconciled = (0, formatters_1.reconcileInvoiceTotals)({
+        rows: items,
+        itemsSum,
+        subtotalBeforeDiscount,
+        discountPercent,
+        discountAmount: discountAmountInput,
+        printedFinalTotal,
+    });
     const verbatimText = items.length > 0
         ? buildVerbatimTableText(items, currency)
         : String(raw.verbatimText || raw.table_text || '').trim();
-    const supplierName = (caption || raw.supplier || raw.supplierName || "Noma'lum").trim();
+    const supplierName = (caption || raw.supplierName || raw.supplier || "Noma'lum").trim();
+    const invoiceNo = raw.invoiceNumber ?? raw.invoiceNo ?? null;
+    const discountLabel = raw.discountLabel || (reconciled.discountPercent > 0 ? `${reconciled.discountPercent}%` : null);
     return exports.InvoiceSchema.parse({
         ...raw,
         currency,
-        rawTotal: mathResult.rawTotal,
-        total_amount: mathResult.rawTotal,
-        grossTotal: mathResult.rawTotal,
-        discount: mathResult.discountAmount,
-        discountAmount: mathResult.discountAmount,
-        finalTotal: mathResult.finalTotal,
-        netTotal: mathResult.finalTotal,
+        invoiceNo,
+        invoiceNumber: invoiceNo,
+        subtotalBeforeDiscount: reconciled.rawTotal,
+        rawTotal: reconciled.rawTotal,
+        total_amount: reconciled.rawTotal,
+        grossTotal: reconciled.rawTotal,
+        discountPercent: reconciled.discountPercent,
+        discount: reconciled.discountAmount,
+        discountAmount: reconciled.discountAmount,
+        printedFinalTotal: reconciled.finalTotal,
+        finalTotal: reconciled.finalTotal,
+        netTotal: reconciled.finalTotal,
+        discountLabel,
         verbatimText,
         table_text: verbatimText,
         supplier: raw.supplier ?? supplierName,
@@ -292,18 +360,18 @@ function normalizeVerbatimInvoice(raw, caption) {
 class AiService {
     static async parseInvoiceImage(imageBuffer, mimeType = 'image/jpeg', caption) {
         return (0, retry_1.withRetry)(async () => {
-            logger_1.logger.info('Sending invoice image to Gemini for 100% Verbatim OCR + Structured Items Extraction');
+            logger_1.logger.info('Sending invoice image to Gemini for Single-Pass Compact Scanner OCR');
             const parsed = await askJson([
-                { text: VERBATIM_OCR_SYSTEM_PROMPT },
+                { text: COMPACT_SCANNER_PROMPT },
                 { inlineData: { data: imageBuffer.toString('base64'), mimeType } },
-            ], 8192, ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
+            ], 4096, ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
             return normalizeVerbatimInvoice(parsed, caption);
         }, 2, 1000, 90000);
     }
     static async parseInvoiceText(invoiceText) {
         return (0, retry_1.withRetry)(async () => {
-            const prompt = `${VERBATIM_OCR_SYSTEM_PROMPT}\n\nFoydalanuvchi quyidagi nakladnoy matnini yubordi. Barcha qatorlarni 100% kserokopiya shaklida verbatimText va items massiviga ajrat:\nMatn: "${invoiceText}"`;
-            const parsed = await askJson([{ text: prompt }], 8192, ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']);
+            const prompt = `${COMPACT_SCANNER_PROMPT}\n\nFoydalanuvchi quyidagi nakladnoy matnini yubordi. Barcha qatorlarni rows massiviga va yakuniy raqamlarga ajrat:\nMatn: "${invoiceText}"`;
+            const parsed = await askJson([{ text: prompt }], 4096, ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']);
             return normalizeVerbatimInvoice(parsed);
         }, 2, 1000, 30000);
     }
