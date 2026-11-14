@@ -6,15 +6,22 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ImageService = void 0;
 const sharp_1 = __importDefault(require("sharp"));
 const crypto_1 = __importDefault(require("crypto"));
+sharp_1.default.cache({ memory: 50, files: 0, items: 100 });
+const memoryBufferCache = new WeakMap();
 class ImageService {
     static async optimizeForFastOCR(buffer) {
-        return (0, sharp_1.default)(buffer)
+        const cached = memoryBufferCache.get(buffer);
+        if (cached)
+            return cached;
+        const output = await (0, sharp_1.default)(buffer, { failOn: 'none', sequentialRead: true })
             .rotate()
-            .resize({ width: 1400, withoutEnlargement: true })
+            .resize({ width: 1280, withoutEnlargement: true, fastShrinkOnLoad: true, kernel: 'nearest' })
             .grayscale()
             .normalize()
-            .jpeg({ quality: 75, progressive: true })
+            .webp({ quality: 75, effort: 0 })
             .toBuffer();
+        memoryBufferCache.set(buffer, output);
+        return output;
     }
     static getImageHash(buffer) {
         return crypto_1.default.createHash('sha256').update(buffer).digest('hex');

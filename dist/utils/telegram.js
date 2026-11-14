@@ -1,13 +1,30 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearSession = exports.safeDelete = void 0;
+exports.clearSession = exports.safeDelete = exports.httpsKeepAliveAgent = exports.httpKeepAliveAgent = void 0;
 exports.withChatAction = withChatAction;
 exports.handleInlineAction = handleInlineAction;
 exports.downloadTelegramFile = downloadTelegramFile;
 exports.replyOrEdit = replyOrEdit;
 exports.formatFriendlyError = formatFriendlyError;
 exports.registerTemplateActions = registerTemplateActions;
+const node_http_1 = __importDefault(require("node:http"));
+const node_https_1 = __importDefault(require("node:https"));
 const env_1 = require("../config/env");
+exports.httpKeepAliveAgent = new node_http_1.default.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+});
+exports.httpsKeepAliveAgent = new node_https_1.default.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+});
 async function withChatAction(ctx, action, task) {
     await ctx.replyWithChatAction(action).catch(() => { });
     const timer = setInterval(() => ctx.replyWithChatAction(action).catch(() => { }), 4000);
@@ -27,7 +44,11 @@ async function handleInlineAction(ctx, task) {
     }
 }
 async function downloadTelegramFile(filePath) {
-    const res = await fetch(`https://api.telegram.org/file/bot${env_1.env.BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(15000) });
+    const url = `https://api.telegram.org/file/bot${env_1.env.BOT_TOKEN}/${filePath}`;
+    const res = await fetch(url, {
+        signal: AbortSignal.timeout(15000),
+        headers: { Connection: 'keep-alive' },
+    });
     if (!res.ok)
         throw new Error(`Faylni yuklab bo'lmadi (${res.statusText})`);
     return Buffer.from(await res.arrayBuffer());
@@ -62,8 +83,9 @@ function registerTemplateActions(composer, prefix, stepName, tempType, onConfirm
         await ctx.editMessageText("✍️ To'g'ri ma'lumotlarni qaytadan yozib yuboring (oddiy matnda yoki shablonda):");
     });
     composer.callbackQuery(new RegExp(`^confirm_${prefix}_conf_`), async (ctx) => {
-        if (ctx.session.tempData?.type !== tempType)
+        if (ctx.session.tempData?.type !== tempType) {
             return ctx.answerCallbackQuery({ text: "Bu so'rov eskirgan, qaytadan kiriting!", show_alert: true });
+        }
         try {
             await ctx.editMessageText(await onConfirm(ctx, ctx.session.tempData.data));
             (0, exports.clearSession)(ctx);

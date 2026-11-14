@@ -1,24 +1,52 @@
+import http from 'node:http';
+import https from 'node:https';
 import { env } from '../config/env';
 import { MyContext } from '../bot/context';
 
+export const httpKeepAliveAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+});
+
+export const httpsKeepAliveAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+});
+
 export async function withChatAction<T>(ctx: any, action: string, task: () => Promise<T>): Promise<T> {
-  await ctx.replyWithChatAction(action).catch(() => { });
-  const timer = setInterval(() => ctx.replyWithChatAction(action).catch(() => { }), 4000);
-  try { return await task(); } finally { clearInterval(timer); }
+  await ctx.replyWithChatAction(action).catch(() => {});
+  const timer = setInterval(() => ctx.replyWithChatAction(action).catch(() => {}), 4000);
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 export async function handleInlineAction<T>(ctx: any, task: () => Promise<T>): Promise<T> {
-  try { return await task(); } finally { await ctx.answerCallbackQuery().catch(() => { }); }
+  try {
+    return await task();
+  } finally {
+    await ctx.answerCallbackQuery().catch(() => {});
+  }
 }
 
 export async function downloadTelegramFile(filePath: string): Promise<Buffer> {
-  const res = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(15000) });
+  const url = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+    headers: { Connection: 'keep-alive' },
+  });
   if (!res.ok) throw new Error(`Faylni yuklab bo'lmadi (${res.statusText})`);
   return Buffer.from(await res.arrayBuffer());
 }
 
 export const safeDelete = async (ctx: MyContext, chatId?: number | string, msgId?: number | null) => {
-  if (chatId && msgId) await ctx.api.deleteMessage(chatId, msgId).catch(() => { });
+  if (chatId && msgId) await ctx.api.deleteMessage(chatId, msgId).catch(() => {});
 };
 
 export const clearSession = (ctx: MyContext) => {
@@ -29,7 +57,7 @@ export const clearSession = (ctx: MyContext) => {
 export async function replyOrEdit(ctx: MyContext, text: string, keyboard?: any, isEdit = false) {
   const opts: any = { parse_mode: 'Markdown', reply_markup: keyboard };
   return isEdit && ctx.callbackQuery?.message
-    ? ctx.api.editMessageText(ctx.chat!.id, ctx.callbackQuery.message.message_id, text, opts).catch(() => { })
+    ? ctx.api.editMessageText(ctx.chat!.id, ctx.callbackQuery.message.message_id, text, opts).catch(() => {})
     : ctx.reply(text, opts);
 }
 
@@ -40,13 +68,21 @@ export function formatFriendlyError(error: unknown): string {
   return msg;
 }
 
-export function registerTemplateActions(composer: any, prefix: string, stepName: string, tempType: string, onConfirm: (ctx: MyContext, data: any) => Promise<string>) {
+export function registerTemplateActions(
+  composer: any,
+  prefix: string,
+  stepName: string,
+  tempType: string,
+  onConfirm: (ctx: MyContext, data: any) => Promise<string>
+) {
   composer.callbackQuery(`${prefix}:edit`, async (ctx: MyContext) => {
     ctx.session.step = stepName;
     await ctx.editMessageText("✍️ To'g'ri ma'lumotlarni qaytadan yozib yuboring (oddiy matnda yoki shablonda):");
   });
   composer.callbackQuery(new RegExp(`^confirm_${prefix}_conf_`), async (ctx: MyContext) => {
-    if (ctx.session.tempData?.type !== tempType) return ctx.answerCallbackQuery({ text: "Bu so'rov eskirgan, qaytadan kiriting!", show_alert: true });
+    if (ctx.session.tempData?.type !== tempType) {
+      return ctx.answerCallbackQuery({ text: "Bu so'rov eskirgan, qaytadan kiriting!", show_alert: true });
+    }
     try {
       await ctx.editMessageText(await onConfirm(ctx, ctx.session.tempData.data));
       clearSession(ctx);

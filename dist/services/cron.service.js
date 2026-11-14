@@ -74,10 +74,13 @@ function startCronJobs(bot) {
     node_cron_1.default.schedule('0 21 * * *', async () => {
         logger_1.logger.info('Running cron: 21:00 Daily Summary');
         try {
-            const r = await prisma_1.prisma.dailyRegister.findUnique({ where: { date: (0, formatters_1.getToday)() } });
+            const [r, supAgg] = await Promise.all([
+                prisma_1.prisma.dailyRegister.findUnique({ where: { date: (0, formatters_1.getToday)() } }),
+                prisma_1.prisma.supplier.aggregate({ where: { isActive: true }, _sum: { debtUzs: true, debtUsd: true } }),
+            ]);
             const body = r
-                ? `Naqd: ${(0, formatters_1.formatMoney)(r.cashUzs)}\nClick: ${(0, formatters_1.formatMoney)(r.clickAmount)}\nTerminal: ${(0, formatters_1.formatMoney)(r.terminalAmount)}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n`
-                : "Bugun kassa ma'lumotlari kiritilmadi!\n";
+                ? `Naqd (UZS): ${(0, formatters_1.formatMoney)(r.cashUzs, 'UZS')}\nNaqd (USD): ${(0, formatters_1.formatMoney)(r.cashUsd, 'USD')}\nClick: ${(0, formatters_1.formatMoney)(r.clickAmount, 'UZS')}\nTerminal: ${(0, formatters_1.formatMoney)(r.clickAmount, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`
+                : `Bugun kassa ma'lumotlari kiritilmadi!\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`;
             await notifyOwner(`📊 **Kunlik Yakuniy Hisobot**\n\n${body}`);
         }
         catch (error) {

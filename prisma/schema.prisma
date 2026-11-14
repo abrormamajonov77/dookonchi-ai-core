@@ -57,11 +57,13 @@ model Supplier {
   updatedAt DateTime @updatedAt
 
   invoices     Invoice[]
+  invoiceItems InvoiceItem[]
   payments     SupplierPayment[]
   transactions SupplierTransaction[]
 
   @@index([name])
   @@index([isActive, debtUzs(sort: Desc)])
+  @@index([isActive, debtUsd(sort: Desc)])
 }
 
 model Product {
@@ -90,6 +92,7 @@ model Invoice {
   originalAmount Decimal? @db.Decimal(18, 2)
   discountAmount Decimal? @db.Decimal(18, 2)
   currency       Currency @default(UZS)
+  verbatimText   String?
   rawImageUrl    String?
   createdAt      DateTime @default(now())
 
@@ -100,18 +103,29 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id         String   @id @default(uuid())
-  invoiceId  String
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  productId  String
-  product    Product  @relation(fields: [productId], references: [id])
-  quantity   Decimal  @db.Decimal(12, 3)
-  unitPrice  Decimal  @db.Decimal(18, 2)
-  totalPrice Decimal  @db.Decimal(18, 2)
-  currency   Currency @default(UZS)
+  id             String    @id @default(uuid())
+  invoiceId      String
+  invoice        Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  supplierId     String?
+  supplier       Supplier? @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product   @relation(fields: [productId], references: [id])
+  rawName        String?
+  normalizedName String?
+  quantity       Decimal   @db.Decimal(12, 3)
+  unit           String?   @default("dona")
+  unitPrice      Decimal   @db.Decimal(18, 2)
+  totalPrice     Decimal   @db.Decimal(18, 2)
+  lineTotal      Decimal?  @db.Decimal(18, 2)
+  currency       Currency  @default(UZS)
+  createdAt      DateTime  @default(now())
 
   @@index([productId])
   @@index([invoiceId])
+  @@index([supplierId])
+  @@index([rawName])
+  @@index([normalizedName])
+  @@index([createdAt(sort: Desc)])
 }
 
 model SupplierPayment {
@@ -130,6 +144,7 @@ model SupplierTransaction {
   id               String          @id @default(uuid())
   supplierId       String
   supplier         Supplier        @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  invoiceId        String?
   type             TransactionType
   sourceType       String          @default("MANUAL")
   amount           Decimal         @db.Decimal(18, 2)
@@ -144,6 +159,7 @@ model SupplierTransaction {
   description      String?
 
   @@index([supplierId])
+  @@index([invoiceId])
   @@index([date])
   @@index([supplierId, date(sort: Desc)])
   @@index([supplierId, type, date])
@@ -186,6 +202,7 @@ model CashTransaction {
   id        String   @id @default(uuid())
   partyName String
   amount    Decimal  @db.Decimal(18, 2)
+  currency  Currency @default(UZS)
   items     String?
   createdAt DateTime @default(now())
   createdBy String?

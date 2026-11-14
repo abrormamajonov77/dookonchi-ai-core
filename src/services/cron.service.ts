@@ -73,10 +73,13 @@ export function startCronJobs(bot: Bot<MyContext>) {
   cron.schedule('0 21 * * *', async () => {
     logger.info('Running cron: 21:00 Daily Summary');
     try {
-      const r = await prisma.dailyRegister.findUnique({ where: { date: getToday() } });
+      const [r, supAgg] = await Promise.all([
+        prisma.dailyRegister.findUnique({ where: { date: getToday() } }),
+        prisma.supplier.aggregate({ where: { isActive: true }, _sum: { debtUzs: true, debtUsd: true } }),
+      ]);
       const body = r
-        ? `Naqd: ${formatMoney(r.cashUzs)}\nClick: ${formatMoney(r.clickAmount)}\nTerminal: ${formatMoney(r.terminalAmount)}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n`
-        : "Bugun kassa ma'lumotlari kiritilmadi!\n";
+        ? `Naqd (UZS): ${formatMoney(r.cashUzs, 'UZS')}\nNaqd (USD): ${formatMoney(r.cashUsd, 'USD')}\nClick: ${formatMoney(r.clickAmount, 'UZS')}\nTerminal: ${formatMoney(r.clickAmount, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`
+        : `Bugun kassa ma'lumotlari kiritilmadi!\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`;
       await notifyOwner(`📊 **Kunlik Yakuniy Hisobot**\n\n${body}`);
     } catch (error) {
       logger.error({ error }, 'Failed to send daily summary');

@@ -373,6 +373,8 @@ export class ReportService {
 
     lines.push(
       `├ 📦 Nasiyaga kelgan tovar (${m.incomingGoodsCount} ta): **${formatDualCurrency(m.incomingGoodsUzs, m.incomingGoodsUsd)}**`,
+      `├ 📊 JAMI QARZ (UZS): **${formatMoney(m.totalSupplierDebtUzs, 'UZS')}**`,
+      `├ 💵 JAMI QARZ (USD/USDT): **${formatMoney(m.totalSupplierDebtUsd, 'USD')}**`,
       `└ ⚖️ Jami qarzimiz qoldig'i: **${formatDualCurrency(m.totalSupplierDebtUzs, m.totalSupplierDebtUsd)}**${debtDeltaText}`,
       '',
       `🛒 **3. NAQD TOVAR XARIDLARI**`,
