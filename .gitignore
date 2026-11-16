@@ -6,8 +6,7 @@ node_modules/
 .env.local
 .env.*.local
 
-# Build artifacts
-dist/
+# Build artifacts (tracked for Render deployment)
 
 # Test & update scripts
 update_*.js

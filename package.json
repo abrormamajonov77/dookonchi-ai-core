@@ -7,7 +7,7 @@
     "start": "node dist/bot/index.js",
     "dev": "tsx watch src/bot/index.ts",
     "build": "prisma generate && tsc",
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate && tsc",
     "test": "vitest run"
   },
   "dependencies": {
