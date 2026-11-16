@@ -1,17 +1,31 @@
 import { prisma } from '../database/prisma';
+import { env } from '../config/env';
 
 class CacheService {
-  private supplierNames: { data: string[]; expiresAt: number } | null = null;
+  private supplierNamesByOwner = new Map<string, { data: string[]; expiresAt: number }>();
 
-  async getSupplierNames(): Promise<string[]> {
+  async getSupplierNames(ownerId: string = env.OWNER_TELEGRAM_ID): Promise<string[]> {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const now = Date.now();
-    if (this.supplierNames && this.supplierNames.expiresAt > now) return this.supplierNames.data;
-    const data = (await prisma.supplier.findMany({ select: { name: true } })).map(s => s.name);
-    this.supplierNames = { data, expiresAt: now + 300_000 };
+    const cached = this.supplierNamesByOwner.get(cleanOwnerId);
+    if (cached && cached.expiresAt > now) return cached.data;
+    const data = (
+      await prisma.supplier.findMany({
+        where: { ownerId: cleanOwnerId, isActive: true },
+        select: { name: true },
+      })
+    ).map((s) => s.name);
+    this.supplierNamesByOwner.set(cleanOwnerId, { data, expiresAt: now + 300_000 });
     return data;
   }
 
-  invalidateSupplierNames() { this.supplierNames = null; }
+  invalidateSupplierNames(ownerId?: string) {
+    if (ownerId) {
+      this.supplierNamesByOwner.delete(String(ownerId).trim());
+    } else {
+      this.supplierNamesByOwner.clear();
+    }
+  }
 }
 
 export const cacheService = new CacheService();

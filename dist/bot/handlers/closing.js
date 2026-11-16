@@ -9,10 +9,13 @@ const telegram_1 = require("../../utils/telegram");
 const report_service_1 = require("../../services/report.service");
 exports.closingHandler = new grammy_1.Composer();
 exports.closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
-    if (ctx.user?.role !== 'OWNER')
+    if (!ctx.from)
         return;
+    const ownerId = String(ctx.from.id);
     const { dateKey } = (0, formatters_1.getTashkentDayRange)();
-    const existing = await prisma_1.prisma.dailyRegister.findUnique({ where: { date: dateKey } });
+    const existing = await prisma_1.prisma.dailyRegister.findUnique({
+        where: { ownerId_date: { ownerId, date: dateKey } },
+    });
     if (existing?.isClosed) {
         return ctx.reply(`✅ Bugungi kassa allaqachon yopilgan.\n💰 Bugungi jami savdo: **${(0, formatters_1.formatSom)(existing.totalDailySalesUzs || existing.cashUzs)}**`, { parse_mode: 'Markdown' });
     }
@@ -23,8 +26,9 @@ exports.closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
     });
 });
 exports.closingHandler.on('message:text', async (ctx, next) => {
-    if (!ctx.session.step?.startsWith('Z_REPORT_'))
+    if (!ctx.session.step?.startsWith('Z_REPORT_') || !ctx.from)
         return next();
+    const ownerId = String(ctx.from.id);
     const rawText = ctx.message.text.trim();
     if (rawText.startsWith('/'))
         return next();
@@ -52,11 +56,20 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
         const { startOfDay, endOfDay } = (0, formatters_1.getTashkentDayRange)();
         const [cashInvoices, supplierPayments] = await Promise.all([
             prisma_1.prisma.invoice.findMany({
-                where: { createdAt: { gte: startOfDay, lte: endOfDay }, currency: 'UZS', paidCashAmount: { gt: 0 } },
+                where: {
+                    ownerId,
+                    createdAt: { gte: startOfDay, lte: endOfDay },
+                    currency: 'UZS',
+                    paidCashAmount: { gt: 0 },
+                },
                 select: { paidCashAmount: true },
             }),
             prisma_1.prisma.supplierPayment.findMany({
-                where: { createdAt: { gte: startOfDay, lte: endOfDay }, currency: 'UZS' },
+                where: {
+                    ownerId,
+                    createdAt: { gte: startOfDay, lte: endOfDay },
+                    currency: 'UZS',
+                },
                 select: { amount: true },
             }),
         ]);
@@ -70,15 +83,15 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
         const actionId = `zrep_${Date.now()}`;
         ctx.session.step = actionId;
         const previewText = [
-            `🧾 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
-            ``,
-            `1️⃣ 💳 Terminal: ${(0, formatters_1.formatSom)(d.terminalAmount)}`,
-            `2️⃣ 📱 Click / O'tkazma: ${(0, formatters_1.formatSom)(d.clickAmount)}`,
-            `3️⃣ 💵 Kassadagi qoldiq naqd pul: ${(0, formatters_1.formatSom)(d.cashRemainingInDrawer)}`,
-            `4️⃣ 📦 Bugun naqdga olingan yuklar (avtomat): +${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-            `5️⃣ 🤝 Bugun ta'minotchilarga berilgan pul (avtomat): +${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
-            `━━━━━━━━━━━━━━━━━━━━`,
-            `💰 **BUGUNGI JAMI SAVDO (1+2+3+4+5): ${(0, formatters_1.formatSom)(totalDailySalesUzs)}**`,
+            `📊 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
+            `━━━━━━━━━━━━━━━━━━━━━━`,
+            `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(d.terminalAmount)}`,
+            `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(d.clickAmount)}`,
+            `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(d.cashRemainingInDrawer)}`,
+            `📦 Naqd pulga sotib olingan tovarlar (avto): ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
+            `🤝 Ta'minotchilarga berilgan pul (avto): ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
+            `━━━━━━━━━━━━━━━━━━━━━━`,
+            `💰 **KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}**`,
             ``,
             `Kassani yopaymi?`,
         ].join('\n');
@@ -90,10 +103,12 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
 });
 exports.closingHandler.callbackQuery(/^confirm_zrep_/, async (ctx) => {
     const d = ctx.session.tempData;
-    if (!d)
+    if (!d || !ctx.from)
         return ctx.answerCallbackQuery({ text: "Eskirgan so'rov!", show_alert: true });
+    const ownerId = String(ctx.from.id);
     try {
         const zReport = await report_service_1.ReportService.generateAndSaveZReport({
+            ownerId,
             terminalAmount: Number(d.terminalAmount || 0),
             clickAmount: Number(d.clickAmount || 0),
             cashRemainingInDrawer: Number(d.cashRemainingInDrawer ?? d.cashUzs ?? 0),

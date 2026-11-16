@@ -60,10 +60,10 @@ function parseShorthandTx(text) {
         name: cleanName,
     };
 }
-async function saveSupplierTxData(data) {
+async function saveSupplierTxData(data, ownerId) {
     let finalDebt = 0;
     await prisma_1.prisma.$transaction(async (tx) => {
-        const supplier = await supplier_service_1.SupplierService.getOrMergeSupplier(tx, data.name, data.exactSupplierId);
+        const supplier = await supplier_service_1.SupplierService.getOrMergeSupplier(tx, data.name, data.exactSupplierId, ownerId);
         const isIncoming = data.txType === 'INCOMING_GOODS';
         const currency = (data.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
         const isUsd = currency === 'USD';
@@ -85,6 +85,7 @@ async function saveSupplierTxData(data) {
             `📦 Ushbu amaliyotdan keyingi qarz: ${postDebtText}\n`;
         await tx.supplierTransaction.create({
             data: {
+                ownerId,
                 supplierId: supplier.id,
                 type: data.txType,
                 amount,
@@ -97,7 +98,7 @@ async function saveSupplierTxData(data) {
         });
         if (!isIncoming) {
             await tx.supplierPayment.create({
-                data: { supplierId: supplier.id, amount, currency, comment: data.comment },
+                data: { ownerId, supplierId: supplier.id, amount, currency, comment: data.comment },
             });
         }
         const updated = await tx.supplier.update({
@@ -109,13 +110,16 @@ async function saveSupplierTxData(data) {
     return finalDebt;
 }
 async function processIntent(ctx, intentData) {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     if (intentData.intent === 'UNKNOWN')
         return ctx.reply("🤔 Kechirasiz, xabaringizni tushunmadim. Iltimos, aniqroq yozing yoki menyudan tanlang.");
     if (intentData.intent === 'GENERAL_CHAT')
         return ctx.reply(intentData.replyText || 'Savolingizga javob topa olmadim.');
     if (intentData.intent === 'SEARCH_PRODUCT') {
         const query = intentData.name || '';
-        const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query);
+        const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query, ownerId);
         if (!items.length)
             return ctx.reply(`🤷‍♂️ "${query}" nomli mahsulot topilmadi.`);
         return ctx.reply(items.map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
@@ -123,7 +127,7 @@ async function processIntent(ctx, intentData) {
     if (intentData.intent === 'GET_DEBT_INFO') {
         const name = intentData.name || '';
         const supplier = await prisma_1.prisma.supplier.findFirst({
-            where: { name: { contains: name, mode: 'insensitive' } },
+            where: { ownerId, name: { contains: name, mode: 'insensitive' } },
             select: { name: true, debtUzs: true, debtUsd: true },
         });
         if (!supplier)
@@ -131,7 +135,7 @@ async function processIntent(ctx, intentData) {
         return ctx.reply(`📊 **Qarz ma'lumoti:**\n\n🏢 Ta'minotchi: **${supplier.name}**\n💰 Qarz (UZS): **${(0, formatters_1.formatCurrency)(supplier.debtUzs, 'UZS')}**\n💵 Qarz (USD/USDT): **${(0, formatters_1.formatCurrency)(supplier.debtUsd, 'USD', true)}**`, { parse_mode: 'Markdown' });
     }
     if (intentData.intent === 'ADD_SUPPLIER_TX' && !intentData.exactSupplierId) {
-        const candidates = await supplier_service_1.SupplierService.findMatchingSuppliers(intentData.name, intentData.comment);
+        const candidates = await supplier_service_1.SupplierService.findMatchingSuppliers(intentData.name, intentData.comment, ownerId);
         if (candidates.length === 1) {
             intentData.exactSupplierId = candidates[0].id;
             intentData.name = candidates[0].name;
@@ -140,9 +144,9 @@ async function processIntent(ctx, intentData) {
             const candidateIds = candidates.map((c) => c.id);
             const pendingAction = await prisma_1.prisma.pendingAction.create({
                 data: {
-                    userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+                    userId: BigInt(ctx.from.id),
                     type: 'VOICE_INTENT_DISAMBIGUATION',
-                    data: { ...intentData, candidateIds },
+                    data: { ...intentData, ownerId, candidateIds },
                 },
             });
             return ctx.reply(`⚠️ *Bir nechta ta'minotchi topildi:*\nQaysi "${intentData.name}" hisobiga yozilsin?`, {
@@ -153,9 +157,9 @@ async function processIntent(ctx, intentData) {
     }
     const pendingAction = await prisma_1.prisma.pendingAction.create({
         data: {
-            userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+            userId: BigInt(ctx.from.id),
             type: 'VOICE_INTENT',
-            data: intentData,
+            data: { ...intentData, ownerId },
         },
     });
     const actionId = `v_${pendingAction.id}`;
@@ -167,7 +171,7 @@ async function processIntent(ctx, intentData) {
         const isUsd = cur === 'USD';
         const amt = Number(Math.abs(Number(intentData.amount || 0)).toFixed(2));
         const supp = await prisma_1.prisma.supplier.findFirst({
-            where: { name: { contains: intentData.name, mode: 'insensitive' }, isActive: true },
+            where: { ownerId, name: { contains: intentData.name, mode: 'insensitive' }, isActive: true },
             select: { debtUzs: true, debtUsd: true },
         });
         if (supp) {
@@ -180,6 +184,7 @@ async function processIntent(ctx, intentData) {
         const amt = Number(Math.abs(Number(intentData.amount || 0)).toFixed(2));
         const agg = await prisma_1.prisma.customerDebt.aggregate({
             where: {
+                ownerId,
                 customerName: { equals: intentData.name, mode: 'insensitive' },
                 currency: cur,
                 status: { in: ['PENDING', 'PARTIALLY_PAID'] },
@@ -221,13 +226,14 @@ exports.voiceHandler.on('message:voice', async (ctx, next) => {
     });
 });
 exports.voiceHandler.on('message:text', async (ctx, next) => {
-    if (!ctx.user || ctx.message.text.startsWith('/'))
+    if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/'))
         return next();
+    const ownerId = String(ctx.from.id);
     const text = ctx.message.text.trim();
     if ((0, menu_1.isMenuButton)(text) || (ctx.session.step && ctx.session.step !== 'await_new_supplier_name'))
         return next();
     const activePending = await prisma_1.prisma.pendingAction.findFirst({
-        where: { userId: ctx.from?.id ? BigInt(ctx.from.id) : undefined, status: 'AWAIT_NEW_SUPPLIER_NAME' },
+        where: { userId: BigInt(ctx.from.id), status: 'AWAIT_NEW_SUPPLIER_NAME' },
         orderBy: { createdAt: 'desc' },
     });
     if (activePending) {
@@ -251,7 +257,7 @@ exports.voiceHandler.on('message:text', async (ctx, next) => {
     if (priceMatch && priceMatch[1].trim().length >= 2) {
         const query = priceMatch[1].trim();
         return (0, telegram_1.withChatAction)(ctx, 'typing', async () => {
-            const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query);
+            const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query, ownerId);
             if (!items.length)
                 return ctx.reply(`🤷‍♂️ "${query}" nomli tovar bazadan topilmadi.`);
             await ctx.reply(items.map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
@@ -268,6 +274,9 @@ exports.voiceHandler.on('message:text', async (ctx, next) => {
     });
 });
 exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const pendingId = ctx.match[1];
     const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
     if (!pendingAction || pendingAction.type !== 'VOICE_INTENT')
@@ -277,14 +286,14 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
     try {
         if (data.intent === 'ADD_EXPENSE') {
             await prisma_1.prisma.expense.create({
-                data: { amount: data.amount, currency: cur, category: data.category || 'Boshqa', note: data.comment },
+                data: { ownerId, amount: data.amount, currency: cur, category: data.category || 'Boshqa', note: data.comment },
             });
             await ctx.editMessageText(`✅ Xarajat saqlandi: ${(0, formatters_1.formatCurrency)(data.amount, cur)}`);
         }
         else if (data.intent === 'ADD_SUPPLIER_TX') {
             const isIncoming = data.txType === 'INCOMING_GOODS';
             const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
-            const finalDebt = await saveSupplierTxData(data);
+            const finalDebt = await saveSupplierTxData(data, ownerId);
             await ctx.editMessageText(`✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
                 `🏢 Ta'minotchi: **${data.name}**\n` +
                 `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${(0, formatters_1.formatCurrency)(amt, cur)}**\n` +
@@ -292,15 +301,25 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
         }
         else if (data.intent === 'ADD_CASH_TX') {
             await prisma_1.prisma.cashTransaction.create({
-                data: { partyName: data.name || "Noma'lum", amount: data.amount, currency: cur, items: data.comment || null },
+                data: {
+                    ownerId,
+                    partyName: data.name || "Noma'lum",
+                    amount: data.amount,
+                    currency: cur,
+                    items: data.comment || null,
+                    createdBy: ownerId,
+                },
             });
             await ctx.editMessageText(`✅ Naqd xarid saqlandi:\nKimdan: ${data.name}\nSumma: ${(0, formatters_1.formatCurrency)(data.amount, cur)}${data.comment ? `\nIzoh: ${data.comment}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`);
         }
         else if (data.intent === 'ADD_CUSTOMER_DEBT') {
             const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
-            await prisma_1.prisma.customerDebt.create({ data: { customerName: data.name, amount: amt, currency: cur } });
+            await prisma_1.prisma.customerDebt.create({
+                data: { ownerId, customerName: data.name, amount: amt, currency: cur },
+            });
             const agg = await prisma_1.prisma.customerDebt.aggregate({
                 where: {
+                    ownerId,
                     customerName: { equals: data.name, mode: 'insensitive' },
                     currency: cur,
                     status: { in: ['PENDING', 'PARTIALLY_PAID'] },
@@ -322,6 +341,9 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
     }
 });
 exports.voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const pendingId = ctx.match[1];
     const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
     if (!pendingAction || pendingAction.type !== 'SUPPLIER_TX')
@@ -331,7 +353,7 @@ exports.voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
     try {
         const isIncoming = data.txType === 'INCOMING_GOODS';
         const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
-        const finalDebt = await saveSupplierTxData(data);
+        const finalDebt = await saveSupplierTxData(data, ownerId);
         await ctx.editMessageText(`✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
             `🏢 Ta'minotchi: **${data.name}**\n` +
             `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${(0, formatters_1.formatCurrency)(amt, cur)}**\n` +
@@ -350,13 +372,18 @@ exports.voiceHandler.callbackQuery(/^cancel_(?:v|suptx|vdis)_(.+)$/, async (ctx)
     await ctx.editMessageText('❌ Bekor qilindi.', { reply_markup: undefined });
 });
 exports.voiceHandler.callbackQuery(/^vsel_(.+)_(\d+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const [, pendingId, rawIdx] = ctx.match;
     const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
     if (!pendingAction || pendingAction.type !== 'VOICE_INTENT_DISAMBIGUATION')
         return ctx.editMessageText('⚠️ Ushbu operatsiya muddati tugagan. Iltimos, boshqatdan yuboring.', { reply_markup: undefined });
     const pData = pendingAction.data;
     const supplierId = pData.candidateIds?.[parseInt(rawIdx, 10)];
-    const supplier = supplierId ? await prisma_1.prisma.supplier.findUnique({ where: { id: supplierId } }) : null;
+    const supplier = supplierId
+        ? await prisma_1.prisma.supplier.findFirst({ where: { id: supplierId, ownerId } })
+        : null;
     if (!supplier)
         return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
     const intentData = { ...pData, exactSupplierId: supplier.id, name: supplier.name };

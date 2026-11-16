@@ -14,8 +14,8 @@ import { logger } from '../../config/logger';
 import {
   calculateDiscountedTotal,
   formatCurrency,
-  getToday,
   parseCurrencyAndAmount,
+  reconcileInvoiceTotals,
 } from '../../utils/formatters';
 import { prisma } from '../../database/prisma';
 import { cacheService } from '../../services/cache.service';
@@ -72,12 +72,20 @@ export function buildPendingPreviewMessage(invoiceData: any, editableText: strin
   const currency: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
   const rawTotal = Number(invoiceData.rawTotal ?? invoiceData.grossTotal ?? invoiceData.total_amount ?? 0);
   const discount = Number(invoiceData.discountAmount ?? invoiceData.discount ?? 0);
-  const math = calculateDiscountedTotal(rawTotal, discount);
+  const math = reconcileInvoiceTotals({
+    rows: invoiceData.items || invoiceData.rows,
+    subtotalBeforeDiscount: rawTotal,
+    discountPercent: invoiceData.discountPercent,
+    discountAmount: discount,
+    printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+  });
   const percentText =
     invoiceData.discountLabel ||
-    (invoiceData.discountPercent && Number(invoiceData.discountPercent) > 0 ? `${invoiceData.discountPercent}%` : '');
+    (math.discountPercent && Number(math.discountPercent) > 0 ? `${math.discountPercent}%` : '');
 
-  const title = invoiceData.isCashOverride ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**' : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
+  const title = invoiceData.isCashOverride
+    ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**'
+    : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
   let text = `${title}\n\n\`\`\`\n${editableText}\`\`\`\n`;
   text += `💱 Valyuta: **${currency === 'USD' ? 'USD ($)' : "UZS (so'm)"}**\n`;
   text += `📦 Tovarlarning asl summasi: **${formatCurrency(math.rawTotal, currency)}**\n`;
@@ -104,8 +112,15 @@ async function processParsedInvoice(
   rawCaption: string,
   statusMsgId?: number | null
 ) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+
   if (!invoiceData.exactSupplierId && invoiceData.supplierName && invoiceData.supplierName !== "Noma'lum") {
-    const candidates = await SupplierService.findMatchingSuppliers(invoiceData.supplierName, rawCaption);
+    const candidates = await SupplierService.findMatchingSuppliers(
+      invoiceData.supplierName,
+      rawCaption,
+      ownerId
+    );
     if (candidates.length === 1) {
       invoiceData.exactSupplierId = candidates[0].id;
       invoiceData.supplierName = candidates[0].name;
@@ -113,8 +128,9 @@ async function processParsedInvoice(
       const candidateIds = candidates.map((c) => c.id);
       const pendingAction = await prisma.pendingAction.create({
         data: {
+          userId: BigInt(ctx.from.id),
           type: 'INVOICE_DISAMBIGUATION',
-          data: { data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
+          data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
         },
       });
       const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${invoiceData.supplierName}" hisobiga yozilsin?`;
@@ -129,16 +145,20 @@ async function processParsedInvoice(
   }
 
   const { editableText, totalSum } = buildEditableInvoiceText(invoiceData, false);
-  const math = calculateDiscountedTotal(
-    totalSum,
-    invoiceData.discountAmount ?? invoiceData.discount ?? 0
-  );
+  const math = reconcileInvoiceTotals({
+    rows: invoiceData.items || invoiceData.rows,
+    subtotalBeforeDiscount: totalSum,
+    discountPercent: invoiceData.discountPercent,
+    discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
+    printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+  });
   invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
   invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
   invoiceData.finalTotal = invoiceData.netTotal = math.finalTotal;
   invoiceData.currency = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
 
   const contentFingerprint = SupplierService.computeContentFingerprint({
+    ownerId,
     supplierName: invoiceData.supplierName || "Noma'lum",
     currency: invoiceData.currency,
     finalTotal: math.finalTotal,
@@ -146,18 +166,19 @@ async function processParsedInvoice(
   });
   invoiceData.contentFingerprint = contentFingerprint;
 
-  // MODUL 3: Stage 2 Anti-Duplicate Content Fingerprint check
+  // MODUL 6: Stage 2 Anti-Duplicate Content Fingerprint check isolated by ownerId
   if (!invoiceData.forceOverrideDuplicate) {
     const dupCheck = await SupplierService.checkDuplicateInvoice({
+      ownerId,
       imageHash: invoiceData.imageHash || null,
       contentFingerprint,
     });
     if (dupCheck.isDuplicate && dupCheck.warningText) {
       const pendingAction = await prisma.pendingAction.create({
         data: {
-          userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+          userId: BigInt(ctx.from.id),
           type: 'INVOICE',
-          data: { data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+          data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
         },
       });
       const dupKb = getDuplicateInvoiceWarningKeyboard(pendingAction.id);
@@ -172,9 +193,9 @@ async function processParsedInvoice(
 
   const pendingAction = await prisma.pendingAction.create({
     data: {
-      userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+      userId: BigInt(ctx.from.id),
       type: 'INVOICE',
-      data: { data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+      data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
     },
   });
   const actionId = `i_${pendingAction.id}`;
@@ -203,24 +224,26 @@ async function processParsedInvoice(
 }
 
 async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeType: string, errLabel: string) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+
   await withChatAction(ctx, 'upload_photo', async () => {
     const statusMsg = await ctx.reply('⚡️ Nakladnoy kserokopiya qilinmoqda...').catch(() => null);
     try {
       const file = await ctx.api.getFile(fileId);
       if (!file.file_path) throw new Error('Rasm fayli topilmadi');
 
-      // Parallel pre-fetching of Telegram file in RAM and supplier names cache
       const [buffer] = await Promise.all([
         downloadTelegramFile(file.file_path),
-        cacheService.getSupplierNames(),
+        cacheService.getSupplierNames(ownerId),
       ]);
 
-      // MODUL 1: High-contrast B&W scanner buffer (<60 KB in <150 ms)
+      // MODUL 4: High-contrast B&W scanner buffer (<60 KB in <150 ms)
       const processedBuffer = await ImageService.optimizeForFastOCR(buffer);
       const imageHash = ImageService.getImageHash(processedBuffer);
 
-      // MODUL 3: Stage 1 ImageHash check before calling AI
-      const stage1Dup = await SupplierService.checkDuplicateInvoice({ imageHash });
+      // MODUL 6: Stage 1 ImageHash check before calling AI (isolated by ownerId)
+      const stage1Dup = await SupplierService.checkDuplicateInvoice({ ownerId, imageHash });
       if (stage1Dup.isDuplicate && stage1Dup.warningText && stage1Dup.existingInvoice) {
         const dupInvoiceData = {
           supplierName: stage1Dup.existingInvoice.supplier?.name || "Noma'lum",
@@ -236,9 +259,10 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
         };
         const pendingAction = await prisma.pendingAction.create({
           data: {
-            userId: ctx.from?.id ? BigInt(ctx.from.id) : null,
+            userId: BigInt(ctx.from!.id),
             type: 'INVOICE',
             data: {
+              ownerId,
               data: dupInvoiceData,
               imageUrl: file.file_path,
               photoFileId: fileId,
@@ -320,7 +344,6 @@ invoiceHandler.hears('➕ Nakladnoy', (ctx) =>
   ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni 100% kserokopiya shaklida tahlil qiladi.')
 );
 
-// MODUL 2: Inline callbacks for both Pending (`p_<pendingId>`) and Saved (`<invoiceId>`) invoices
 invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.+)$/, async (ctx) => {
   const rawId = ctx.match[1];
   const isPending = rawId.startsWith('p_') || !(await prisma.invoice.findUnique({ where: { id: rawId } }).catch(() => null));
@@ -343,7 +366,6 @@ invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.
     }
   }
 
-  // Saved Invoice discount edit
   ctx.session.step = 'AWAIT_SAVED_INVOICE_DISCOUNT';
   ctx.session.tempData = { invoiceId: cleanId, botMessageId: ctx.callbackQuery.message?.message_id };
   await ctx.reply(
@@ -386,6 +408,8 @@ invoiceHandler.callbackQuery(/^edit_invoice_total:(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const rawId = ctx.match[1];
   const cleanId = rawId.replace(/^p_/, '');
   const pendingAction = rawId.startsWith('p_')
@@ -397,7 +421,8 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
     const invoiceData = pData.data;
     const rawTotal = Number(invoiceData.rawTotal ?? invoiceData.grossTotal ?? invoiceData.total_amount ?? 0);
     invoiceData.discountAmount = invoiceData.discount = 0;
-    invoiceData.finalTotal = invoiceData.netTotal = rawTotal;
+    invoiceData.discountPercent = 0;
+    invoiceData.finalTotal = invoiceData.netTotal = invoiceData.printedFinalTotal = rawTotal;
     invoiceData.discountLabel = null;
 
     await prisma.pendingAction.update({
@@ -413,7 +438,7 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
   }
 
   try {
-    const updated = await SupplierService.clearInvoiceDiscount(cleanId);
+    const updated = await SupplierService.clearInvoiceDiscount(cleanId, ownerId);
     const cur = updated.currency;
     const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
     await ctx.answerCallbackQuery({ text: '❌ Skidka 0 ga tushirildi va balans yangilandi!' });
@@ -437,6 +462,8 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const rawId = ctx.match[1];
   const cleanId = rawId.replace(/^p_/, '');
   const pendingAction = rawId.startsWith('p_')
@@ -465,7 +492,7 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
   }
 
   try {
-    const updated = await SupplierService.toggleInvoiceCurrency(cleanId);
+    const updated = await SupplierService.toggleInvoiceCurrency(cleanId, ownerId);
     const cur = updated.currency;
     await ctx.answerCallbackQuery({ text: `💱 Valyuta ${cur} ga o'zgartirildi va balans yangilandi!` });
     await ctx
@@ -504,7 +531,8 @@ function parseTwoOrOneAmounts(rawText: string): { first: number; second?: number
 }
 
 invoiceHandler.on('message:text', async (ctx, next) => {
-  if (!ctx.user || ctx.message.text.startsWith('/')) return next();
+  if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/')) return next();
+  const ownerId = String(ctx.from.id);
   const rawText = ctx.message.text.trim();
   if (isMenuButton(rawText)) return next();
 
@@ -514,7 +542,7 @@ invoiceHandler.on('message:text', async (ctx, next) => {
     clearSession(ctx);
     if (!invoiceId) return next();
     try {
-      const updated = await SupplierService.updateInvoiceDiscount(invoiceId, rawText);
+      const updated = await SupplierService.updateInvoiceDiscount(invoiceId, rawText, ownerId);
       const cur = updated.currency;
       const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
       return ctx.reply(
@@ -544,7 +572,7 @@ invoiceHandler.on('message:text', async (ctx, next) => {
       return ctx.reply("❌ Iltimos, to'g'ri summa kiriting (masalan: 880000 yoki 1000000 880000).");
     }
     try {
-      const updated = await SupplierService.overrideInvoiceTotal(invoiceId, first, second);
+      const updated = await SupplierService.overrideInvoiceTotal(invoiceId, first, second, ownerId);
       const cur = updated.currency;
       const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
       return ctx.reply(
@@ -576,7 +604,7 @@ invoiceHandler.on('message:text', async (ctx, next) => {
 
   const activePending = await prisma.pendingAction.findFirst({
     where: {
-      userId: ctx.from?.id ? BigInt(ctx.from.id) : undefined,
+      userId: BigInt(ctx.from.id),
       type: { in: ['INVOICE', 'INVOICE_NEW_SUPP'] },
       status: { in: ['PENDING', 'AWAIT_DISCOUNT', 'AWAIT_MANUAL_TOTAL', 'AWAIT_NEW_SUPPLIER_NAME_INV'] },
       createdAt: { gte: new Date(Date.now() - 3600000) },
@@ -635,7 +663,7 @@ invoiceHandler.on('message:text', async (ctx, next) => {
 
         invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = rawTotal;
         invoiceData.discountAmount = invoiceData.discount = discountAmount;
-        invoiceData.finalTotal = invoiceData.netTotal = finalTotal;
+        invoiceData.finalTotal = invoiceData.netTotal = invoiceData.printedFinalTotal = finalTotal;
 
         await Promise.all([
           prisma.pendingAction.update({ where: { id: pendingId }, data: { data: pData, status: 'PENDING' } }),
@@ -662,7 +690,7 @@ invoiceHandler.on('message:text', async (ctx, next) => {
         const math = calculateDiscountedTotal(rawTotal, rawText);
         invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
         invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
-        invoiceData.finalTotal = invoiceData.netTotal = math.finalTotal;
+        invoiceData.finalTotal = invoiceData.netTotal = invoiceData.printedFinalTotal = math.finalTotal;
         invoiceData.discountLabel = rawText;
 
         await Promise.all([
@@ -729,9 +757,16 @@ const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
   const pData = pendingAction.data as any;
   const invoiceData = pData.data;
   const rawTotal = Number(invoiceData.rawTotal ?? invoiceData.grossTotal ?? invoiceData.total_amount ?? 0);
-  const math = calculateDiscountedTotal(rawTotal, invoiceData.discountAmount ?? invoiceData.discount ?? 0);
+  const math = reconcileInvoiceTotals({
+    rows: invoiceData.items || invoiceData.rows,
+    subtotalBeforeDiscount: rawTotal,
+    discountPercent: invoiceData.discountPercent,
+    discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
+    printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+  });
   const currency: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
   return {
+    ownerId: String(pData.ownerId || ctx.from?.id || ''),
     pData,
     invoiceData,
     totalSum: math.rawTotal,
@@ -767,10 +802,11 @@ invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
 invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
-  const { pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+  const { ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
 
   try {
     const result = await SupplierService.createInvoiceWithItems({
+      ownerId,
       supplierId:
         invoiceData.exactSupplierId && invoiceData.exactSupplierId !== 'CREATE_NEW'
           ? invoiceData.exactSupplierId
@@ -830,10 +866,11 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
 invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
-  const { pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+  const { ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
 
   try {
     const result = await SupplierService.createInvoiceWithItems({
+      ownerId,
       supplierId:
         invoiceData.exactSupplierId && invoiceData.exactSupplierId !== 'CREATE_NEW'
           ? invoiceData.exactSupplierId
@@ -901,13 +938,17 @@ invoiceHandler.callbackQuery(/^cancel_(?:i|idis)_(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const [, pendingId, rawIdx] = ctx.match;
   const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } });
   if (!pendingAction || pendingAction.type !== 'INVOICE_DISAMBIGUATION')
     return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
   const pData = pendingAction.data as any;
   const supplierId = pData.candidateIds?.[parseInt(rawIdx, 10)];
-  const supplier = supplierId ? await prisma.supplier.findUnique({ where: { id: supplierId } }) : null;
+  const supplier = supplierId
+    ? await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } })
+    : null;
   if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
 
   pData.data.exactSupplierId = supplier.id;

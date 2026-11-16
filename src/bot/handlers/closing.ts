@@ -9,9 +9,12 @@ import { ReportService } from '../../services/report.service';
 export const closingHandler = new Composer<MyContext>();
 
 closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
-  if (ctx.user?.role !== 'OWNER') return;
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const { dateKey } = getTashkentDayRange();
-  const existing = await prisma.dailyRegister.findUnique({ where: { date: dateKey } });
+  const existing = await prisma.dailyRegister.findUnique({
+    where: { ownerId_date: { ownerId, date: dateKey } },
+  });
   if (existing?.isClosed) {
     return ctx.reply(
       `✅ Bugungi kassa allaqachon yopilgan.\n💰 Bugungi jami savdo: **${formatSom(existing.totalDailySalesUzs || existing.cashUzs)}**`,
@@ -26,7 +29,8 @@ closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
 });
 
 closingHandler.on('message:text', async (ctx, next) => {
-  if (!ctx.session.step?.startsWith('Z_REPORT_')) return next();
+  if (!ctx.session.step?.startsWith('Z_REPORT_') || !ctx.from) return next();
+  const ownerId = String(ctx.from.id);
   const rawText = ctx.message.text.trim();
   if (rawText.startsWith('/')) return next();
 
@@ -57,11 +61,20 @@ closingHandler.on('message:text', async (ctx, next) => {
     const { startOfDay, endOfDay } = getTashkentDayRange();
     const [cashInvoices, supplierPayments] = await Promise.all([
       prisma.invoice.findMany({
-        where: { createdAt: { gte: startOfDay, lte: endOfDay }, currency: 'UZS', paidCashAmount: { gt: 0 } },
+        where: {
+          ownerId,
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+          paidCashAmount: { gt: 0 },
+        },
         select: { paidCashAmount: true },
       }),
       prisma.supplierPayment.findMany({
-        where: { createdAt: { gte: startOfDay, lte: endOfDay }, currency: 'UZS' },
+        where: {
+          ownerId,
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+        },
         select: { amount: true },
       }),
     ]);
@@ -79,15 +92,15 @@ closingHandler.on('message:text', async (ctx, next) => {
     ctx.session.step = actionId;
 
     const previewText = [
-      `🧾 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
-      ``,
-      `1️⃣ 💳 Terminal: ${formatSom(d.terminalAmount)}`,
-      `2️⃣ 📱 Click / O'tkazma: ${formatSom(d.clickAmount)}`,
-      `3️⃣ 💵 Kassadagi qoldiq naqd pul: ${formatSom(d.cashRemainingInDrawer)}`,
-      `4️⃣ 📦 Bugun naqdga olingan yuklar (avtomat): +${formatSom(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-      `5️⃣ 🤝 Bugun ta'minotchilarga berilgan pul (avtomat): +${formatSom(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
-      `━━━━━━━━━━━━━━━━━━━━`,
-      `💰 **BUGUNGI JAMI SAVDO (1+2+3+4+5): ${formatSom(totalDailySalesUzs)}**`,
+      `📊 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
+      `━━━━━━━━━━━━━━━━━━━━━━`,
+      `💳 Terminalda savdo: ${formatSom(d.terminalAmount)}`,
+      `📱 Click / Karta savdo: ${formatSom(d.clickAmount)}`,
+      `💵 Kassada qolgan naqd pul: ${formatSom(d.cashRemainingInDrawer)}`,
+      `📦 Naqd pulga sotib olingan tovarlar (avto): ${formatSom(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
+      `🤝 Ta'minotchilarga berilgan pul (avto): ${formatSom(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
+      `━━━━━━━━━━━━━━━━━━━━━━`,
+      `💰 **KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}**`,
       ``,
       `Kassani yopaymi?`,
     ].join('\n');
@@ -101,9 +114,11 @@ closingHandler.on('message:text', async (ctx, next) => {
 
 closingHandler.callbackQuery(/^confirm_zrep_/, async (ctx) => {
   const d = ctx.session.tempData;
-  if (!d) return ctx.answerCallbackQuery({ text: "Eskirgan so'rov!", show_alert: true });
+  if (!d || !ctx.from) return ctx.answerCallbackQuery({ text: "Eskirgan so'rov!", show_alert: true });
+  const ownerId = String(ctx.from.id);
   try {
     const zReport = await ReportService.generateAndSaveZReport({
+      ownerId,
       terminalAmount: Number(d.terminalAmount || 0),
       clickAmount: Number(d.clickAmount || 0),
       cashRemainingInDrawer: Number(d.cashRemainingInDrawer ?? d.cashUzs ?? 0),

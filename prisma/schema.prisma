@@ -36,19 +36,60 @@ enum ExpenseCategory {
 enum UserRole {
   OWNER
   SELLER
+  SUPER_ADMIN
+  STORE_OWNER
 }
 
 model User {
-  id         String   @id @default(uuid())
-  telegramId BigInt   @unique
-  name       String
-  role       UserRole @default(SELLER)
-  createdAt  DateTime @default(now())
+  id                    String    @id @default(uuid())
+  telegramId            String    @unique
+  phone                 String?
+  fullName              String?
+  name                  String?
+  username              String?
+  role                  String    @default("STORE_OWNER")
+  status                String    @default("PENDING")
+  subscriptionPlan      String?
+  bonusDaysGranted      Int       @default(0)
+  subscriptionExpiresAt DateTime?
+  lastReminderSentAt    DateTime?
+  approvedAt            DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([role])
+  @@index([subscriptionExpiresAt])
+}
+
+model SystemSettings {
+  id                String   @id @default("global")
+  paymentCardNumber String   @default("8600 0000 0000 0000")
+  paymentCardHolder String   @default("ADMIN")
+  monthlyPriceUzs   Decimal  @default(100000) @db.Decimal(18, 2)
+  tariffInfoText    String?
+  updatedAt         DateTime @default(now()) @updatedAt
+}
+
+model SubscriptionPayment {
+  id               String   @id @default(cuid())
+  userTelegramId   String
+  amountUzs        Decimal  @default(0) @db.Decimal(18, 2)
+  monthsGranted    Int      @default(1)
+  bonusDaysGranted Int      @default(0)
+  screenshotFileId String?
+  status           String   @default("PENDING")
+  createdAt        DateTime @default(now())
+
+  @@index([userTelegramId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Supplier {
   id        String   @id @default(uuid())
-  name      String   @unique
+  ownerId   String   @default("")
+  name      String
   phone     String?
   debtUzs   Decimal  @default(0) @db.Decimal(18, 2)
   debtUsd   Decimal  @default(0) @db.Decimal(18, 2)
@@ -61,16 +102,19 @@ model Supplier {
   payments     SupplierPayment[]
   transactions SupplierTransaction[]
 
+  @@unique([ownerId, name])
+  @@index([ownerId])
   @@index([name])
-  @@index([isActive, debtUzs(sort: Desc)])
-  @@index([isActive, debtUsd(sort: Desc)])
+  @@index([ownerId, isActive, debtUzs(sort: Desc)])
+  @@index([ownerId, isActive, debtUsd(sort: Desc)])
 }
 
 model Product {
   id           String   @id @default(uuid())
+  ownerId      String   @default("")
   name         String
   searchTokens String
-  barcode      String?  @unique
+  barcode      String?
   lastPrice    Decimal  @default(0) @db.Decimal(18, 2)
   currency     Currency @default(UZS)
   createdAt    DateTime @default(now())
@@ -78,6 +122,8 @@ model Product {
 
   invoiceItems InvoiceItem[]
 
+  @@index([ownerId])
+  @@index([ownerId, name])
   @@index([name])
   @@index([searchTokens])
   @@index([updatedAt(sort: Desc)])
@@ -85,6 +131,7 @@ model Product {
 
 model Invoice {
   id                 String   @id @default(uuid())
+  ownerId            String   @default("")
   invoiceNo          String?
   supplierId         String
   supplier           Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
@@ -103,6 +150,10 @@ model Invoice {
 
   items InvoiceItem[]
 
+  @@index([ownerId])
+  @@index([ownerId, imageHash])
+  @@index([ownerId, contentFingerprint])
+  @@index([ownerId, createdAt])
   @@index([supplierId])
   @@index([createdAt])
   @@index([imageHash])
@@ -112,6 +163,7 @@ model Invoice {
 
 model InvoiceItem {
   id             String    @id @default(uuid())
+  ownerId        String    @default("")
   invoiceId      String
   invoice        Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   supplierId     String?
@@ -128,6 +180,8 @@ model InvoiceItem {
   currency       Currency  @default(UZS)
   createdAt      DateTime  @default(now())
 
+  @@index([ownerId])
+  @@index([ownerId, normalizedName])
   @@index([productId])
   @@index([invoiceId])
   @@index([supplierId])
@@ -138,6 +192,7 @@ model InvoiceItem {
 
 model SupplierPayment {
   id         String   @id @default(uuid())
+  ownerId    String   @default("")
   supplierId String
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   amount     Decimal  @db.Decimal(18, 2)
@@ -145,11 +200,14 @@ model SupplierPayment {
   comment    String?
   createdAt  DateTime @default(now())
 
+  @@index([ownerId])
+  @@index([ownerId, createdAt])
   @@index([supplierId])
 }
 
 model SupplierTransaction {
   id               String          @id @default(uuid())
+  ownerId          String          @default("")
   supplierId       String
   supplier         Supplier        @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   invoiceId        String?
@@ -166,6 +224,8 @@ model SupplierTransaction {
   formattedReceipt String?
   description      String?
 
+  @@index([ownerId])
+  @@index([ownerId, date])
   @@index([supplierId])
   @@index([invoiceId])
   @@index([date])
@@ -175,6 +235,7 @@ model SupplierTransaction {
 
 model CustomerDebt {
   id           String     @id @default(uuid())
+  ownerId      String     @default("")
   customerName String
   phone        String?
   itemsSummary String?
@@ -186,6 +247,8 @@ model CustomerDebt {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
+  @@index([ownerId])
+  @@index([ownerId, status])
   @@index([customerName])
   @@index([dueDate])
   @@index([status])
@@ -195,6 +258,7 @@ model CustomerDebt {
 
 model Expense {
   id        String   @id @default(uuid())
+  ownerId   String   @default("")
   category  String   @default("Boshqa")
   amount    Decimal  @db.Decimal(18, 2)
   currency  Currency @default(UZS)
@@ -202,12 +266,15 @@ model Expense {
   createdAt DateTime @default(now())
   createdBy String?
 
+  @@index([ownerId])
+  @@index([ownerId, createdAt])
   @@index([createdAt])
   @@index([category])
 }
 
 model CashTransaction {
   id        String   @id @default(uuid())
+  ownerId   String   @default("")
   partyName String
   amount    Decimal  @db.Decimal(18, 2)
   currency  Currency @default(UZS)
@@ -215,12 +282,15 @@ model CashTransaction {
   createdAt DateTime @default(now())
   createdBy String?
 
+  @@index([ownerId])
+  @@index([ownerId, createdAt])
   @@index([createdAt])
 }
 
 model DailyRegister {
   id                       String   @id @default(uuid())
-  date                     DateTime @unique @db.Date
+  ownerId                  String   @default("")
+  date                     DateTime @db.Date
   cashUzs                  Decimal  @default(0) @db.Decimal(18, 2)
   cashUsd                  Decimal  @default(0) @db.Decimal(18, 2)
   cashRemainingInDrawer    Decimal  @default(0) @db.Decimal(18, 2)
@@ -233,11 +303,15 @@ model DailyRegister {
   isClosed                 Boolean  @default(false)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
+
+  @@unique([ownerId, date])
+  @@index([ownerId])
 }
 
 model ZReport {
   id                       String   @id @default(uuid())
-  date                     DateTime @unique @db.Date
+  ownerId                  String   @default("")
+  date                     DateTime @db.Date
   terminalAmount           Decimal  @default(0) @db.Decimal(18, 2)
   clickAmount              Decimal  @default(0) @db.Decimal(18, 2)
   cashRemainingInDrawer    Decimal  @default(0) @db.Decimal(18, 2)
@@ -248,6 +322,8 @@ model ZReport {
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
+  @@unique([ownerId, date])
+  @@index([ownerId])
   @@index([date])
 }
 

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database/prisma';
+import { env } from '../config/env';
 import { TranslitService } from './translit.service';
 import { cacheService } from './cache.service';
 import {
@@ -19,16 +20,29 @@ export class SupplierService {
   }
 
   static computeContentFingerprint(params: {
+    ownerId?: string;
     supplierName: string;
     currency: 'UZS' | 'USD';
     finalTotal: number;
-    items?: Array<{ rawName?: string; productName?: string; normalizedName?: string; quantity?: number; lineTotal?: number; totalPrice?: number }>;
+    rows?: any[];
+    items?: Array<{
+      rawName?: string;
+      productName?: string;
+      normalizedName?: string;
+      quantity?: number;
+      lineTotal?: number;
+      totalPrice?: number;
+    }>;
   }): string {
+    const ownerPrefix = params.ownerId ? `${String(params.ownerId).trim()}|` : '';
     const normSupp = this.normalizeName(params.supplierName || "noma'lum");
-    const items = params.items || [];
+    const items = params.items || params.rows || [];
     const first3 = items
       .slice(0, 3)
-      .map((it) => {
+      .map((it: any) => {
+        if (typeof it === 'string') {
+          return TranslitService.toLatin(it).toLowerCase().replace(/\s+/g, ' ').trim();
+        }
         const n = TranslitService.toLatin(it.normalizedName || it.rawName || it.productName || '')
           .toLowerCase()
           .replace(/\s+/g, ' ')
@@ -38,7 +52,7 @@ export class SupplierService {
         return `${n}:${q}:${tot}`;
       })
       .join(';');
-    const rawStr = `${normSupp}|${params.currency}|${Number(params.finalTotal || 0).toFixed(2)}|${items.length}|${first3}`;
+    const rawStr = `${ownerPrefix}${normSupp}|${params.currency}|${Number(params.finalTotal || 0).toFixed(2)}|${items.length}|${first3}`;
     return crypto.createHash('sha256').update(rawStr).digest('hex');
   }
 
@@ -49,18 +63,21 @@ export class SupplierService {
     return (
       `⛔️ DIQQAT! Bu nakladnoy oldin kiritilgan, ikkinchi marta kiritish mumkin emas!\n` +
       `🏢 Ta'minotchi: ${supName}\n` +
-      `💰 Summasi: ${formatCurrency(existingInvoice.totalAmount, cur)} (${dt})\n` +
+      `💰 Summasi: ${formatCurrency(existingInvoice.totalAmount, cur)}\n` +
       `🕒 Oldin kiritilgan vaqti: ${dt}`
     );
   }
 
   static async checkDuplicateInvoice(params: {
+    ownerId?: string;
     imageHash?: string | null;
     contentFingerprint?: string | null;
   }) {
+    const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
+
     if (params.imageHash) {
       const byHash = await prisma.invoice.findFirst({
-        where: { imageHash: params.imageHash },
+        where: { ownerId, imageHash: params.imageHash },
         include: { supplier: true },
         orderBy: { createdAt: 'desc' },
       });
@@ -78,6 +95,7 @@ export class SupplierService {
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const byFingerprint = await prisma.invoice.findFirst({
         where: {
+          ownerId,
           contentFingerprint: params.contentFingerprint,
           createdAt: { gte: thirtyDaysAgo },
         },
@@ -101,6 +119,7 @@ export class SupplierService {
       warningText: null,
     };
   }
+
   static normalizeName(name: string): string {
     return TranslitService.toLatin(name)
       .toLowerCase()
@@ -111,11 +130,16 @@ export class SupplierService {
       .trim();
   }
 
-  static async findMatchingSuppliers(rawName: string, contextComment?: string) {
+  static async findMatchingSuppliers(
+    rawName: string,
+    contextComment?: string,
+    ownerId: string = env.OWNER_TELEGRAM_ID
+  ) {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const cleanName = this.normalizeName(rawName);
     if (!cleanName) return [];
     const suppliers = await prisma.supplier.findMany({
-      where: { isActive: true, name: { contains: cleanName, mode: 'insensitive' } },
+      where: { ownerId: cleanOwnerId, isActive: true, name: { contains: cleanName, mode: 'insensitive' } },
     });
     if (suppliers.length <= 1) return suppliers;
     const exactMatch = suppliers.find(
@@ -143,14 +167,21 @@ export class SupplierService {
       .trim();
   }
 
-  static async getOrMergeSupplier(tx: any, rawName: string, exactSupplierId?: string) {
+  static async getOrMergeSupplier(
+    tx: any,
+    rawName: string,
+    exactSupplierId?: string,
+    ownerId: string = env.OWNER_TELEGRAM_ID
+  ) {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     if (exactSupplierId && exactSupplierId !== 'CREATE_NEW') {
-      const s = await tx.supplier.findUnique({ where: { id: exactSupplierId } });
+      const s = await tx.supplier.findFirst({ where: { id: exactSupplierId, ownerId: cleanOwnerId } });
       if (s) return s;
     }
     const normalizedName = this.cleanSupplierName(rawName);
     const existing = await tx.supplier.findMany({
       where: {
+        ownerId: cleanOwnerId,
         isActive: true,
         OR: [
           { name: { equals: normalizedName, mode: 'insensitive' } },
@@ -160,7 +191,11 @@ export class SupplierService {
       },
       orderBy: { debtUzs: 'desc' },
     });
-    if (!existing.length) return tx.supplier.create({ data: { name: rawName, debtUzs: 0, debtUsd: 0 } });
+    if (!existing.length) {
+      return tx.supplier.create({
+        data: { ownerId: cleanOwnerId, name: rawName.trim(), debtUzs: 0, debtUsd: 0 },
+      });
+    }
     const primary = existing[0];
     for (const dup of existing.slice(1)) {
       await tx.invoice.updateMany({ where: { supplierId: dup.id }, data: { supplierId: primary.id } });
@@ -176,12 +211,7 @@ export class SupplierService {
     return existing.length > 1 ? (await tx.supplier.findUnique({ where: { id: primary.id } })) || primary : primary;
   }
 
-  /**
-   * MODUL 1: Check if renaming `supplierId` to `newName` conflicts with an existing supplier.
-   * If no conflict, updates `Supplier.name` directly while keeping all Foreign Key history intact.
-   * If conflict exists, returns `{ status: 'MERGE_REQUIRED', sourceSupplier, targetSupplier }`.
-   */
-  static async checkOrRenameSupplier(supplierId: string, rawNewName: string) {
+  static async checkOrRenameSupplier(supplierId: string, rawNewName: string, ownerId?: string) {
     const newName = rawNewName.trim();
     if (!newName || newName.length < 2) {
       throw new Error("Ta'minotchi nomi kamida 2 ta harfdan iborat bo'lishi kerak.");
@@ -191,9 +221,11 @@ export class SupplierService {
     if (!sourceSupplier) {
       throw new Error("Ta'minotchi topilmadi.");
     }
+    const effectiveOwnerId = String(ownerId || sourceSupplier.ownerId || env.OWNER_TELEGRAM_ID).trim();
 
     const existingTarget = await prisma.supplier.findFirst({
       where: {
+        ownerId: effectiveOwnerId,
         id: { not: supplierId },
         name: { equals: newName, mode: 'insensitive' },
       },
@@ -211,7 +243,7 @@ export class SupplierService {
       where: { id: supplierId },
       data: { name: newName },
     });
-    cacheService.invalidateSupplierNames();
+    cacheService.invalidateSupplierNames(effectiveOwnerId);
 
     return {
       status: 'RENAMED' as const,
@@ -219,74 +251,73 @@ export class SupplierService {
     };
   }
 
-  /**
-   * MODUL 1: Merge `sourceSupplierId` into `targetSupplierId` inside a Prisma $transaction.
-   * Transfers all invoices, invoice items, payments, and transactions, and combines UZS & USD balances.
-   */
-  static async mergeSuppliers(sourceSupplierId: string, targetSupplierId: string) {
+  static async mergeSuppliers(sourceSupplierId: string, targetSupplierId: string, ownerId?: string) {
     if (sourceSupplierId === targetSupplierId) {
       const same = await prisma.supplier.findUnique({ where: { id: targetSupplierId } });
       if (!same) throw new Error("Ta'minotchi topilmadi.");
       return same;
     }
 
-    const merged = await prisma.$transaction(async (tx) => {
-      const [source, target] = await Promise.all([
-        tx.supplier.findUnique({ where: { id: sourceSupplierId } }),
-        tx.supplier.findUnique({ where: { id: targetSupplierId } }),
-      ]);
+    const merged = await prisma.$transaction(
+      async (tx) => {
+        const [source, target] = await Promise.all([
+          tx.supplier.findUnique({ where: { id: sourceSupplierId } }),
+          tx.supplier.findUnique({ where: { id: targetSupplierId } }),
+        ]);
 
-      if (!source || !target) {
-        throw new Error("Birlashtiriladigan ta'minotchi topilmadi.");
-      }
+        if (!source || !target) {
+          throw new Error("Birlashtiriladigan ta'minotchi topilmadi.");
+        }
+        if (ownerId && (source.ownerId !== ownerId || target.ownerId !== ownerId)) {
+          throw new Error("Boshqa foydalanuvchi ta'minotchisini birlashtirish mumkin emas.");
+        }
 
-      await Promise.all([
-        tx.invoice.updateMany({
-          where: { supplierId: source.id },
-          data: { supplierId: target.id },
-        }),
-        tx.invoiceItem.updateMany({
-          where: { supplierId: source.id },
-          data: { supplierId: target.id },
-        }),
-        tx.supplierTransaction.updateMany({
-          where: { supplierId: source.id },
-          data: { supplierId: target.id },
-        }),
-        tx.supplierPayment.updateMany({
-          where: { supplierId: source.id },
-          data: { supplierId: target.id },
-        }),
-      ]);
+        await Promise.all([
+          tx.invoice.updateMany({
+            where: { supplierId: source.id },
+            data: { supplierId: target.id },
+          }),
+          tx.invoiceItem.updateMany({
+            where: { supplierId: source.id },
+            data: { supplierId: target.id },
+          }),
+          tx.supplierTransaction.updateMany({
+            where: { supplierId: source.id },
+            data: { supplierId: target.id },
+          }),
+          tx.supplierPayment.updateMany({
+            where: { supplierId: source.id },
+            data: { supplierId: target.id },
+          }),
+        ]);
 
-      const newDebtUzs = Number((Number(target.debtUzs) + Number(source.debtUzs)).toFixed(2));
-      const newDebtUsd = Number((Number(target.debtUsd) + Number(source.debtUsd)).toFixed(2));
+        const newDebtUzs = Number((Number(target.debtUzs) + Number(source.debtUzs)).toFixed(2));
+        const newDebtUsd = Number((Number(target.debtUsd) + Number(source.debtUsd)).toFixed(2));
 
-      const [updatedTarget] = await Promise.all([
-        tx.supplier.update({
-          where: { id: target.id },
-          data: {
-            debtUzs: newDebtUzs,
-            debtUsd: newDebtUsd,
-            phone: target.phone || source.phone,
-            isActive: true,
-          },
-        }),
-        tx.supplier.delete({ where: { id: source.id } }),
-      ]);
+        const [updatedTarget] = await Promise.all([
+          tx.supplier.update({
+            where: { id: target.id },
+            data: {
+              debtUzs: newDebtUzs,
+              debtUsd: newDebtUsd,
+              phone: target.phone || source.phone,
+              isActive: true,
+            },
+          }),
+          tx.supplier.delete({ where: { id: source.id } }),
+        ]);
 
-      return updatedTarget;
-    }, { maxWait: 15000, timeout: 30000 });
+        return updatedTarget;
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
 
-    cacheService.invalidateSupplierNames();
+    cacheService.invalidateSupplierNames(merged.ownerId);
     return merged;
   }
 
-  /**
-   * MODUL 2, 3, 4: Create a saved Invoice with Verbatim text, InvoiceItems, SupplierTransaction,
-   * Anti-Duplicate Guard (imageHash & contentFingerprint), and Cash/Credit accounting inside a Prisma $transaction.
-   */
   static async createInvoiceWithItems(params: {
+    ownerId?: string;
     supplierId?: string;
     supplierName: string;
     invoiceNo?: string | null;
@@ -301,12 +332,24 @@ export class SupplierService {
     imageHash?: string | null;
     contentFingerprint?: string | null;
     forceOverrideDuplicate?: boolean;
-    items?: Array<Partial<ParsedInvoiceItem> & { productName?: string; rawName?: string; unitPrice: number; quantity?: number; unit?: string; lineTotal?: number; totalPrice?: number; currency?: 'UZS' | 'USD' }>;
+    items?: Array<
+      Partial<ParsedInvoiceItem> & {
+        productName?: string;
+        rawName?: string;
+        unitPrice: number;
+        quantity?: number;
+        unit?: string;
+        lineTotal?: number;
+        totalPrice?: number;
+        currency?: 'UZS' | 'USD';
+      }
+    >;
     verbatimText?: string;
     photoFileId?: string | null;
     rawImageUrl?: string | null;
     createdAt?: Date;
   }) {
+    const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
     const createdAt = params.createdAt || new Date();
 
@@ -354,15 +397,15 @@ export class SupplierService {
     const contentFingerprint =
       params.contentFingerprint ||
       this.computeContentFingerprint({
+        ownerId,
         supplierName: params.supplierName,
         currency,
         finalTotal: math.finalTotal,
         items: normalizedItems,
       });
 
-    // MODUL 3: Anti-Duplicate Invoice Guard (2-stage check before saving)
     if (!params.forceOverrideDuplicate) {
-      const dupCheck = await this.checkDuplicateInvoice({ imageHash, contentFingerprint });
+      const dupCheck = await this.checkDuplicateInvoice({ ownerId, imageHash, contentFingerprint });
       if (dupCheck.isDuplicate && dupCheck.existingInvoice) {
         return {
           isDuplicate: true as const,
@@ -383,13 +426,12 @@ export class SupplierService {
     return prisma.$transaction(
       async (tx: Prisma.TransactionClient) => {
         let supplier = params.supplierId
-          ? await tx.supplier.findUnique({ where: { id: params.supplierId } })
+          ? await tx.supplier.findFirst({ where: { id: params.supplierId, ownerId } })
           : null;
 
-        // Only add `creditAmount` to supplier debt (`0` when `paymentType === 'CASH'`)
         if (!supplier) {
           const found = await tx.supplier.findFirst({
-            where: { name: { equals: params.supplierName.trim(), mode: 'insensitive' } },
+            where: { ownerId, name: { equals: params.supplierName.trim(), mode: 'insensitive' } },
           });
           if (found) {
             supplier = await tx.supplier.update({
@@ -402,6 +444,7 @@ export class SupplierService {
           } else {
             supplier = await tx.supplier.create({
               data: {
+                ownerId,
                 name: params.supplierName.trim(),
                 debtUzs: currency === 'UZS' ? creditAmount : 0,
                 debtUsd: currency === 'USD' ? creditAmount : 0,
@@ -421,6 +464,7 @@ export class SupplierService {
 
         const invoice = await tx.invoice.create({
           data: {
+            ownerId,
             supplierId: supplier.id,
             invoiceNo: params.invoiceNo || null,
             originalAmount: math.rawTotal,
@@ -441,11 +485,12 @@ export class SupplierService {
         if (paidCashAmount > 0) {
           await tx.cashTransaction.create({
             data: {
+              ownerId,
               partyName: supplier.name,
               amount: paidCashAmount,
               currency,
               items: JSON.stringify(normalizedItems),
-              createdBy: 'Bot',
+              createdBy: ownerId,
               createdAt,
             },
           });
@@ -460,6 +505,7 @@ export class SupplierService {
 
             const foundProd = await tx.product.findFirst({
               where: {
+                ownerId,
                 OR: [
                   { name: { equals: itemName, mode: 'insensitive' } },
                   { searchTokens: { contains: normName, mode: 'insensitive' } },
@@ -476,6 +522,7 @@ export class SupplierService {
                 })
               : await tx.product.create({
                   data: {
+                    ownerId,
                     name: itemName,
                     searchTokens,
                     lastPrice: item.unitPrice,
@@ -488,6 +535,7 @@ export class SupplierService {
 
             await tx.invoiceItem.create({
               data: {
+                ownerId,
                 invoiceId: invoice.id,
                 supplierId: supplier.id,
                 productId: product.id,
@@ -519,6 +567,7 @@ export class SupplierService {
 
         const transaction = await tx.supplierTransaction.create({
           data: {
+            ownerId,
             supplierId: supplier.id,
             invoiceId: invoice.id,
             type: 'INCOMING_GOODS',
@@ -548,7 +597,7 @@ export class SupplierService {
           },
         });
 
-        cacheService.invalidateSupplierNames();
+        cacheService.invalidateSupplierNames(ownerId);
         return {
           isDuplicate: false as const,
           duplicateStage: null,
@@ -563,48 +612,50 @@ export class SupplierService {
     );
   }
 
-  /**
-   * MODUL 5.1: Record a supplier payment inside a Prisma $transaction,
-   * saving to `SupplierPayment` and `SupplierTransaction` and subtracting from `debtUzs` or `debtUsd`.
-   */
   static async recordSupplierPayment(params: {
+    ownerId?: string;
     supplierId?: string;
     supplierName: string;
     amount: number;
     currency?: 'UZS' | 'USD';
     comment?: string | null;
+    note?: string | null;
     createdAt?: Date;
   }) {
+    const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
     const isUsd = currency === 'USD';
     const amount = Math.max(0, Number(Math.abs(params.amount || 0).toFixed(2)));
     const createdAt = params.createdAt || new Date();
+    const commentText = params.comment || params.note || "Ta'minotchiga to'lov";
 
     return prisma.$transaction(
       async (tx) => {
-        const supplier = await this.getOrMergeSupplier(tx, params.supplierName, params.supplierId);
+        const supplier = await this.getOrMergeSupplier(tx, params.supplierName, params.supplierId, ownerId);
         const newDebtUzs = Number((Number(supplier.debtUzs) - (isUsd ? 0 : amount)).toFixed(2));
         const newDebtUsd = Number((Number(supplier.debtUsd) - (isUsd ? amount : 0)).toFixed(2));
 
         const [payment, transaction, updatedSupplier] = await Promise.all([
           tx.supplierPayment.create({
             data: {
+              ownerId,
               supplierId: supplier.id,
               amount,
               currency,
-              comment: params.comment || "Ta'minotchiga to'lov",
+              comment: commentText,
               createdAt,
             },
           }),
           tx.supplierTransaction.create({
             data: {
+              ownerId,
               supplierId: supplier.id,
               type: 'PAYMENT',
               amount,
               currency,
               date: createdAt,
               sourceType: 'MANUAL',
-              description: params.comment || "Ta'minotchiga to'lov",
+              description: commentText,
             },
           }),
           tx.supplier.update({
@@ -613,7 +664,7 @@ export class SupplierService {
           }),
         ]);
 
-        cacheService.invalidateSupplierNames();
+        cacheService.invalidateSupplierNames(ownerId);
         return { supplier: updatedSupplier, payment, transaction };
       },
       { maxWait: 15000, timeout: 30000 }
@@ -653,11 +704,18 @@ export class SupplierService {
     return text;
   }
 
-  private static async resolveInvoiceAndTx(tx: Prisma.TransactionClient, idOrTxId: string) {
+  private static async resolveInvoiceAndTx(
+    tx: Prisma.TransactionClient,
+    idOrTxId: string,
+    ownerId?: string
+  ) {
     let invoice = await tx.invoice.findUnique({
       where: { id: idOrTxId },
       include: { supplier: true },
     });
+    if (invoice && ownerId && invoice.ownerId !== ownerId) {
+      throw new Error("Ruxsat yo'q.");
+    }
     let supTx = invoice
       ? await tx.supplierTransaction.findFirst({
           where: {
@@ -669,6 +727,9 @@ export class SupplierService {
 
     if (!invoice) {
       supTx = await tx.supplierTransaction.findUnique({ where: { id: idOrTxId } });
+      if (supTx && ownerId && supTx.ownerId !== ownerId) {
+        throw new Error("Ruxsat yo'q.");
+      }
       if (supTx?.invoiceId) {
         invoice = await tx.invoice.findUnique({
           where: { id: supTx.invoiceId },
@@ -676,7 +737,6 @@ export class SupplierService {
         });
       }
       if (!invoice && supTx) {
-        // Fallback: find closest invoice for this supplier or create one on the fly
         invoice = await tx.invoice.findFirst({
           where: { supplierId: supTx.supplierId },
           orderBy: { createdAt: 'desc' },
@@ -691,237 +751,260 @@ export class SupplierService {
     return { invoice, supTx };
   }
 
-  /**
-   * MODUL 2: Update discount (amount or percentage) on a saved Invoice and synchronously recalculate Supplier debt.
-   */
-  static async updateInvoiceDiscount(invoiceIdOrTxId: string, discountInput: number | string) {
-    return prisma.$transaction(async (tx) => {
-      const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId);
-      const rawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
-      const oldFinalTotal = Number(invoice.totalAmount);
-      const currency = invoice.currency as 'UZS' | 'USD';
+  static async updateInvoiceDiscount(
+    invoiceIdOrTxId: string,
+    discountInput: number | string,
+    ownerId?: string
+  ) {
+    return prisma.$transaction(
+      async (tx) => {
+        const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId, ownerId);
+        const rawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
+        const oldFinalTotal = Number(invoice.totalAmount);
+        const currency = invoice.currency as 'UZS' | 'USD';
 
-      const math = calculateDiscountedTotal(rawTotal, discountInput);
-      const delta = Number((math.finalTotal - oldFinalTotal).toFixed(2));
+        const math = calculateDiscountedTotal(rawTotal, discountInput);
+        const delta = Number((math.finalTotal - oldFinalTotal).toFixed(2));
 
-      const [updatedSupplier, updatedInvoice] = await Promise.all([
-        tx.supplier.update({
-          where: { id: invoice.supplierId },
-          data:
-            currency === 'USD'
-              ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
-              : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
-        }),
-        tx.invoice.update({
-          where: { id: invoice.id },
-          data: {
-            originalAmount: math.rawTotal,
+        const [updatedSupplier, updatedInvoice] = await Promise.all([
+          tx.supplier.update({
+            where: { id: invoice.supplierId },
+            data:
+              currency === 'USD'
+                ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
+                : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
+          }),
+          tx.invoice.update({
+            where: { id: invoice.id },
+            data: {
+              originalAmount: math.rawTotal,
+              discountAmount: math.discountAmount,
+              totalAmount: math.finalTotal,
+            },
+          }),
+        ]);
+
+        if (supTx) {
+          const postDebt = currency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
+          const formattedReceipt = this.buildFormattedReceiptText({
+            supplierName: updatedSupplier.name,
+            date: supTx.date,
+            verbatimText: invoice.verbatimText,
+            rawTotal: math.rawTotal,
             discountAmount: math.discountAmount,
-            totalAmount: math.finalTotal,
-          },
-        }),
-      ]);
+            finalTotal: math.finalTotal,
+            currency,
+            postDebt,
+          });
+          await tx.supplierTransaction.update({
+            where: { id: supTx.id },
+            data: {
+              originalAmount: math.rawTotal,
+              discountAmount: math.discountAmount,
+              amount: math.finalTotal,
+              formattedReceipt,
+            },
+          });
+        }
 
-      if (supTx) {
-        const postDebt = currency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
-        const formattedReceipt = this.buildFormattedReceiptText({
-          supplierName: updatedSupplier.name,
-          date: supTx.date,
-          verbatimText: invoice.verbatimText,
+        return {
+          invoice: updatedInvoice,
+          supplier: updatedSupplier,
           rawTotal: math.rawTotal,
           discountAmount: math.discountAmount,
           finalTotal: math.finalTotal,
           currency,
-          postDebt,
-        });
-        await tx.supplierTransaction.update({
-          where: { id: supTx.id },
-          data: {
-            originalAmount: math.rawTotal,
-            discountAmount: math.discountAmount,
-            amount: math.finalTotal,
-            formattedReceipt,
-          },
-        });
-      }
-
-      return {
-        invoice: updatedInvoice,
-        supplier: updatedSupplier,
-        rawTotal: math.rawTotal,
-        discountAmount: math.discountAmount,
-        finalTotal: math.finalTotal,
-        currency,
-      };
-    }, { maxWait: 15000, timeout: 30000 });
+        };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
   }
 
-  /**
-   * MODUL 2: Clear discount on a saved Invoice (discount = 0, finalTotal = rawTotal) in a $transaction.
-   */
-  static async clearInvoiceDiscount(invoiceIdOrTxId: string) {
-    return this.updateInvoiceDiscount(invoiceIdOrTxId, 0);
+  static async clearInvoiceDiscount(invoiceIdOrTxId: string, ownerId?: string) {
+    return this.updateInvoiceDiscount(invoiceIdOrTxId, 0, ownerId);
   }
 
-  /**
-   * MODUL 2: Manual override of Invoice total (either finalTotal directly, or both rawTotal & finalTotal) in a $transaction.
-   */
   static async overrideInvoiceTotal(
     invoiceIdOrTxId: string,
     newTotalOrRawTotal: number,
-    explicitFinalTotal?: number
+    explicitFinalTotal?: number,
+    ownerId?: string
   ) {
-    return prisma.$transaction(async (tx) => {
-      const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId);
-      const oldFinalTotal = Number(invoice.totalAmount);
-      const oldRawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
-      const currency = invoice.currency as 'UZS' | 'USD';
+    return prisma.$transaction(
+      async (tx) => {
+        const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId, ownerId);
+        const oldFinalTotal = Number(invoice.totalAmount);
+        const oldRawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
+        const currency = invoice.currency as 'UZS' | 'USD';
 
-      let rawTotal: number;
-      let finalTotal: number;
-      let discountAmount: number;
+        let rawTotal: number;
+        let finalTotal: number;
+        let discountAmount: number;
 
-      if (explicitFinalTotal !== undefined && !isNaN(explicitFinalTotal)) {
-        rawTotal = Math.max(0, Number(newTotalOrRawTotal.toFixed(2)));
-        finalTotal = Math.max(0, Number(explicitFinalTotal.toFixed(2)));
-        discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
-      } else {
-        finalTotal = Math.max(0, Number(newTotalOrRawTotal.toFixed(2)));
-        rawTotal = oldRawTotal >= finalTotal ? oldRawTotal : finalTotal;
-        discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
-      }
+        if (explicitFinalTotal !== undefined && !isNaN(explicitFinalTotal)) {
+          rawTotal = Math.max(0, Number(newTotalOrRawTotal.toFixed(2)));
+          finalTotal = Math.max(0, Number(explicitFinalTotal.toFixed(2)));
+          discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
+        } else {
+          finalTotal = Math.max(0, Number(newTotalOrRawTotal.toFixed(2)));
+          rawTotal = oldRawTotal >= finalTotal ? oldRawTotal : finalTotal;
+          discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
+        }
 
-      const delta = Number((finalTotal - oldFinalTotal).toFixed(2));
+        const delta = Number((finalTotal - oldFinalTotal).toFixed(2));
 
-      const [updatedSupplier, updatedInvoice] = await Promise.all([
-        tx.supplier.update({
-          where: { id: invoice.supplierId },
-          data:
-            currency === 'USD'
-              ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
-              : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
-        }),
-        tx.invoice.update({
-          where: { id: invoice.id },
-          data: {
-            originalAmount: rawTotal,
+        const [updatedSupplier, updatedInvoice] = await Promise.all([
+          tx.supplier.update({
+            where: { id: invoice.supplierId },
+            data:
+              currency === 'USD'
+                ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
+                : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
+          }),
+          tx.invoice.update({
+            where: { id: invoice.id },
+            data: {
+              originalAmount: rawTotal,
+              discountAmount,
+              totalAmount: finalTotal,
+            },
+          }),
+        ]);
+
+        if (supTx) {
+          const postDebt = currency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
+          const formattedReceipt = this.buildFormattedReceiptText({
+            supplierName: updatedSupplier.name,
+            date: supTx.date,
+            verbatimText: invoice.verbatimText,
+            rawTotal,
             discountAmount,
-            totalAmount: finalTotal,
-          },
-        }),
-      ]);
+            finalTotal,
+            currency,
+            postDebt,
+          });
+          await tx.supplierTransaction.update({
+            where: { id: supTx.id },
+            data: {
+              originalAmount: rawTotal,
+              discountAmount,
+              amount: finalTotal,
+              formattedReceipt,
+            },
+          });
+        }
 
-      if (supTx) {
-        const postDebt = currency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
-        const formattedReceipt = this.buildFormattedReceiptText({
-          supplierName: updatedSupplier.name,
-          date: supTx.date,
-          verbatimText: invoice.verbatimText,
+        return {
+          invoice: updatedInvoice,
+          supplier: updatedSupplier,
           rawTotal,
           discountAmount,
           finalTotal,
           currency,
-          postDebt,
-        });
-        await tx.supplierTransaction.update({
-          where: { id: supTx.id },
-          data: {
-            originalAmount: rawTotal,
-            discountAmount,
-            amount: finalTotal,
-            formattedReceipt,
-          },
-        });
-      }
-
-      return {
-        invoice: updatedInvoice,
-        supplier: updatedSupplier,
-        rawTotal,
-        discountAmount,
-        finalTotal,
-        currency,
-      };
-    }, { maxWait: 15000, timeout: 30000 });
+        };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
   }
 
-  /**
-   * MODUL 2 & 3: Toggle Invoice currency between UZS and USD in a Prisma $transaction
-   * and move the debt balance from the old currency to the new currency.
-   */
-  static async toggleInvoiceCurrency(invoiceIdOrTxId: string) {
-    return prisma.$transaction(async (tx) => {
-      const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId);
-      const oldCurrency = invoice.currency as 'UZS' | 'USD';
-      const newCurrency: 'UZS' | 'USD' = oldCurrency === 'UZS' ? 'USD' : 'UZS';
-      const finalTotal = Number(invoice.totalAmount);
-      const rawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
-      const discountAmount = Number(invoice.discountAmount ?? 0);
+  static async toggleInvoiceCurrency(invoiceIdOrTxId: string, ownerId?: string) {
+    return prisma.$transaction(
+      async (tx) => {
+        const { invoice, supTx } = await this.resolveInvoiceAndTx(tx, invoiceIdOrTxId, ownerId);
+        const oldCurrency = invoice.currency as 'UZS' | 'USD';
+        const newCurrency: 'UZS' | 'USD' = oldCurrency === 'UZS' ? 'USD' : 'UZS';
+        const finalTotal = Number(invoice.totalAmount);
+        const rawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
+        const discountAmount = Number(invoice.discountAmount ?? 0);
 
-      const newDebtUzs =
-        oldCurrency === 'UZS'
-          ? Number((Number(invoice.supplier.debtUzs) - finalTotal).toFixed(2))
-          : Number((Number(invoice.supplier.debtUzs) + finalTotal).toFixed(2));
-      const newDebtUsd =
-        oldCurrency === 'USD'
-          ? Number((Number(invoice.supplier.debtUsd) - finalTotal).toFixed(2))
-          : Number((Number(invoice.supplier.debtUsd) + finalTotal).toFixed(2));
+        const newDebtUzs =
+          oldCurrency === 'UZS'
+            ? Number((Number(invoice.supplier.debtUzs) - finalTotal).toFixed(2))
+            : Number((Number(invoice.supplier.debtUzs) + finalTotal).toFixed(2));
+        const newDebtUsd =
+          oldCurrency === 'USD'
+            ? Number((Number(invoice.supplier.debtUsd) - finalTotal).toFixed(2))
+            : Number((Number(invoice.supplier.debtUsd) + finalTotal).toFixed(2));
 
-      const [updatedSupplier, updatedInvoice] = await Promise.all([
-        tx.supplier.update({
-          where: { id: invoice.supplierId },
-          data: { debtUzs: newDebtUzs, debtUsd: newDebtUsd },
-        }),
-        tx.invoice.update({
-          where: { id: invoice.id },
-          data: { currency: newCurrency },
-        }),
-        tx.invoiceItem.updateMany({
-          where: { invoiceId: invoice.id },
-          data: { currency: newCurrency },
-        }),
-      ]);
+        const [updatedSupplier, updatedInvoice] = await Promise.all([
+          tx.supplier.update({
+            where: { id: invoice.supplierId },
+            data: { debtUzs: newDebtUzs, debtUsd: newDebtUsd },
+          }),
+          tx.invoice.update({
+            where: { id: invoice.id },
+            data: { currency: newCurrency },
+          }),
+          tx.invoiceItem.updateMany({
+            where: { invoiceId: invoice.id },
+            data: { currency: newCurrency },
+          }),
+        ]);
 
-      if (supTx) {
-        const postDebt = newCurrency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
-        const formattedReceipt = this.buildFormattedReceiptText({
-          supplierName: updatedSupplier.name,
-          date: supTx.date,
-          verbatimText: invoice.verbatimText,
+        if (supTx) {
+          const postDebt =
+            newCurrency === 'USD' ? Number(updatedSupplier.debtUsd) : Number(updatedSupplier.debtUzs);
+          const formattedReceipt = this.buildFormattedReceiptText({
+            supplierName: updatedSupplier.name,
+            date: supTx.date,
+            verbatimText: invoice.verbatimText,
+            rawTotal,
+            discountAmount,
+            finalTotal,
+            currency: newCurrency,
+            postDebt,
+          });
+          await tx.supplierTransaction.update({
+            where: { id: supTx.id },
+            data: {
+              currency: newCurrency,
+              formattedReceipt,
+            },
+          });
+        }
+
+        return {
+          invoice: updatedInvoice,
+          supplier: updatedSupplier,
           rawTotal,
           discountAmount,
           finalTotal,
           currency: newCurrency,
-          postDebt,
-        });
-        await tx.supplierTransaction.update({
-          where: { id: supTx.id },
-          data: {
-            currency: newCurrency,
-            formattedReceipt,
-          },
-        });
-      }
-
-      return {
-        invoice: updatedInvoice,
-        supplier: updatedSupplier,
-        rawTotal,
-        discountAmount,
-        finalTotal,
-        currency: newCurrency,
-      };
-    }, { maxWait: 15000, timeout: 30000 });
+        };
+      },
+      { maxWait: 15000, timeout: 30000 }
+    );
   }
 
   /**
-   * MODUL 3.3: Format Debtors / Suppliers list with separate UZS & USD balances and two-line JAMI QARZ summary.
+   * MODUL 1 & 3: Format Debtors / Suppliers list isolated by `ownerId`.
+   * Supports calling as `(page, perPage, ownerId)` or `(ownerId, page, perPage)`.
    */
-  static async getFormattedDebtorsReport(page = 1, perPage = 10) {
+  static async getFormattedDebtorsReport(
+    pageOrOwnerId: number | string = 1,
+    perPageOrPage: number = 10,
+    maybeOwnerId?: string | number
+  ) {
+    let page = 1;
+    let perPage = 10;
+    let ownerId = env.OWNER_TELEGRAM_ID;
+
+    if (typeof pageOrOwnerId === 'string') {
+      ownerId = pageOrOwnerId;
+      page = typeof perPageOrPage === 'number' ? perPageOrPage : 1;
+      perPage = typeof maybeOwnerId === 'number' ? maybeOwnerId : 10;
+    } else {
+      page = pageOrOwnerId || 1;
+      perPage = perPageOrPage || 10;
+      ownerId = typeof maybeOwnerId === 'string' && maybeOwnerId ? maybeOwnerId : env.OWNER_TELEGRAM_ID;
+    }
+
+    const cleanOwnerId = String(ownerId).trim();
+
     const [totalCount, aggregateResult] = await Promise.all([
-      prisma.supplier.count({ where: { isActive: true } }),
+      prisma.supplier.count({ where: { ownerId: cleanOwnerId, isActive: true } }),
       prisma.supplier.aggregate({
-        where: { isActive: true },
+        where: { ownerId: cleanOwnerId, isActive: true },
         _sum: { debtUzs: true, debtUsd: true },
       }),
     ]);
@@ -930,7 +1013,7 @@ export class SupplierService {
     const currentPage = Math.max(1, Math.min(page, totalPages));
 
     const suppliers = await prisma.supplier.findMany({
-      where: { isActive: true },
+      where: { ownerId: cleanOwnerId, isActive: true },
       orderBy: [{ debtUzs: 'desc' }, { debtUsd: 'desc' }],
       skip: (currentPage - 1) * perPage,
       take: perPage,

@@ -14,6 +14,7 @@ const auth_middleware_1 = require("./middlewares/auth.middleware");
 const queue_middleware_1 = require("./middlewares/queue.middleware");
 const error_middleware_1 = require("./middlewares/error.middleware");
 const start_1 = require("./handlers/start");
+const admin_1 = require("./handlers/admin");
 const invoice_1 = require("./handlers/invoice");
 const voice_1 = require("./handlers/voice");
 const debt_1 = require("./handlers/debt");
@@ -58,7 +59,7 @@ bot.use(async (ctx, next) => {
             await ctx.answerCallbackQuery().catch(() => { });
     }
 });
-bot.use(start_1.startHandler, invoice_1.invoiceHandler, debt_1.debtHandler, suppliers_1.suppliersHandler, cash_1.cashHandler, expense_1.expenseHandler, search_1.searchHandler, closing_1.closingHandler, report_1.reportHandler, voice_1.voiceHandler);
+bot.use(start_1.startHandler, admin_1.adminHandler, invoice_1.invoiceHandler, debt_1.debtHandler, suppliers_1.suppliersHandler, cash_1.cashHandler, expense_1.expenseHandler, search_1.searchHandler, closing_1.closingHandler, report_1.reportHandler, voice_1.voiceHandler);
 bot.on('message', (ctx) => ctx.reply("🤔 Tushunmadim. Pastdagi menyudan kerakli bo'limni tanlang yoki shunchaki ovozli xabar / nakladnoy rasmini yuboring."));
 const PORT = Number(process.env.PORT) || 3000;
 let isShuttingDown = false;

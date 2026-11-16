@@ -9,27 +9,26 @@ exports.searchHandler.hears(['📝 Qidiruv', '🔍 Qidiruv'], async (ctx) => {
     await ctx.reply("🔍 Qidirmoqchi bo'lgan mahsulot yoki ta'minotchi nomini yozing (kamida 2 ta harf):");
 });
 exports.searchHandler.on('message:text', async (ctx, next) => {
-    if (ctx.session.step !== 'SEARCH')
+    if (ctx.session.step !== 'SEARCH' || !ctx.from)
         return next();
+    const ownerId = String(ctx.from.id);
     const query = ctx.message.text.trim();
     if (query.startsWith('/'))
         return next();
     if (query.length < 2)
         return ctx.reply('Iltimos, kamida 2 ta harf yozing.');
-    const r = await search_service_1.SearchService.multiSearch(query);
+    const r = await search_service_1.SearchService.multiSearch(query, ownerId);
     if (!r.items.length && !r.suppliers.length && !r.customers.length && !r.transactions.length) {
         ctx.session.step = undefined;
         return ctx.reply('Hech narsa topilmadi.');
     }
     const kb = new grammy_1.InlineKeyboard();
     const messageBlocks = [];
-    // 1. PRODUCT-FIRST: Display matched products with Price Tracker dynamics first!
     if (r.items.length > 0) {
         for (const item of r.items) {
             messageBlocks.push(item.formattedCard);
         }
     }
-    // 2. Append matching suppliers/customers below & add supplier buttons
     if (r.suppliers.length > 0) {
         const supLines = r.suppliers.map((s) => `• 🏢 ${s.name} (${s.amountText})`).join('\n');
         messageBlocks.push(`🏢 Ta'minotchilar:\n${supLines}`);

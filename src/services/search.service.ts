@@ -1,6 +1,7 @@
 import Fuse from 'fuse.js';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database/prisma';
+import { env } from '../config/env';
 import { TranslitService } from './translit.service';
 import { formatCompactAmount, formatCurrency, formatDateShort, formatSupplierDebtLine } from '../utils/formatters';
 
@@ -121,14 +122,19 @@ export function formatProductPriceTrackerCard(params: {
 }
 
 export class SearchService {
-  static async searchProductsWithPriceDiff(query: string): Promise<ItemSearchResult[]> {
+  static async searchProductsWithPriceDiff(
+    query: string,
+    ownerId: string = env.OWNER_TELEGRAM_ID
+  ): Promise<ItemSearchResult[]> {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const rawTrimmed = query.replace(/(ni|ga|dan|da|ning)$/i, '').trim();
     const cleanQuery = toKey(rawTrimmed);
     if (!cleanQuery) return [];
 
-    // 1. Direct ILIKE search on InvoiceItem + Product
+    // 1. Direct ILIKE search on InvoiceItem + Product isolated by ownerId
     let matchedInvoiceItems = await prisma.invoiceItem.findMany({
       where: {
+        ownerId: cleanOwnerId,
         OR: [
           { rawName: { contains: rawTrimmed, mode: 'insensitive' } },
           { normalizedName: { contains: cleanQuery, mode: 'insensitive' } },
@@ -148,6 +154,7 @@ export class SearchService {
     // 2. Fuzzy fallback if ILIKE returned 0 items
     if (matchedInvoiceItems.length === 0) {
       const recentItems = await prisma.invoiceItem.findMany({
+        where: { ownerId: cleanOwnerId },
         orderBy: [{ createdAt: 'desc' }],
         include: {
           product: { select: { id: true, name: true } },
@@ -172,7 +179,6 @@ export class SearchService {
 
     if (matchedInvoiceItems.length === 0) return [];
 
-    // Also fetch full history for matched productIds / normalizedNames so we always have the previous batch for comparison
     const productIds = Array.from(new Set(matchedInvoiceItems.map((i) => i.productId)));
     const normNames = Array.from(
       new Set(matchedInvoiceItems.map((i) => (i.normalizedName || toKey(i.rawName || i.product.name))).filter(Boolean))
@@ -180,6 +186,7 @@ export class SearchService {
 
     const allHistoryItems = await prisma.invoiceItem.findMany({
       where: {
+        ownerId: cleanOwnerId,
         OR: [
           { productId: { in: productIds } },
           { normalizedName: { in: normNames } },
@@ -193,7 +200,6 @@ export class SearchService {
       },
     });
 
-    // Group by (normalizedProductName, currency) so UZS and USD histories are compared in their own currency
     const groups = new Map<string, typeof allHistoryItems>();
     for (const row of allHistoryItems) {
       const pName = row.rawName || row.product?.name || "Noma'lum";
@@ -208,7 +214,6 @@ export class SearchService {
     const results: ItemSearchResult[] = [];
 
     for (const [, history] of groups.entries()) {
-      // Ensure descending chronological order
       history.sort((a, b) => {
         const tA = new Date(a.createdAt || a.invoice.createdAt).getTime();
         const tB = new Date(b.createdAt || b.invoice.createdAt).getTime();
@@ -267,21 +272,22 @@ export class SearchService {
     return results;
   }
 
-  static async multiSearch(query: string) {
+  static async multiSearch(query: string, ownerId: string = env.OWNER_TELEGRAM_ID) {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const cleanQuery = toKey(query.replace(/(ni|ga|dan|da|ning)$/i, '').trim());
 
     const [productItems, allSuppliers, allDebts, recentTx] = await Promise.all([
-      this.searchProductsWithPriceDiff(query),
+      this.searchProductsWithPriceDiff(query, cleanOwnerId),
       prisma.supplier.findMany({
-        where: { isActive: true },
+        where: { ownerId: cleanOwnerId, isActive: true },
         select: { id: true, name: true, debtUzs: true, debtUsd: true },
       }),
       prisma.customerDebt.findMany({
-        where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        where: { ownerId: cleanOwnerId, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
         select: { id: true, customerName: true, amount: true, paidAmount: true, currency: true },
       }),
       prisma.supplierTransaction.findMany({
-        where: { receiptData: { not: Prisma.DbNull } },
+        where: { ownerId: cleanOwnerId, receiptData: { not: Prisma.DbNull } },
         take: 50,
         orderBy: { date: 'desc' },
         select: {
@@ -350,7 +356,6 @@ export class SearchService {
       score: r.score,
     }));
 
-    // Also include suppliers from matched product items so user can jump straight to the product's supplier
     for (const item of productItems) {
       if (item.supplierId && !matchedSuppliers.some((s) => s.id === item.supplierId)) {
         const sup = allSuppliers.find((s) => s.id === item.supplierId);
@@ -366,7 +371,6 @@ export class SearchService {
     }
 
     return {
-      // PRODUCT-FIRST UNIFIED SEARCH: items (products with price dynamics) come first!
       items: productItems,
       suppliers: matchedSuppliers,
       customers: top5(customerDocs).map((r: any) => ({

@@ -283,14 +283,16 @@ function reconcileInvoiceTotals(input) {
     rawTotal = Number(rawTotal.toFixed(2));
     // 2. Double-Deduction Prevention when discountPercent > 0
     if (discountPercent > 0) {
-        // If rawTotal was only populated from printedFinalTotal (no itemsSum and no subtotalBeforeDiscount),
-        // kept as rawTotal; otherwise rawTotal is the pre-discount sum (e.g. 2,000,000).
         const expectedDiscount = Number(((rawTotal * discountPercent) / 100).toFixed(2));
         const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
-        if (printedFinalTotal > 0 &&
-            (Math.abs(printedFinalTotal - expectedFinal) <= 1 || printedFinalTotal < rawTotal)) {
+        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= 100;
+        if ((printedFinalTotal > 0 &&
+            (Math.abs(printedFinalTotal - expectedFinal) <= 100 || printedFinalTotal < rawTotal)) ||
+            aiPutFinalInSubtotal) {
             // Discount was ALREADY subtracted on the paper receipt! Do NOT deduct 5% a second time.
-            const finalTotal = Math.abs(printedFinalTotal - expectedFinal) <= 1 ? expectedFinal : printedFinalTotal;
+            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= 100
+                ? expectedFinal
+                : printedFinalTotal;
             const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
             return {
                 rawTotal,
@@ -313,9 +315,13 @@ function reconcileInvoiceTotals(input) {
     if (explicitDiscountAmount > 0) {
         const expectedDiscount = Math.min(rawTotal, explicitDiscountAmount);
         const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
-        if (printedFinalTotal > 0 &&
-            (Math.abs(printedFinalTotal - expectedFinal) <= 1 || printedFinalTotal < rawTotal)) {
-            const finalTotal = Math.abs(printedFinalTotal - expectedFinal) <= 1 ? expectedFinal : printedFinalTotal;
+        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= 100;
+        if ((printedFinalTotal > 0 &&
+            (Math.abs(printedFinalTotal - expectedFinal) <= 100 || printedFinalTotal < rawTotal)) ||
+            aiPutFinalInSubtotal) {
+            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= 100
+                ? expectedFinal
+                : printedFinalTotal;
             const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
             const inferredPercent = rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
             return {

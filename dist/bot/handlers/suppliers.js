@@ -11,7 +11,10 @@ const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
 exports.suppliersHandler = new grammy_1.Composer();
 async function sendSuppliersPage(ctx, page, isEdit = false) {
-    const report = await supplier_service_1.SupplierService.getFormattedDebtorsReport(page, 10);
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const report = await supplier_service_1.SupplierService.getFormattedDebtorsReport(page, 10, ownerId);
     const kb = new grammy_1.InlineKeyboard();
     (0, inline_1.addTwoColButtons)(kb, report.suppliers, (s) => s.name, (s) => Number(s.debtUzs) || Number(s.debtUsd), (s) => `sup:v:${s.id}`);
     (0, inline_1.addPaginationRow)(kb, report.currentPage, report.totalPages, 'sup:p:');
@@ -19,6 +22,9 @@ async function sendSuppliersPage(ctx, page, isEdit = false) {
     await (0, telegram_1.replyOrEdit)(ctx, report.text, kb, isEdit);
 }
 async function sendSupplierDetails(ctx, supplierId, filter = 'all', isEdit = false) {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const now = new Date();
     const startDate = filter === 'today'
         ? new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -26,18 +32,18 @@ async function sendSupplierDetails(ctx, supplierId, filter = 'all', isEdit = fal
             ? new Date(now.getFullYear(), now.getMonth(), 1)
             : undefined;
     const [supplier, allIncoming, txStats] = await Promise.all([
-        prisma_1.prisma.supplier.findUnique({
-            where: { id: supplierId },
+        prisma_1.prisma.supplier.findFirst({
+            where: { id: supplierId, ownerId },
             select: { id: true, name: true, phone: true, debtUzs: true, debtUsd: true },
         }),
         prisma_1.prisma.supplierTransaction.findMany({
-            where: { supplierId, type: 'INCOMING_GOODS' },
+            where: { ownerId, supplierId, type: 'INCOMING_GOODS' },
             orderBy: { date: 'asc' },
             select: { id: true, invoiceId: true, date: true, amount: true, currency: true },
         }),
         prisma_1.prisma.supplierTransaction.groupBy({
             by: ['type', 'currency'],
-            where: startDate ? { supplierId, date: { gte: startDate } } : { supplierId },
+            where: startDate ? { ownerId, supplierId, date: { gte: startDate } } : { ownerId, supplierId },
             _sum: { amount: true },
         }),
     ]);
@@ -88,17 +94,18 @@ async function sendSupplierDetails(ctx, supplierId, filter = 'all', isEdit = fal
     await (0, telegram_1.replyOrEdit)(ctx, text, kb, isEdit);
 }
 exports.suppliersHandler.hears("📦 Ta'minotchilar", async (ctx) => {
-    if (ctx.user?.role === 'OWNER')
-        await sendSuppliersPage(ctx, 1);
+    await sendSuppliersPage(ctx, 1);
 });
 exports.suppliersHandler.callbackQuery(/^sup:p:(\d+)$/, (ctx) => sendSuppliersPage(ctx, parseInt(ctx.match[1], 10), true));
 exports.suppliersHandler.callbackQuery(/^sup:v:(.+)$/, (ctx) => sendSupplierDetails(ctx, ctx.match[1], 'all', true));
 exports.suppliersHandler.callbackQuery(/^sup:tx:(.+):(all|month|today)$/, (ctx) => sendSupplierDetails(ctx, ctx.match[1], ctx.match[2], true));
-// MODUL 1: ✏️ Nomini o'zgartirish
 exports.suppliersHandler.callbackQuery(/^edit_supplier_name:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const supplierId = ctx.match[1];
-    const supplier = await prisma_1.prisma.supplier.findUnique({
-        where: { id: supplierId },
+    const supplier = await prisma_1.prisma.supplier.findFirst({
+        where: { id: supplierId, ownerId },
         select: { id: true, name: true },
     });
     if (!supplier)
@@ -114,9 +121,12 @@ exports.suppliersHandler.callbackQuery(/^cancel_edit_supplier_name:(.+)$/, async
     await sendSupplierDetails(ctx, supplierId, 'all', true);
 });
 exports.suppliersHandler.callbackQuery(/^confirm_merge_supplier:([^:]+):([^:]+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const [, sourceId, targetId] = ctx.match;
     try {
-        const merged = await supplier_service_1.SupplierService.mergeSuppliers(sourceId, targetId);
+        const merged = await supplier_service_1.SupplierService.mergeSuppliers(sourceId, targetId, ownerId);
         (0, telegram_1.clearSession)(ctx);
         await ctx.answerCallbackQuery({ text: "✅ Ta'minotchilar muvaffaqiyatli birlashtirildi!" });
         await ctx.editMessageText(`✅ Ta'minotchilar **"${merged.name}"** hisobiga muvaffaqiyatli birlashtirildi!\n\n` +
@@ -131,22 +141,26 @@ exports.suppliersHandler.callbackQuery(/^confirm_merge_supplier:([^:]+):([^:]+)$
 exports.suppliersHandler.callbackQuery(/^cancel_merge_supplier:(.+)$/, async (ctx) => {
     const supplierId = ctx.match[1];
     (0, telegram_1.clearSession)(ctx);
-    await ctx.editMessageText("❌ Birlashtirish bekor qilindi.");
+    await ctx.editMessageText('❌ Birlashtirish bekor qilindi.');
     await sendSupplierDetails(ctx, supplierId, 'all', false);
 });
 exports.suppliersHandler.callbackQuery(/^sup:archive:(.+)$/, async (ctx) => {
-    if (ctx.user?.role !== 'OWNER')
-        return ctx.answerCallbackQuery({ text: "Sizda ushbu amal uchun huquq yo'q!", show_alert: true });
-    await prisma_1.prisma.supplier.update({ where: { id: ctx.match[1] }, data: { isActive: false } });
-    cache_service_1.cacheService.invalidateSupplierNames();
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    await prisma_1.prisma.supplier.updateMany({ where: { id: ctx.match[1], ownerId }, data: { isActive: false } });
+    cache_service_1.cacheService.invalidateSupplierNames(ownerId);
     await ctx.answerCallbackQuery({ text: "Ta'minotchi o'chirildi (Arxivlandi)." });
     await sendSuppliersPage(ctx, 1, true);
 });
 exports.suppliersHandler.callbackQuery(/^sup:receipts:list:(.+):(\d+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const [supplierId, rawPage] = [ctx.match[1], parseInt(ctx.match[2], 10) || 1];
     const PER_PAGE = 5;
     const allIncoming = await prisma_1.prisma.supplierTransaction.findMany({
-        where: { supplierId, type: 'INCOMING_GOODS' },
+        where: { ownerId, supplierId, type: 'INCOMING_GOODS' },
         orderBy: { date: 'asc' },
         select: { id: true, date: true, amount: true, currency: true },
     });
@@ -161,14 +175,17 @@ exports.suppliersHandler.callbackQuery(/^sup:receipts:list:(.+):(\d+)$/, async (
     await (0, telegram_1.replyOrEdit)(ctx, `📂 **Barcha cheklar tarixi (Sahifa ${currentPage}/${totalPages})**\n\nQuyidagi cheklardan birini tanlang:`, kb, true);
 });
 exports.suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
-    const tx = await prisma_1.prisma.supplierTransaction.findUnique({
-        where: { id: ctx.match[1] },
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const tx = await prisma_1.prisma.supplierTransaction.findFirst({
+        where: { id: ctx.match[1], ownerId },
         include: { supplier: { select: { name: true } } },
     });
     if (!tx)
         return ctx.answerCallbackQuery('Ushbu amaliyot topilmadi.');
     const allIncoming = await prisma_1.prisma.supplierTransaction.findMany({
-        where: { supplierId: tx.supplierId, type: 'INCOMING_GOODS' },
+        where: { ownerId, supplierId: tx.supplierId, type: 'INCOMING_GOODS' },
         orderBy: { date: 'asc' },
         select: { id: true },
     });
@@ -182,8 +199,11 @@ exports.suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
 });
 exports.suppliersHandler.callbackQuery('close_msg', (ctx) => ctx.deleteMessage().catch(() => { }));
 exports.suppliersHandler.callbackQuery(/^sup:photo:(.+)$/, async (ctx) => {
-    const tx = await prisma_1.prisma.supplierTransaction.findUnique({
-        where: { id: ctx.match[1] },
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const tx = await prisma_1.prisma.supplierTransaction.findFirst({
+        where: { id: ctx.match[1], ownerId },
         select: { photoFileId: true },
     });
     if (!tx?.photoFileId)
@@ -194,8 +214,6 @@ exports.suppliersHandler.callbackQuery(/^sup:photo:(.+)$/, async (ctx) => {
     });
 });
 exports.suppliersHandler.callbackQuery('sup:add', async (ctx) => {
-    if (ctx.user?.role !== 'OWNER')
-        return ctx.answerCallbackQuery({ text: "Sizda ushbu amal uchun huquq yo'q!", show_alert: true });
     ctx.session.step = 'SUPPLIER_ADD';
     ctx.session.tempData = {};
     await ctx.reply("➕ **Yangi ta'minotchi qo'shish**\n\nTa'minotchi nomi va ixtiyoriy telefon raqamini kiriting:\n(Masalan: `Azamat Shakar +998901234567` yoki shunchaki `Azamat Shakar`)\n\nBekor qilish uchun /start ni bosing.", { parse_mode: 'Markdown' });
@@ -204,8 +222,11 @@ const getCurrencySelectKeyboard = (selectedCurrency = 'UZS') => new grammy_1.Inl
     .text(selectedCurrency === 'UZS' ? "✅ 🇺🇿 So'mda (UZS)" : "🇺🇿 So'mda (UZS)", 'sup:set_cur:UZS')
     .text(selectedCurrency === 'USD' ? '✅ 💵 Dollarda (USD/USDT)' : '💵 Dollarda (USD/USDT)', 'sup:set_cur:USD');
 const startManualSupplierTx = async (ctx, supplierId, step, action, prompt) => {
-    const supplier = await prisma_1.prisma.supplier.findUnique({
-        where: { id: supplierId },
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const supplier = await prisma_1.prisma.supplier.findFirst({
+        where: { id: supplierId, ownerId },
         select: { name: true },
     });
     if (!supplier)
@@ -237,8 +258,11 @@ exports.suppliersHandler.callbackQuery(/^sup:goods:(.+)$/, (ctx) => startManualS
     `• So'mda: masalan \`500000\` yoki \`500 ming\`\n` +
     `• Dollarda: masalan \`$102.17\`, \`102,17 USDT\` yoki \`102 dollar 17 sent\``));
 exports.suppliersHandler.callbackQuery(/^sup:undo:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const txId = ctx.match[1];
-    const transaction = await prisma_1.prisma.supplierTransaction.findUnique({ where: { id: txId } });
+    const transaction = await prisma_1.prisma.supplierTransaction.findFirst({ where: { id: txId, ownerId } });
     if (!transaction)
         return ctx.answerCallbackQuery('Bu amaliyot topilmadi yoki allaqachon bekor qilingan.');
     const isUsd = transaction.currency === 'USD';
@@ -256,6 +280,9 @@ exports.suppliersHandler.callbackQuery(/^sup:undo:(.+)$/, async (ctx) => {
     await sendSupplierDetails(ctx, transaction.supplierId, 'all', false);
 });
 exports.suppliersHandler.on('message:text', async (ctx, next) => {
+    if (!ctx.from)
+        return next();
+    const ownerId = String(ctx.from.id);
     if (ctx.session.step === 'AWAITING_SUPPLIER_NEW_NAME') {
         const rawText = ctx.message.text.trim();
         if (rawText.startsWith('/'))
@@ -266,12 +293,12 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             return next();
         }
         try {
-            const checkResult = await supplier_service_1.SupplierService.checkOrRenameSupplier(supplierId, rawText);
+            const checkResult = await supplier_service_1.SupplierService.checkOrRenameSupplier(supplierId, rawText, ownerId);
             if (checkResult.status === 'MERGE_REQUIRED') {
                 (0, telegram_1.clearSession)(ctx);
                 const kb = new grammy_1.InlineKeyboard()
                     .text('✅ Ha, birlashtir', `confirm_merge_supplier:${checkResult.sourceSupplier.id}:${checkResult.targetSupplier.id}`)
-                    .text('❌ Yo\'q', `cancel_merge_supplier:${checkResult.sourceSupplier.id}`);
+                    .text("❌ Yo'q", `cancel_merge_supplier:${checkResult.sourceSupplier.id}`);
                 return ctx.reply(`⚠️ '${checkResult.targetSupplier.name}' nomli ta'minotchi bazada bor. Ikkalasini birlashtirib, barcha nakladnoy va qarzlarni (UZS va USD) bitta hisobga o'tkazaymi?`, { reply_markup: kb });
             }
             (0, telegram_1.clearSession)(ctx);
@@ -279,7 +306,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             return sendSupplierDetails(ctx, checkResult.supplier.id, 'all', false);
         }
         catch (err) {
-            return ctx.reply(`❌ ${err?.message || "Xatolik yuz berdi. Qaytadan kiriting:"}`);
+            return ctx.reply(`❌ ${err?.message || 'Xatolik yuz berdi. Qaytadan kiriting:'}`);
         }
     }
     if (ctx.session.step === 'SUPPLIER_ADD') {
@@ -291,7 +318,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         if (!name || name.length < 2)
             return ctx.reply("❌ Ta'minotchi nomi kamida 2 ta harfdan iborat bo'lishi kerak. Iltimos qaytadan kiriting:");
         const existing = await prisma_1.prisma.supplier.findFirst({
-            where: { name: { equals: name, mode: 'insensitive' } },
+            where: { ownerId, name: { equals: name, mode: 'insensitive' } },
         });
         (0, telegram_1.clearSession)(ctx);
         if (existing) {
@@ -300,7 +327,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
                     where: { id: existing.id },
                     data: { isActive: true, phone: phone || existing.phone },
                 });
-                cache_service_1.cacheService.invalidateSupplierNames();
+                cache_service_1.cacheService.invalidateSupplierNames(ownerId);
                 await ctx.reply(`✅ Arxivlangan ta'minotchi (${existing.name}) qayta faollashtirildi!`);
             }
             else {
@@ -309,9 +336,9 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             return sendSupplierDetails(ctx, existing.id, 'all', false);
         }
         const newSupplier = await prisma_1.prisma.supplier.create({
-            data: { name, phone, debtUzs: 0, debtUsd: 0, isActive: true },
+            data: { ownerId, name, phone, debtUzs: 0, debtUsd: 0, isActive: true },
         });
-        cache_service_1.cacheService.invalidateSupplierNames();
+        cache_service_1.cacheService.invalidateSupplierNames(ownerId);
         await ctx.reply(`✅ Yangi ta'minotchi muvaffaqiyatli qo'shildi: *${newSupplier.name}*`, {
             parse_mode: 'Markdown',
         });
@@ -333,8 +360,8 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
     const isPay = action === 'PAYMENT';
     const isUsd = currency === 'USD';
     const { createdTx, currentDebt } = await prisma_1.prisma.$transaction(async (tx) => {
-        const supplier = await tx.supplier.findUnique({
-            where: { id: supplierId },
+        const supplier = await tx.supplier.findFirst({
+            where: { id: supplierId, ownerId },
             select: { debtUzs: true, debtUsd: true },
         });
         if (!supplier)
@@ -355,6 +382,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         const [createdTx] = await Promise.all([
             tx.supplierTransaction.create({
                 data: {
+                    ownerId,
                     supplierId,
                     type: action,
                     amount,
@@ -366,7 +394,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             }),
             isPay
                 ? tx.supplierPayment.create({
-                    data: { supplierId, amount, currency, comment: "Qo'lda kiritilgan to'lov" },
+                    data: { ownerId, supplierId, amount, currency, comment: "Qo'lda kiritilgan to'lov" },
                 })
                 : Promise.resolve(null),
             tx.supplier.update({

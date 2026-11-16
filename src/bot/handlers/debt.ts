@@ -15,13 +15,14 @@ export const debtHandler = new Composer<MyContext>();
 const PER_PAGE = 10;
 
 async function applyCustomerPaymentFIFO(
+  ownerId: string,
   customerName: string,
   payAmount: number,
   currency: 'UZS' | 'USD' = 'UZS'
 ): Promise<number> {
   return prisma.$transaction(async (tx) => {
     const activeDebts = await tx.customerDebt.findMany({
-      where: { customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+      where: { ownerId, customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
       orderBy: { createdAt: 'asc' },
       select: { id: true, amount: true, paidAmount: true },
     });
@@ -45,7 +46,7 @@ async function applyCustomerPaymentFIFO(
       }
     }
     const remDebts = await tx.customerDebt.findMany({
-      where: { customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+      where: { ownerId, customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
       select: { amount: true, paidAmount: true },
     });
     return remDebts.reduce(
@@ -56,8 +57,10 @@ async function applyCustomerPaymentFIFO(
 }
 
 async function sendDebtorsPage(ctx: MyContext, page: number, isEdit = false) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const debts = await prisma.customerDebt.findMany({
-    where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+    where: { ownerId, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
     orderBy: { createdAt: 'desc' },
     select: { id: true, customerName: true, amount: true, paidAmount: true, currency: true },
   });
@@ -110,7 +113,7 @@ async function sendDebtorsPage(ctx: MyContext, page: number, isEdit = false) {
 }
 
 debtHandler.hears('👥 Nasiyadorlar', async (ctx) => {
-  if (ctx.user?.role === 'OWNER') await sendDebtorsPage(ctx, 1);
+  await sendDebtorsPage(ctx, 1);
 });
 debtHandler.callbackQuery(/^debt:p:(\d+)$/, (ctx) =>
   sendDebtorsPage(ctx, parseInt(ctx.match[1], 10), true)
@@ -118,16 +121,18 @@ debtHandler.callbackQuery(/^debt:p:(\d+)$/, (ctx) =>
 debtHandler.callbackQuery('debt:back', (ctx) => sendDebtorsPage(ctx, 1, true));
 
 debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const firstId = ctx.match[1];
-  const firstDebt = await prisma.customerDebt.findUnique({
-    where: { id: firstId },
+  const firstDebt = await prisma.customerDebt.findFirst({
+    where: { id: firstId, ownerId },
     select: { id: true, customerName: true },
   });
   if (!firstDebt) return ctx.answerCallbackQuery('Topilmadi');
 
   const name = firstDebt.customerName;
   const debts = await prisma.customerDebt.findMany({
-    where: { customerName: name, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+    where: { ownerId, customerName: name, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
     orderBy: { createdAt: 'desc' },
     select: { amount: true, paidAmount: true, currency: true, createdAt: true, itemsSummary: true },
   });
@@ -162,15 +167,17 @@ debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
 });
 
 debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const firstId = ctx.match[1];
-  const firstDebt = await prisma.customerDebt.findUnique({
-    where: { id: firstId },
+  const firstDebt = await prisma.customerDebt.findFirst({
+    where: { id: firstId, ownerId },
     select: { customerName: true, currency: true },
   });
   if (!firstDebt) return ctx.answerCallbackQuery('Mijoz topilmadi.');
 
   const agg = await prisma.customerDebt.aggregate({
-    where: { customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+    where: { ownerId, customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
     _sum: { amount: true, paidAmount: true },
   });
   const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
@@ -199,16 +206,18 @@ debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
 });
 
 debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const [, firstId, rawAmt] = ctx.match;
   const payAmount = Number(rawAmt);
-  const firstDebt = await prisma.customerDebt.findUnique({
-    where: { id: firstId },
+  const firstDebt = await prisma.customerDebt.findFirst({
+    where: { id: firstId, ownerId },
     select: { customerName: true, currency: true },
   });
   if (!firstDebt || !payAmount) return ctx.answerCallbackQuery('Topilmadi');
 
   const customerName = firstDebt.customerName;
-  const remainingTotal = await applyCustomerPaymentFIFO(customerName, payAmount, firstDebt.currency);
+  const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, firstDebt.currency);
   clearSession(ctx);
 
   const suffix =
@@ -239,7 +248,8 @@ debtHandler.callbackQuery('debt:new', async (ctx) => {
 });
 
 debtHandler.on('message:text', async (ctx, next) => {
-  if (ctx.session.step === 'DEBT_PAYMENT') {
+  if (ctx.session.step === 'DEBT_PAYMENT' && ctx.from) {
+    const ownerId = String(ctx.from.id);
     const rawText = ctx.message.text.trim();
     if (rawText.startsWith('/')) return next();
     const { amount: payAmount, currency } = parseCurrencyAndAmount(rawText);
@@ -250,7 +260,7 @@ debtHandler.on('message:text', async (ctx, next) => {
     }
 
     const { customerName } = ctx.session.tempData;
-    const remainingTotal = await applyCustomerPaymentFIFO(customerName, payAmount, currency);
+    const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency);
     clearSession(ctx);
     const suffix =
       remainingTotal > 0
@@ -297,12 +307,13 @@ registerTemplateActions(
   'debt',
   'ADD_DEBT_TEMPLATE',
   'DEBT_TEMPLATE',
-  async (_ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
+  async (ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
+    const ownerId = String(ctx.from?.id || '');
     await prisma.customerDebt.create({
-      data: { customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
+      data: { ownerId, customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
     });
     const agg = await prisma.customerDebt.aggregate({
-      where: { customerName, currency },
+      where: { ownerId, customerName, currency },
       _sum: { amount: true, paidAmount: true },
     });
     const totalRemaining = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));

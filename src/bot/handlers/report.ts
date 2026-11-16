@@ -1,7 +1,8 @@
-import { Composer, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { MyContext } from '../context';
 import { ReportPeriod, ReportService } from '../../services/report.service';
-import { replyOrEdit } from '../../utils/telegram';
+import { ExportService } from '../../services/export.service';
+import { replyOrEdit, withChatAction } from '../../utils/telegram';
 import { logger } from '../../config/logger';
 
 export const reportHandler = new Composer<MyContext>();
@@ -16,24 +17,23 @@ export function getReportKeyboard(activePeriod: ReportPeriod): InlineKeyboard {
     .text(activePeriod === 'current_month' ? '✅ Shu oy' : '📆 Shu oy', 'rep:p:current_month')
     .text(activePeriod === 'last_month' ? "✅ O'tgan oy" : "⏮ O'tgan oy", 'rep:p:last_month')
     .row()
+    .text('📥 Excel (.csv) yuklab olish', 'export:excel')
+    .text('📄 PDF hisobot yuklab olish', 'export:pdf')
+    .row()
     .text('🔄 Yangilash', `rep:p:${activePeriod}`)
     .text('🔙 Asosiy', 'menu:main');
 }
 
 async function sendPeriodReport(ctx: MyContext, period: ReportPeriod, isEdit = false) {
-  if (ctx.user?.role !== 'OWNER') {
-    if (ctx.callbackQuery) {
-      await ctx.answerCallbackQuery({ text: "Sizda ushbu amal uchun huquq yo'q!", show_alert: true });
-    }
-    return;
-  }
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
 
   try {
-    const text = await ReportService.generateReport(period);
+    const text = await ReportService.generateReport(period, new Date(), ownerId);
     const kb = getReportKeyboard(period);
     await replyOrEdit(ctx, text, kb, isEdit);
   } catch (error) {
-    logger.error({ error, period }, 'Error generating periodic report');
+    logger.error({ error, period, ownerId }, 'Error generating periodic report');
     if (ctx.callbackQuery) {
       await ctx.answerCallbackQuery({ text: 'Hisobotni shakllantirishda xatolik yuz berdi.', show_alert: true });
     } else {
@@ -42,16 +42,58 @@ async function sendPeriodReport(ctx: MyContext, period: ReportPeriod, isEdit = f
   }
 }
 
+async function sendOwnerDatabaseExports(
+  ctx: MyContext,
+  mode: 'all' | 'excel' | 'pdf' = 'all'
+) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+
+  await withChatAction(ctx, 'upload_document', async () => {
+    try {
+      const exported = await ExportService.exportOwnerDatabase(ownerId);
+      const captionSummary =
+        `📊 **Shaxsiy bazangiz hisoboti tayyor!**\n` +
+        `• Ta'minotchilar: **${exported.suppliers.length} ta**\n` +
+        `• Nakladnoylar: **${exported.invoices.length} ta**\n` +
+        `• Z-Otchyotlar: **${exported.zReports.length} ta**`;
+
+      if (mode === 'all' || mode === 'excel') {
+        await ctx.replyWithDocument(new InputFile(exported.excelBuffer, exported.excelFilename), {
+          caption: `📥 **Excel (.csv) Jadval**\n${captionSummary}`,
+          parse_mode: 'Markdown',
+        });
+      }
+
+      if (mode === 'all' || mode === 'pdf') {
+        await ctx.replyWithDocument(new InputFile(exported.pdfBuffer, exported.pdfFilename), {
+          caption: `📄 **PDF Hisobot**\n${captionSummary}`,
+          parse_mode: 'Markdown',
+        });
+      }
+    } catch (error) {
+      logger.error({ error, ownerId }, 'Error exporting database');
+      await ctx.reply('❌ Bazani yuklab olishda xatolik yuz berdi.');
+    }
+  });
+}
+
 reportHandler.hears('📈 Davriy Hisobot', async (ctx) => {
-  if (ctx.user?.role !== 'OWNER') return;
   const defaultPeriod: ReportPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
   await sendPeriodReport(ctx, defaultPeriod, false);
 });
 
+reportHandler.hears('📥 Bazani yuklab olish (Excel / PDF)', async (ctx) => {
+  await sendOwnerDatabaseExports(ctx, 'all');
+});
+
 reportHandler.command(['report', 'hisobot'], async (ctx) => {
-  if (ctx.user?.role !== 'OWNER') return;
   const defaultPeriod: ReportPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
   await sendPeriodReport(ctx, defaultPeriod, false);
+});
+
+reportHandler.command('export', async (ctx) => {
+  await sendOwnerDatabaseExports(ctx, 'all');
 });
 
 reportHandler.callbackQuery(/^rep:p:(.+)$/, async (ctx) => {
@@ -62,3 +104,14 @@ reportHandler.callbackQuery(/^rep:p:(.+)$/, async (ctx) => {
   await sendPeriodReport(ctx, period, true);
 });
 
+reportHandler.callbackQuery('export:excel', async (ctx) => {
+  await sendOwnerDatabaseExports(ctx, 'excel');
+});
+
+reportHandler.callbackQuery('export:pdf', async (ctx) => {
+  await sendOwnerDatabaseExports(ctx, 'pdf');
+});
+
+reportHandler.callbackQuery('export:all', async (ctx) => {
+  await sendOwnerDatabaseExports(ctx, 'all');
+});

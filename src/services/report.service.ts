@@ -1,4 +1,5 @@
 import { prisma } from '../database/prisma';
+import { env } from '../config/env';
 import { formatMoney, formatDateShort, formatSom, getTashkentDayRange } from '../utils/formatters';
 
 export type ReportPeriod = 'current_week' | 'last_week' | 'current_month' | 'last_month';
@@ -7,6 +8,9 @@ export interface CashVsCreditAnalytics {
   cashTotal: number;
   creditTotal: number;
   grandTotal: number;
+  cashCount: number;
+  creditCount: number;
+  totalCount: number;
   cashPercent: number;
   creditPercent: number;
   progressBar: string;
@@ -16,6 +20,7 @@ export interface CashVsCreditAnalytics {
 }
 
 export interface ZReportInput {
+  ownerId?: string;
   terminalAmount: number;
   clickAmount: number;
   cashRemainingInDrawer: number;
@@ -23,6 +28,7 @@ export interface ZReportInput {
 }
 
 export interface ZReportResult {
+  ownerId: string;
   date: Date;
   terminalAmount: number;
   clickAmount: number;
@@ -146,6 +152,9 @@ export interface AggregatedReportMetrics {
   outflowUsd: number;
   netCashFlowUzs: number;
   netCashFlowUsd: number;
+
+  // 7. Previous period credit share for trend analysis
+  prevCreditPercent?: number | null;
 }
 
 const sanitizeMd = (str: string): string =>
@@ -164,16 +173,23 @@ const formatSignedMoney = (amount: number, currency: 'UZS' | 'USD' = 'UZS'): str
 
 export class ReportService {
   /**
-   * MODUL 4: Calculate 100% Cash vs. Credit Purchase Analytics, 10-block visual progress bar,
-   * and directional difference analysis.
+   * MODUL 7.2: Calculate 100% Cash vs. Credit Purchase Analytics, 10-block visual progress bar,
+   * and directional difference / trend analysis.
    */
   static calculateCashVsCreditAnalytics(params: {
     cashTotal: number;
     creditTotal: number;
+    cashCount?: number;
+    creditCount?: number;
+    prevCreditPercent?: number | null;
   }): CashVsCreditAnalytics {
     const cashTotal = Math.max(0, Number(Number(params.cashTotal || 0).toFixed(2)));
     const creditTotal = Math.max(0, Number(Number(params.creditTotal || 0).toFixed(2)));
     const grandTotal = Number((cashTotal + creditTotal).toFixed(2));
+
+    const cashCount = Math.max(0, Number(params.cashCount || (cashTotal > 0 ? 1 : 0)));
+    const creditCount = Math.max(0, Number(params.creditCount || (creditTotal > 0 ? 1 : 0)));
+    const totalCount = cashCount + creditCount;
 
     const cashPercent = grandTotal > 0 ? Math.round((cashTotal / grandTotal) * 100) : 0;
     const creditPercent = grandTotal > 0 ? 100 - cashPercent : 0;
@@ -187,28 +203,45 @@ export class ReportService {
 
     let directionSentence = '';
     if (grandTotal === 0) {
-      directionSentence = `Ushbu davrda xaridlar qayd etilmagan.`;
+      directionSentence = `ℹ️ Ushbu davrda xaridlar qayd etilmagan.`;
     } else if (creditTotal > cashTotal) {
-      directionSentence = `Nasiya xaridlar naqd xaridlardan ${formatSom(diffAmount)}ga (${diffPercent}% ga) ko'p. Do'kon aylanmasida nasiya ulushi ustunlik qilmoqda.`;
+      directionSentence = `⚠️ Siz mahsulotlarning asosiy qismini (${creditPercent}%) NASIYAGA olyapsiz (Naqdga nisbatan +${diffPercent}% ko'p, farq: ${formatSom(diffAmount)}).`;
     } else if (cashTotal > creditTotal) {
-      directionSentence = `Naqd xaridlar nasiya xaridlardan ${formatSom(diffAmount)}ga (${diffPercent}% ga) ko'p. Do'kon aylanmasida naqd xarid ulushi ustunlik qilmoqda.`;
+      directionSentence = `✅ Siz mahsulotlarning asosiy qismini (${cashPercent}%) NAQDGA olyapsiz (Nasiyaga nisbatan +${diffPercent}% ko'p, farq: ${formatSom(diffAmount)}).`;
     } else {
-      directionSentence = `Naqd va nasiya xaridlar teng muvozanatda (50% / 50%).`;
+      directionSentence = `⚖️ Naqd va nasiya xaridlar teng muvozanatda (50% Naqd / 50% Nasiya).`;
+    }
+
+    let trendLine = '';
+    if (grandTotal > 0 && params.prevCreditPercent !== undefined && params.prevCreditPercent !== null) {
+      const creditDelta = creditPercent - params.prevCreditPercent;
+      if (creditDelta > 0) {
+        trendLine = `\n📈 Oldingi davrga nisbatan nasiya ulushi +${creditDelta}% ga oshgan (Qarz yuki ortmoqda 🔴).`;
+      } else if (creditDelta < 0) {
+        trendLine = `\n📉 Oldingi davrga nisbatan nasiya ulushi ${Math.abs(creditDelta)}% ga kamaygan (Naqd ulushi ortmoqda 🟢).`;
+      } else {
+        trendLine = `\n➖ Oldingi davrga nisbatan naqd/nasiya nisbati o'zgarmagan.`;
+      }
     }
 
     const formattedBlock = [
       `📊 XARIDLAR TAHLILI (NAQD VS. NASIYA — 100%):`,
-      `📦 Jami olingan yuklar (100%): ${formatSom(grandTotal)}`,
-      `├── 💵 Naqdga olingan: ${formatSom(cashTotal)} (${cashPercent}%)`,
-      `└── 📝 Nasiyaga (qarzga) olingan: ${formatSom(creditTotal)} (${creditPercent}%)`,
-      `${progressBar} (${cashPercent}% Naqd / ${creditPercent}% Nasiya)`,
-      `🧭 YO'NALISH VA TAFOVUT: ${directionSentence}`,
+      `📦 Jami olingan yuklar: ${totalCount} ta nakladnoy (100% | ${formatSom(grandTotal)})`,
+      `💵 Naqdga olingan: ${cashPercent}% (${formatSom(cashTotal)} | ${cashCount} ta nakladnoy)`,
+      `📝 Nasiyaga olingan: ${creditPercent}% (${formatSom(creditTotal)} | ${creditCount} ta nakladnoy)`,
+      `${progressBar} ${cashPercent}% Naqd / ${creditPercent}% Nasiya`,
+      ``,
+      `🧭 YO'NALISH VA TAFOVUT:`,
+      `${directionSentence}${trendLine}`,
     ].join('\n');
 
     return {
       cashTotal,
       creditTotal,
       grandTotal,
+      cashCount,
+      creditCount,
+      totalCount,
       cashPercent,
       creditPercent,
       progressBar,
@@ -219,10 +252,11 @@ export class ReportService {
   }
 
   /**
-   * MODUL 5: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
-   * for the current Tashkent day (`UTC+5`).
+   * MODUL 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
+   * isolated by `ownerId` for the current Tashkent day (`UTC+5`).
    */
   static async generateAndSaveZReport(input: ZReportInput): Promise<ZReportResult> {
+    const ownerId = String(input.ownerId || env.OWNER_TELEGRAM_ID).trim();
     const now = input.now || new Date();
     const { startOfDay, endOfDay, dateKey } = getTashkentDayRange(now);
 
@@ -233,6 +267,7 @@ export class ReportService {
     const [cashInvoices, supplierPayments] = await Promise.all([
       prisma.invoice.findMany({
         where: {
+          ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paidCashAmount: { gt: 0 },
@@ -241,6 +276,7 @@ export class ReportService {
       }),
       prisma.supplierPayment.findMany({
         where: {
+          ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
         },
@@ -276,24 +312,24 @@ export class ReportService {
     }).format(now);
 
     const formattedText = [
-      `🧾 KUNLIK Z-OTCHYOT (KASSA YOPILISHI)`,
-      `📅 Sana: ${dateFormatted}`,
-      ``,
-      `1️⃣ 💳 Terminal: ${formatSom(terminalAmount)}`,
-      `2️⃣ 📱 Click / O'tkazma: ${formatSom(clickAmount)}`,
-      `3️⃣ 💵 Kassadagi qoldiq naqd pul: ${formatSom(cashRemainingInDrawer)}`,
-      `4️⃣ 📦 Bugun naqdga olingan yuklar (avtomat): +${formatSom(dailyCashPurchasesUzs)} (${dailyCashPurchasesCount} ta nakladnoy)`,
-      `5️⃣ 🤝 Bugun ta'minotchilarga berilgan pul (avtomat): +${formatSom(dailySupplierPaymentsUzs)} (${dailySupplierPaymentsCount} ta to'lov)`,
-      `━━━━━━━━━━━━━━━━━━━━`,
-      `💰 BUGUNGI JAMI SAVDO (1+2+3+4+5): ${formatSom(totalDailySalesUzs)}`,
+      `📊 KUNLIK Z-OTCHYOT HISOBOTI (📅 ${dateFormatted})`,
+      `━━━━━━━━━━━━━━━━━━━━━━`,
+      `💳 Terminalda savdo: ${formatSom(terminalAmount)}`,
+      `📱 Click / Karta savdo: ${formatSom(clickAmount)}`,
+      `💵 Kassada qolgan naqd pul: ${formatSom(cashRemainingInDrawer)}`,
+      `📦 Naqd pulga sotib olingan tovarlar (avto): ${formatSom(dailyCashPurchasesUzs)}`,
+      `🤝 Ta'minotchilarga berilgan pul (avto): ${formatSom(dailySupplierPaymentsUzs)}`,
+      `━━━━━━━━━━━━━━━━━━━━━━`,
+      `💰 KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}`,
     ].join('\n');
 
     await prisma.$transaction(
       async (tx) => {
         await Promise.all([
           tx.zReport.upsert({
-            where: { date: dateKey },
+            where: { ownerId_date: { ownerId, date: dateKey } },
             create: {
+              ownerId,
               date: dateKey,
               terminalAmount,
               clickAmount,
@@ -312,8 +348,9 @@ export class ReportService {
             },
           }),
           tx.dailyRegister.upsert({
-            where: { date: dateKey },
+            where: { ownerId_date: { ownerId, date: dateKey } },
             create: {
+              ownerId,
               date: dateKey,
               cashUzs: cashRemainingInDrawer,
               cashRemainingInDrawer,
@@ -341,6 +378,7 @@ export class ReportService {
     );
 
     return {
+      ownerId,
       date: dateKey,
       terminalAmount,
       clickAmount,
@@ -370,7 +408,7 @@ export class ReportService {
         subtitle: "O'tgan hafta (Dushanba — Yakshanba)",
         startDate,
         endDate,
-        totalDays: 7
+        totalDays: 7,
       };
     }
 
@@ -383,7 +421,7 @@ export class ReportService {
         subtitle: 'Shu hafta (Dushanbadan bugungacha)',
         startDate,
         endDate,
-        totalDays: diffToMonday + 1
+        totalDays: diffToMonday + 1,
       };
     }
 
@@ -396,7 +434,7 @@ export class ReportService {
         subtitle: "O'tgan oy yakuniy xulosasi",
         startDate,
         endDate,
-        totalDays: endDate.getDate()
+        totalDays: endDate.getDate(),
       };
     }
 
@@ -409,7 +447,7 @@ export class ReportService {
       subtitle: 'Shu oy (1-sanadan bugungacha)',
       startDate,
       endDate,
-      totalDays: date
+      totalDays: date,
     };
   }
 
@@ -464,7 +502,7 @@ export class ReportService {
     }
 
     const topPaidSuppliers = Array.from(supplierMap.values())
-      .sort((a, b) => (b.paidUzs - a.paidUzs) || (b.paidUsd - a.paidUsd))
+      .sort((a, b) => b.paidUzs - a.paidUzs || b.paidUsd - a.paidUsd)
       .slice(0, 5);
 
     const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs;
@@ -516,8 +554,9 @@ export class ReportService {
       catMap.set(cat, existing);
     }
 
-    const expensesByCategory = Array.from(catMap.values())
-      .sort((a, b) => (b.amountUzs - a.amountUzs) || (b.amountUsd - a.amountUsd));
+    const expensesByCategory = Array.from(catMap.values()).sort(
+      (a, b) => b.amountUzs - a.amountUzs || b.amountUsd - a.amountUsd
+    );
 
     const inflowUzs = totalSalesUzs + collectedCustomerDebtUzs;
     const inflowUsd = cashSalesUsd + collectedCustomerDebtUsd;
@@ -563,7 +602,7 @@ export class ReportService {
       outflowUzs,
       outflowUsd,
       netCashFlowUzs,
-      netCashFlowUsd
+      netCashFlowUsd,
     };
   }
 
@@ -580,7 +619,7 @@ export class ReportService {
       `└ 📈 **Jami savdo:** **${formatDualCurrency(m.totalSalesUzs, m.cashSalesUsd)}**`,
       '',
       `🤝 **2. HAMKORLAR (TA'MINOTCHILAR)**`,
-      `├ 💸 Berilgan to'lovlar (${m.supplierPaymentCount} ta): **${formatDualCurrency(m.supplierPaidUzs, m.supplierPaidUsd)}**`
+      `├ 💸 Berilgan to'lovlar (${m.supplierPaymentCount} ta): **${formatDualCurrency(m.supplierPaidUzs, m.supplierPaidUsd)}**`,
     ];
 
     if (m.topPaidSuppliers.length > 0) {
@@ -590,13 +629,17 @@ export class ReportService {
       }
     }
 
-    const debtDeltaText = m.netSupplierDebtChangeUzs !== 0 || m.netSupplierDebtChangeUsd !== 0
-      ? ` (${formatSignedMoney(m.netSupplierDebtChangeUzs, 'UZS')}${m.netSupplierDebtChangeUsd !== 0 ? `, ${formatSignedMoney(m.netSupplierDebtChangeUsd, 'USD')}` : ''})`
-      : ' (O\'zgarishsiz)';
+    const debtDeltaText =
+      m.netSupplierDebtChangeUzs !== 0 || m.netSupplierDebtChangeUsd !== 0
+        ? ` (${formatSignedMoney(m.netSupplierDebtChangeUzs, 'UZS')}${m.netSupplierDebtChangeUsd !== 0 ? `, ${formatSignedMoney(m.netSupplierDebtChangeUsd, 'USD')}` : ''})`
+        : " (O'zgarishsiz)";
 
     const cashVsCredit = this.calculateCashVsCreditAnalytics({
       cashTotal: m.cashPurchasesUzs,
       creditTotal: m.incomingGoodsUzs,
+      cashCount: m.cashPurchasesCount,
+      creditCount: m.incomingGoodsCount,
+      prevCreditPercent: m.prevCreditPercent,
     });
 
     lines.push(
@@ -638,69 +681,98 @@ export class ReportService {
     if (m.missingDaysCount === 0) {
       lines.push(`✅ _Davr mobaynida barcha ${m.totalDays} kun Z-Hisobot to'liq yopilgan._`);
     } else {
-      lines.push(`⚠️ _Diqqat: Ushbu davrda ${m.totalDays} kundan ${m.missingDaysCount} kun kassa (Z-Hisobot) yopilmagan!_`);
+      lines.push(
+        `⚠️ _Diqqat: Ushbu davrda ${m.totalDays} kundan ${m.missingDaysCount} kun kassa (Z-Hisobot) yopilmagan!_`
+      );
     }
 
     return lines.join('\n');
   }
 
-  static async generateReport(period: ReportPeriod, now: Date = new Date()): Promise<string> {
+  static async generateReport(
+    period: ReportPeriod,
+    nowOrOwnerId: Date | string = new Date(),
+    maybeOwnerId?: string
+  ): Promise<string> {
+    const now = nowOrOwnerId instanceof Date ? nowOrOwnerId : new Date();
+    const ownerId =
+      typeof nowOrOwnerId === 'string'
+        ? nowOrOwnerId.trim()
+        : String(maybeOwnerId || env.OWNER_TELEGRAM_ID).trim();
+
     const range = this.getPeriodRange(period, now);
     const { startDate, endDate, totalDays } = range;
+
+    // Also compute previous period range for trend comparison
+    const durationMs = endDate.getTime() - startDate.getTime() + 1;
+    const prevStartDate = new Date(startDate.getTime() - durationMs);
+    const prevEndDate = new Date(startDate.getTime() - 1);
 
     const [
       registers,
       supplierTransactions,
       invoicesInPeriod,
+      prevInvoicesInPeriod,
       supplierAggregate,
       cashTransactions,
       newCustomerDebts,
       updatedCustomerDebts,
       activeCustomerDebts,
-      expenses
+      expenses,
     ] = await Promise.all([
       prisma.dailyRegister.findMany({
-        where: { date: { gte: startDate, lte: endDate } },
-        select: { date: true, cashUzs: true, cashUsd: true, clickAmount: true, terminalAmount: true, isClosed: true }
+        where: { ownerId, date: { gte: startDate, lte: endDate } },
+        select: { date: true, cashUzs: true, cashUsd: true, clickAmount: true, terminalAmount: true, isClosed: true },
       }),
       prisma.supplierTransaction.findMany({
-        where: { date: { gte: startDate, lte: endDate } },
+        where: { ownerId, date: { gte: startDate, lte: endDate } },
         select: {
           type: true,
           amount: true,
           currency: true,
           invoiceId: true,
-          supplier: { select: { name: true } }
-        }
+          supplier: { select: { name: true } },
+        },
       }),
       prisma.invoice.findMany({
-        where: { createdAt: { gte: startDate, lte: endDate } },
-        select: { id: true, paymentType: true, paidCashAmount: true, creditAmount: true, totalAmount: true, currency: true }
+        where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
+        select: {
+          id: true,
+          paymentType: true,
+          paidCashAmount: true,
+          creditAmount: true,
+          totalAmount: true,
+          currency: true,
+        },
+      }),
+      prisma.invoice.findMany({
+        where: { ownerId, createdAt: { gte: prevStartDate, lte: prevEndDate } },
+        select: { paidCashAmount: true, creditAmount: true, currency: true },
       }),
       prisma.supplier.aggregate({
-        where: { isActive: true },
-        _sum: { debtUzs: true, debtUsd: true }
+        where: { ownerId, isActive: true },
+        _sum: { debtUzs: true, debtUsd: true },
       }),
       prisma.cashTransaction.findMany({
-        where: { createdAt: { gte: startDate, lte: endDate } },
-        select: { amount: true }
+        where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
+        select: { amount: true },
       }),
       prisma.customerDebt.findMany({
-        where: { createdAt: { gte: startDate, lte: endDate } },
-        select: { amount: true, currency: true }
+        where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
+        select: { amount: true, currency: true },
       }),
       prisma.customerDebt.findMany({
-        where: { updatedAt: { gte: startDate, lte: endDate }, paidAmount: { gt: 0 } },
-        select: { paidAmount: true, currency: true }
+        where: { ownerId, updatedAt: { gte: startDate, lte: endDate }, paidAmount: { gt: 0 } },
+        select: { paidAmount: true, currency: true },
       }),
       prisma.customerDebt.findMany({
-        where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
-        select: { amount: true, paidAmount: true, currency: true }
+        where: { ownerId, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        select: { amount: true, paidAmount: true, currency: true },
       }),
       prisma.expense.findMany({
-        where: { createdAt: { gte: startDate, lte: endDate } },
-        select: { category: true, amount: true, currency: true }
-      })
+        where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
+        select: { category: true, amount: true, currency: true },
+      }),
     ]);
 
     const cashInvoiceIds = new Set(
@@ -720,12 +792,11 @@ export class ReportService {
         newCustomerDebts,
         updatedCustomerDebts,
         activeCustomerDebts,
-        expenses
+        expenses,
       },
       totalDays
     );
 
-    // Ensure invoices created directly via Invoice table (paidCashAmount / creditAmount) are also reflected
     const invoiceCashSumUzs = invoicesInPeriod
       .filter((i) => i.currency === 'UZS')
       .reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
@@ -748,7 +819,18 @@ export class ReportService {
       );
     }
 
+    const prevCashSum = prevInvoicesInPeriod
+      .filter((i) => i.currency === 'UZS')
+      .reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
+    const prevCreditSum = prevInvoicesInPeriod
+      .filter((i) => i.currency === 'UZS')
+      .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
+    const prevGrand = prevCashSum + prevCreditSum;
+    if (prevGrand > 0) {
+      const prevCashPct = Math.round((prevCashSum / prevGrand) * 100);
+      metrics.prevCreditPercent = 100 - prevCashPct;
+    }
+
     return this.formatReportMessage(range, metrics);
   }
 }
-

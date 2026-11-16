@@ -8,10 +8,10 @@ const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
 exports.debtHandler = new grammy_1.Composer();
 const PER_PAGE = 10;
-async function applyCustomerPaymentFIFO(customerName, payAmount, currency = 'UZS') {
+async function applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency = 'UZS') {
     return prisma_1.prisma.$transaction(async (tx) => {
         const activeDebts = await tx.customerDebt.findMany({
-            where: { customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+            where: { ownerId, customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
             orderBy: { createdAt: 'asc' },
             select: { id: true, amount: true, paidAmount: true },
         });
@@ -38,15 +38,18 @@ async function applyCustomerPaymentFIFO(customerName, payAmount, currency = 'UZS
             }
         }
         const remDebts = await tx.customerDebt.findMany({
-            where: { customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+            where: { ownerId, customerName, currency, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
             select: { amount: true, paidAmount: true },
         });
         return remDebts.reduce((acc, d) => Number((acc + (Number(d.amount) - Number(d.paidAmount))).toFixed(2)), 0);
     });
 }
 async function sendDebtorsPage(ctx, page, isEdit = false) {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const debts = await prisma_1.prisma.customerDebt.findMany({
-        where: { status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        where: { ownerId, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
         orderBy: { createdAt: 'desc' },
         select: { id: true, customerName: true, amount: true, paidAmount: true, currency: true },
     });
@@ -86,22 +89,24 @@ async function sendDebtorsPage(ctx, page, isEdit = false) {
     await (0, telegram_1.replyOrEdit)(ctx, text, kb, isEdit);
 }
 exports.debtHandler.hears('👥 Nasiyadorlar', async (ctx) => {
-    if (ctx.user?.role === 'OWNER')
-        await sendDebtorsPage(ctx, 1);
+    await sendDebtorsPage(ctx, 1);
 });
 exports.debtHandler.callbackQuery(/^debt:p:(\d+)$/, (ctx) => sendDebtorsPage(ctx, parseInt(ctx.match[1], 10), true));
 exports.debtHandler.callbackQuery('debt:back', (ctx) => sendDebtorsPage(ctx, 1, true));
 exports.debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const firstId = ctx.match[1];
-    const firstDebt = await prisma_1.prisma.customerDebt.findUnique({
-        where: { id: firstId },
+    const firstDebt = await prisma_1.prisma.customerDebt.findFirst({
+        where: { id: firstId, ownerId },
         select: { id: true, customerName: true },
     });
     if (!firstDebt)
         return ctx.answerCallbackQuery('Topilmadi');
     const name = firstDebt.customerName;
     const debts = await prisma_1.prisma.customerDebt.findMany({
-        where: { customerName: name, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        where: { ownerId, customerName: name, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
         orderBy: { createdAt: 'desc' },
         select: { amount: true, paidAmount: true, currency: true, createdAt: true, itemsSummary: true },
     });
@@ -129,15 +134,18 @@ exports.debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
     await (0, telegram_1.replyOrEdit)(ctx, `👤 **Mijoz:** ${name}\n\n${lines}\n\n${(0, formatters_1.formatTotalDebtBlock)(totalUzs, totalUsd)}`, kb, true);
 });
 exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const firstId = ctx.match[1];
-    const firstDebt = await prisma_1.prisma.customerDebt.findUnique({
-        where: { id: firstId },
+    const firstDebt = await prisma_1.prisma.customerDebt.findFirst({
+        where: { id: firstId, ownerId },
         select: { customerName: true, currency: true },
     });
     if (!firstDebt)
         return ctx.answerCallbackQuery('Mijoz topilmadi.');
     const agg = await prisma_1.prisma.customerDebt.aggregate({
-        where: { customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        where: { ownerId, customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
         _sum: { amount: true, paidAmount: true },
     });
     const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
@@ -152,16 +160,19 @@ exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
     await ctx.reply(`💸 **${firstDebt.customerName}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`, { parse_mode: 'Markdown', reply_markup: kb });
 });
 exports.debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const [, firstId, rawAmt] = ctx.match;
     const payAmount = Number(rawAmt);
-    const firstDebt = await prisma_1.prisma.customerDebt.findUnique({
-        where: { id: firstId },
+    const firstDebt = await prisma_1.prisma.customerDebt.findFirst({
+        where: { id: firstId, ownerId },
         select: { customerName: true, currency: true },
     });
     if (!firstDebt || !payAmount)
         return ctx.answerCallbackQuery('Topilmadi');
     const customerName = firstDebt.customerName;
-    const remainingTotal = await applyCustomerPaymentFIFO(customerName, payAmount, firstDebt.currency);
+    const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, firstDebt.currency);
     (0, telegram_1.clearSession)(ctx);
     const suffix = remainingTotal > 0
         ? `💰 **Qolgan nasiya summasi:** ${(0, formatters_1.formatCurrency)(remainingTotal, firstDebt.currency)}`
@@ -179,7 +190,8 @@ exports.debtHandler.callbackQuery('debt:new', async (ctx) => {
     });
 });
 exports.debtHandler.on('message:text', async (ctx, next) => {
-    if (ctx.session.step === 'DEBT_PAYMENT') {
+    if (ctx.session.step === 'DEBT_PAYMENT' && ctx.from) {
+        const ownerId = String(ctx.from.id);
         const rawText = ctx.message.text.trim();
         if (rawText.startsWith('/'))
             return next();
@@ -188,7 +200,7 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
             return ctx.reply("❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 50 ming yoki $25.50). To'xtatish uchun /start.");
         }
         const { customerName } = ctx.session.tempData;
-        const remainingTotal = await applyCustomerPaymentFIFO(customerName, payAmount, currency);
+        const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency);
         (0, telegram_1.clearSession)(ctx);
         const suffix = remainingTotal > 0
             ? `💰 **Qolgan nasiya summasi:** ${(0, formatters_1.formatCurrency)(remainingTotal, currency)}`
@@ -223,12 +235,13 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
         reply_markup: (0, inline_1.getTemplateConfirmKeyboard)('debt:edit', actionId),
     });
 });
-(0, telegram_1.registerTemplateActions)(exports.debtHandler, 'debt', 'ADD_DEBT_TEMPLATE', 'DEBT_TEMPLATE', async (_ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
+(0, telegram_1.registerTemplateActions)(exports.debtHandler, 'debt', 'ADD_DEBT_TEMPLATE', 'DEBT_TEMPLATE', async (ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
+    const ownerId = String(ctx.from?.id || '');
     await prisma_1.prisma.customerDebt.create({
-        data: { customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
+        data: { ownerId, customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
     });
     const agg = await prisma_1.prisma.customerDebt.aggregate({
-        where: { customerName, currency },
+        where: { ownerId, customerName, currency },
         _sum: { amount: true, paidAmount: true },
     });
     const totalRemaining = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));

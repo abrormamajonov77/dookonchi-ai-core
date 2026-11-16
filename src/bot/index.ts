@@ -10,6 +10,7 @@ import { authMiddleware } from './middlewares/auth.middleware';
 import { queueMiddleware } from './middlewares/queue.middleware';
 import { errorMiddleware } from './middlewares/error.middleware';
 import { startHandler } from './handlers/start';
+import { adminHandler } from './handlers/admin';
 import { invoiceHandler } from './handlers/invoice';
 import { voiceHandler } from './handlers/voice';
 import { debtHandler } from './handlers/debt';
@@ -50,7 +51,19 @@ bot.use(async (ctx, next) => {
   try { await next(); } finally { if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => { }); }
 });
 
-bot.use(startHandler, invoiceHandler, debtHandler, suppliersHandler, cashHandler, expenseHandler, searchHandler, closingHandler, reportHandler, voiceHandler);
+bot.use(
+  startHandler,
+  adminHandler,
+  invoiceHandler,
+  debtHandler,
+  suppliersHandler,
+  cashHandler,
+  expenseHandler,
+  searchHandler,
+  closingHandler,
+  reportHandler,
+  voiceHandler
+);
 bot.on('message', (ctx) => ctx.reply("🤔 Tushunmadim. Pastdagi menyudan kerakli bo'limni tanlang yoki shunchaki ovozli xabar / nakladnoy rasmini yuboring."));
 
 const PORT = Number(process.env.PORT) || 3000;

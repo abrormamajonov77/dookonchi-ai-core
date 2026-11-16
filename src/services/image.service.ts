@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import crypto from 'crypto';
 
 sharp.cache({ memory: 50, files: 0, items: 100 });
-sharp.concurrency(2);
+sharp.concurrency(0);
 
 const memoryBufferCache = new WeakMap<Buffer, Buffer>();
 const fastSignatureCache = new Map<string, Buffer>();
@@ -16,7 +16,7 @@ function getFastSignature(buf: Buffer): string {
 
 export class ImageService {
   /**
-   * MODUL 1: Ultra-Fast "Real Skaner Apparati" in-memory pipeline.
+   * MODUL 4: Ultra-Fast "Real Skaner Apparati" in-memory pipeline.
    * Converts raw photo buffer to a high-contrast black-and-white scanner JPEG (35-55 KB, <60 KB) in <150ms.
    */
   static async optimizeForFastOCR(rawBuffer: Buffer): Promise<Buffer> {
@@ -43,14 +43,14 @@ export class ImageService {
       .grayscale()
       .normalize()
       .linear(1.25, -20) // Yozuvlarni skaner kabi tiniq qora, fonni oq qilish
-      .jpeg({ quality: 52, progressive: true, mozjpeg: true })
+      .jpeg({ quality: 58, progressive: false, mozjpeg: false, optimiseCoding: false })
       .toBuffer();
 
     if (scannedBuffer.byteLength >= 58 * 1024) {
       scannedBuffer = await sharp(scannedBuffer, { failOn: 'none', sequentialRead: true })
         .resize({ width: 760, height: 960, fit: 'inside', withoutEnlargement: true, kernel: 'nearest' })
         .grayscale()
-        .jpeg({ quality: 38, progressive: true, mozjpeg: true })
+        .jpeg({ quality: 42, progressive: false, mozjpeg: false, optimiseCoding: false })
         .toBuffer();
     }
 
