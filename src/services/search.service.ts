@@ -2,7 +2,7 @@ import Fuse from 'fuse.js';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database/prisma';
 import { env } from '../config/env';
-import { TranslitService } from './translit.service';
+import { normalizeForSearch, toLatinUz } from '../utils/transliterate';
 import { formatCompactAmount, formatCurrency, formatDateShort, formatSupplierDebtLine } from '../utils/formatters';
 
 export interface SearchResult {
@@ -35,8 +35,6 @@ export interface ItemSearchResult {
   isCash: boolean;
   score?: number;
 }
-
-const toKey = (s: string) => TranslitService.toLatin(s || '').toLowerCase().trim();
 
 export function formatDotDate(date: Date | string): string {
   const d = new Date(date);
@@ -104,15 +102,17 @@ export function formatProductPriceTrackerCard(params: {
   );
   const qtyNum = Number(params.quantity);
   const qtyStr = Number.isInteger(qtyNum) ? String(qtyNum) : String(Number(qtyNum.toFixed(3)));
-  const unitStr = (params.unit || 'dona').trim();
+  const unitStr = toLatinUz((params.unit || 'dona').trim());
+  const prodName = toLatinUz(params.productName);
+  const supName = toLatinUz(params.supplierName);
   const prevLine =
     params.previousPrice !== null && params.previousDate
       ? `${formatCurrency(params.previousPrice, params.currency)} (${formatDotDate(params.previousDate)})`
       : "Ma'lumot yo'q (Birinchi kirim)";
 
   const formattedCard =
-    `📦 Mahsulot: ${params.productName}\n` +
-    `🚚 Ta'minotchi: ${params.supplierName}\n` +
+    `📦 Mahsulot: ${prodName}\n` +
+    `🚚 Ta'minotchi: ${supName}\n` +
     `🕒 Oxirgi kelgan vaqti: ${formatArrivalDateTime(params.latestDate)}\n` +
     `💰 Hozirgi kelish narxi: ${formatCurrency(params.currentPrice, params.currency)} (Soni: ${qtyStr} ${unitStr})\n` +
     `📊 Oldingi partiya narxi: ${prevLine}\n` +
@@ -128,18 +128,21 @@ export class SearchService {
   ): Promise<ItemSearchResult[]> {
     const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const rawTrimmed = query.replace(/(ni|ga|dan|da|ning)$/i, '').trim();
-    const cleanQuery = toKey(rawTrimmed);
+    const latinQuery = toLatinUz(rawTrimmed).trim();
+    const cleanQuery = normalizeForSearch(rawTrimmed);
     if (!cleanQuery) return [];
 
-    // 1. Direct ILIKE search on InvoiceItem + Product isolated by ownerId
+    // 1. Direct ILIKE search on InvoiceItem + Product + Supplier isolated by ownerId
     let matchedInvoiceItems = await prisma.invoiceItem.findMany({
       where: {
         ownerId: cleanOwnerId,
         OR: [
+          { rawName: { contains: latinQuery, mode: 'insensitive' } },
           { rawName: { contains: rawTrimmed, mode: 'insensitive' } },
           { normalizedName: { contains: cleanQuery, mode: 'insensitive' } },
-          { product: { name: { contains: rawTrimmed, mode: 'insensitive' } } },
+          { product: { name: { contains: latinQuery, mode: 'insensitive' } } },
           { product: { searchTokens: { contains: cleanQuery, mode: 'insensitive' } } },
+          { supplier: { name: { contains: latinQuery, mode: 'insensitive' } } },
         ],
       },
       orderBy: [{ createdAt: 'desc' }, { invoice: { createdAt: 'desc' } }],
@@ -151,7 +154,7 @@ export class SearchService {
       take: 100,
     });
 
-    // 2. Fuzzy fallback if ILIKE returned 0 items
+    // 2. Phonetic & Fuzzy fallback if ILIKE returned 0 items
     if (matchedInvoiceItems.length === 0) {
       const recentItems = await prisma.invoiceItem.findMany({
         where: { ownerId: cleanOwnerId },
@@ -161,27 +164,44 @@ export class SearchService {
           supplier: { select: { id: true, name: true } },
           invoice: { select: { id: true, supplierId: true, createdAt: true, supplier: { select: { id: true, name: true } } } },
         },
-        take: 200,
+        take: 250,
       });
 
-      const fuseDocs = recentItems.map((it) => ({
-        item: it,
-        searchName: toKey(it.rawName || it.product?.name || ''),
-      }));
-      const fuseHits = new Fuse(fuseDocs, {
-        keys: ['searchName'],
-        threshold: 0.35,
-        ignoreLocation: true,
-      }).search(cleanQuery);
+      const directPhoneticHits = recentItems.filter((it) => {
+        const key = normalizeForSearch(
+          `${it.rawName || ''} ${it.product?.name || ''} ${it.supplier?.name || it.invoice?.supplier?.name || ''}`
+        );
+        return key.includes(cleanQuery);
+      });
 
-      matchedInvoiceItems = fuseHits.map((h) => h.item.item);
+      if (directPhoneticHits.length > 0) {
+        matchedInvoiceItems = directPhoneticHits;
+      } else {
+        const fuseDocs = recentItems.map((it) => ({
+          item: it,
+          searchName: normalizeForSearch(
+            `${it.rawName || it.product?.name || ''} ${it.supplier?.name || it.invoice?.supplier?.name || ''}`
+          ),
+        }));
+        const fuseHits = new Fuse(fuseDocs, {
+          keys: ['searchName'],
+          threshold: 0.35,
+          ignoreLocation: true,
+        }).search(cleanQuery);
+
+        matchedInvoiceItems = fuseHits.map((h) => h.item.item);
+      }
     }
 
     if (matchedInvoiceItems.length === 0) return [];
 
     const productIds = Array.from(new Set(matchedInvoiceItems.map((i) => i.productId)));
     const normNames = Array.from(
-      new Set(matchedInvoiceItems.map((i) => (i.normalizedName || toKey(i.rawName || i.product.name))).filter(Boolean))
+      new Set(
+        matchedInvoiceItems
+          .map((i) => i.normalizedName || normalizeForSearch(i.rawName || i.product.name))
+          .filter(Boolean)
+      )
     );
 
     const allHistoryItems = await prisma.invoiceItem.findMany({
@@ -202,8 +222,8 @@ export class SearchService {
 
     const groups = new Map<string, typeof allHistoryItems>();
     for (const row of allHistoryItems) {
-      const pName = row.rawName || row.product?.name || "Noma'lum";
-      const normKey = row.normalizedName || toKey(pName);
+      const pName = toLatinUz(row.rawName || row.product?.name || "Noma'lum");
+      const normKey = normalizeForSearch(row.normalizedName || pName);
       const cur = (row.currency || 'UZS') as 'UZS' | 'USD';
       const groupKey = `${normKey}::${cur}`;
       const list = groups.get(groupKey) || [];
@@ -223,16 +243,17 @@ export class SearchService {
       const latest = history[0];
       const previous = history.length > 1 ? history[1] : null;
 
-      const productName = latest.rawName || latest.product?.name || "Noma'lum";
-      const supplierName =
-        latest.supplier?.name || latest.invoice?.supplier?.name || "Noma'lum ta'minotchi";
+      const productName = toLatinUz(latest.rawName || latest.product?.name || "Noma'lum");
+      const supplierName = toLatinUz(
+        latest.supplier?.name || latest.invoice?.supplier?.name || "Noma'lum ta'minotchi"
+      );
       const supplierId = latest.supplierId || latest.invoice?.supplierId;
       const latestDate = latest.createdAt || latest.invoice.createdAt;
       const currentPrice = Number(latest.unitPrice);
       const previousPrice = previous ? Number(previous.unitPrice) : null;
       const previousDate = previous ? previous.createdAt || previous.invoice.createdAt : null;
       const quantity = Number(latest.quantity);
-      const unit = latest.unit || 'dona';
+      const unit = toLatinUz(latest.unit || 'dona');
       const currency = (latest.currency || 'UZS') as 'UZS' | 'USD';
 
       const cardInfo = formatProductPriceTrackerCard({
@@ -274,7 +295,7 @@ export class SearchService {
 
   static async multiSearch(query: string, ownerId: string = env.OWNER_TELEGRAM_ID) {
     const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
-    const cleanQuery = toKey(query.replace(/(ni|ga|dan|da|ning)$/i, '').trim());
+    const cleanQuery = normalizeForSearch(query.replace(/(ni|ga|dan|da|ning)$/i, '').trim());
 
     const [productItems, allSuppliers, allDebts, recentTx] = await Promise.all([
       this.searchProductsWithPriceDiff(query, cleanOwnerId),
@@ -306,11 +327,11 @@ export class SearchService {
 
     const supplierDocs = allSuppliers.map((s) => ({
       id: s.id,
-      name: s.name,
-      searchName: toKey(s.name),
+      name: toLatinUz(s.name),
+      searchName: normalizeForSearch(s.name),
       debtUzs: Number(s.debtUzs),
       debtUsd: Number(s.debtUsd),
-      amountText: formatSupplierDebtLine(s.name, s.debtUzs, s.debtUsd, '').replace(/^[^:]+:\s*/, ''),
+      amountText: formatSupplierDebtLine(toLatinUz(s.name), s.debtUzs, s.debtUsd, '').replace(/^[^:]+:\s*/, ''),
       type: 'SUPPLIER' as const,
     }));
 
@@ -318,25 +339,28 @@ export class SearchService {
     for (const d of allDebts) {
       const rem = Number(d.amount) - Number(d.paidAmount);
       if (rem > 0) {
-        groupedDebts[d.customerName] ??= { sum: 0, firstId: d.id, currency: d.currency };
-        groupedDebts[d.customerName].sum += rem;
+        const cName = toLatinUz(d.customerName);
+        groupedDebts[cName] ??= { sum: 0, firstId: d.id, currency: d.currency };
+        groupedDebts[cName].sum += rem;
       }
     }
     const customerDocs = Object.entries(groupedDebts).map(([name, d]) => ({
       id: d.firstId,
       name,
-      searchName: toKey(name),
+      searchName: normalizeForSearch(name),
       amount: d.sum,
       amountText: formatCurrency(d.sum, d.currency),
       type: 'CUSTOMER' as const,
     }));
 
     const txDocs = recentTx.map((tx) => {
-      const name = `${tx.supplier.name} ${tx.type === 'INCOMING_GOODS' ? 'kirim' : "to'lov"} ${tx.description || ''}`.trim();
+      const name = toLatinUz(
+        `${tx.supplier.name} ${tx.type === 'INCOMING_GOODS' ? 'kirim' : "to'lov"} ${tx.description || ''}`.trim()
+      );
       return {
         id: tx.id,
         name,
-        searchName: toKey(name),
+        searchName: normalizeForSearch(name),
         amount: Number(tx.amount),
         currency: tx.currency,
         type: 'TRANSACTION' as const,
@@ -346,7 +370,13 @@ export class SearchService {
     });
 
     const opts = { keys: ['searchName'], threshold: 0.35, ignoreLocation: true, includeScore: true };
-    const top5 = <T>(list: T[]) => new Fuse(list, opts).search(cleanQuery).slice(0, 5);
+    const top5 = <T extends { searchName: string }>(list: T[]) => {
+      const exactSub = list.filter((x) => x.searchName.includes(cleanQuery));
+      if (exactSub.length > 0) {
+        return exactSub.slice(0, 5).map((item) => ({ item, score: 0 }));
+      }
+      return new Fuse(list, opts).search(cleanQuery).slice(0, 5);
+    };
 
     const matchedSuppliers: SearchResult[] = top5(supplierDocs).map((r: any) => ({
       type: 'SUPPLIER',
@@ -363,8 +393,11 @@ export class SearchService {
           matchedSuppliers.push({
             type: 'SUPPLIER',
             id: sup.id,
-            name: sup.name,
-            amountText: formatSupplierDebtLine(sup.name, sup.debtUzs, sup.debtUsd, '').replace(/^[^:]+:\s*/, ''),
+            name: toLatinUz(sup.name),
+            amountText: formatSupplierDebtLine(toLatinUz(sup.name), sup.debtUzs, sup.debtUsd, '').replace(
+              /^[^:]+:\s*/,
+              ''
+            ),
           });
         }
       }

@@ -59,13 +59,14 @@ closingHandler.on('message:text', async (ctx, next) => {
     d.cashRemainingInDrawer = amount;
 
     const { startOfDay, endOfDay } = getTashkentDayRange();
-    const [cashInvoices, supplierPayments] = await Promise.all([
+    const [cashInvoices, todaySupplierPayments, prevSafePayments] = await Promise.all([
       prisma.invoice.findMany({
         where: {
           ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paidCashAmount: { gt: 0 },
+          paymentSource: 'TODAY_CASH',
         },
         select: { paidCashAmount: true },
       }),
@@ -74,13 +75,24 @@ closingHandler.on('message:text', async (ctx, next) => {
           ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
+          paymentSource: 'TODAY_CASH',
+        },
+        select: { amount: true },
+      }),
+      prisma.supplierPayment.findMany({
+        where: {
+          ownerId,
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+          paymentSource: 'PREVIOUS_SAFE',
         },
         select: { amount: true },
       }),
     ]);
 
     const dailyCashPurchasesUzs = cashInvoices.reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
-    const dailySupplierPaymentsUzs = supplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const dailySupplierPaymentsUzs = todaySupplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const previousSafePaymentsUzs = prevSafePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
     const totalDailySalesUzs =
       Number(d.terminalAmount || 0) +
       Number(d.clickAmount || 0) +
@@ -91,21 +103,27 @@ closingHandler.on('message:text', async (ctx, next) => {
     const actionId = `zrep_${Date.now()}`;
     ctx.session.step = actionId;
 
-    const previewText = [
+    const lines = [
       `📊 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💳 Terminalda savdo: ${formatSom(d.terminalAmount)}`,
       `📱 Click / Karta savdo: ${formatSom(d.clickAmount)}`,
       `💵 Kassada qolgan naqd pul: ${formatSom(d.cashRemainingInDrawer)}`,
-      `📦 Naqd pulga sotib olingan tovarlar (avto): ${formatSom(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-      `🤝 Ta'minotchilarga berilgan pul (avto): ${formatSom(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
+      `📦 Bugungi kassadan naqdga olingan tovarlar: ${formatSom(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
+      `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${formatSom(dailySupplierPaymentsUzs)} (${todaySupplierPayments.length} ta to'lov)`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💰 **KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}**`,
-      ``,
-      `Kassani yopaymi?`,
-    ].join('\n');
+    ];
 
-    await ctx.reply(previewText, {
+    if (previousSafePaymentsUzs > 0) {
+      lines.push(
+        `_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${formatSom(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`
+      );
+    }
+
+    lines.push(``, `Kassani yopaymi?`);
+
+    await ctx.reply(lines.join('\n'), {
       parse_mode: 'Markdown',
       reply_markup: getConfirmationKeyboard(actionId),
     });

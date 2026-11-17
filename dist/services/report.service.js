@@ -87,8 +87,10 @@ class ReportService {
         };
     }
     /**
-     * MODUL 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
+     * MODUL 5 & 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
      * isolated by `ownerId` for the current Tashkent day (`UTC+5`).
+     * Only `paymentSource === "TODAY_CASH"` supplier payments and cash purchases are added to today's sales!
+     * `paymentSource === "PREVIOUS_SAFE"` (from yesterday's Z-Report / safe) are excluded from today's sales and shown as info.
      */
     static async generateAndSaveZReport(input) {
         const ownerId = String(input.ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
@@ -97,13 +99,14 @@ class ReportService {
         const terminalAmount = Math.max(0, Number(Number(input.terminalAmount || 0).toFixed(2)));
         const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
         const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
-        const [cashInvoices, supplierPayments] = await Promise.all([
+        const [cashInvoices, todaySupplierPayments, prevSafeSupplierPayments] = await Promise.all([
             prisma_1.prisma.invoice.findMany({
                 where: {
                     ownerId,
                     createdAt: { gte: startOfDay, lte: endOfDay },
                     currency: 'UZS',
                     paidCashAmount: { gt: 0 },
+                    paymentSource: 'TODAY_CASH',
                 },
                 select: { paidCashAmount: true },
             }),
@@ -112,14 +115,26 @@ class ReportService {
                     ownerId,
                     createdAt: { gte: startOfDay, lte: endOfDay },
                     currency: 'UZS',
+                    paymentSource: 'TODAY_CASH',
+                },
+                select: { amount: true },
+            }),
+            prisma_1.prisma.supplierPayment.findMany({
+                where: {
+                    ownerId,
+                    createdAt: { gte: startOfDay, lte: endOfDay },
+                    currency: 'UZS',
+                    paymentSource: 'PREVIOUS_SAFE',
                 },
                 select: { amount: true },
             }),
         ]);
         const dailyCashPurchasesUzs = Number(cashInvoices.reduce((acc, inv) => acc + Number(inv.paidCashAmount || 0), 0).toFixed(2));
         const dailyCashPurchasesCount = cashInvoices.length;
-        const dailySupplierPaymentsUzs = Number(supplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2));
-        const dailySupplierPaymentsCount = supplierPayments.length;
+        const dailySupplierPaymentsUzs = Number(todaySupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2));
+        const dailySupplierPaymentsCount = todaySupplierPayments.length;
+        const previousSafePaymentsUzs = Number(prevSafeSupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2));
+        const previousSafePaymentsCount = prevSafeSupplierPayments.length;
         const totalDailySalesUzs = Number((terminalAmount +
             clickAmount +
             cashRemainingInDrawer +
@@ -131,17 +146,21 @@ class ReportService {
             year: 'numeric',
             timeZone: 'Asia/Tashkent',
         }).format(now);
-        const formattedText = [
+        const lines = [
             `📊 KUNLIK Z-OTCHYOT HISOBOTI (📅 ${dateFormatted})`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(terminalAmount)}`,
             `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(clickAmount)}`,
             `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(cashRemainingInDrawer)}`,
-            `📦 Naqd pulga sotib olingan tovarlar (avto): ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)}`,
-            `🤝 Ta'minotchilarga berilgan pul (avto): ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)}`,
+            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)}`,
+            `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)}`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💰 KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}`,
-        ].join('\n');
+        ];
+        if (previousSafePaymentsUzs > 0) {
+            lines.push(`(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)`);
+        }
+        const formattedText = lines.join('\n');
         await prisma_1.prisma.$transaction(async (tx) => {
             await Promise.all([
                 tx.zReport.upsert({
@@ -202,6 +221,8 @@ class ReportService {
             dailyCashPurchasesCount,
             dailySupplierPaymentsUzs,
             dailySupplierPaymentsCount,
+            previousSafePaymentsUzs,
+            previousSafePaymentsCount,
             totalDailySalesUzs,
             formattedText,
         };

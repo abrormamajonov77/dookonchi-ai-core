@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getDiscountConfirmationKeyboard = exports.getTemplateConfirmKeyboard = void 0;
 exports.getConfirmationKeyboard = getConfirmationKeyboard;
+exports.getPaymentSourceConfirmationKeyboard = getPaymentSourceConfirmationKeyboard;
+exports.getFuzzySupplierSuggestionKeyboard = getFuzzySupplierSuggestionKeyboard;
 exports.getInvoiceConfirmationKeyboard = getInvoiceConfirmationKeyboard;
 exports.getDuplicateInvoiceWarningKeyboard = getDuplicateInvoiceWarningKeyboard;
 exports.getSavedInvoiceCardKeyboard = getSavedInvoiceCardKeyboard;
@@ -10,11 +12,36 @@ exports.addTwoColButtons = addTwoColButtons;
 exports.getDisambiguationKeyboard = getDisambiguationKeyboard;
 const grammy_1 = require("grammy");
 const formatters_1 = require("../../utils/formatters");
+const transliterate_1 = require("../../utils/transliterate");
 function getConfirmationKeyboard(actionId, copyTextContent) {
     const kb = new grammy_1.InlineKeyboard();
     if (copyTextContent)
         kb.switchInlineCurrent('✏️ Tahrirlash', copyTextContent).row();
     return kb.text('✅ Tasdiqlash', `confirm_${actionId}`).text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+/**
+ * MODUL 5.2: 1-Click Payment Source Selection for Supplier Payments
+ */
+function getPaymentSourceConfirmationKeyboard(actionId) {
+    return new grammy_1.InlineKeyboard()
+        .text('💵 Bugungi kassadan (Z-otchyotga kiradi)', `pay_source:TODAY_CASH:${actionId}`)
+        .row()
+        .text('🏦 Kechagi puldan / Seyfdan (Z-otchyotga kirmaydi)', `pay_source:PREVIOUS_SAFE:${actionId}`)
+        .row()
+        .text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+/**
+ * MODUL 4.2: Fuzzy Supplier Typo Guard Keyboard ("Dinar" vs "Diner")
+ */
+function getFuzzySupplierSuggestionKeyboard(existingSupplierId, existingSupplierName, inputName, actionId) {
+    const cleanExisting = (0, transliterate_1.toLatinUz)(existingSupplierName);
+    const cleanInput = (0, transliterate_1.toLatinUz)(inputName);
+    return new grammy_1.InlineKeyboard()
+        .text(`✅ Ha, "${cleanExisting}" ga qo'shish`, `sup_fuzzy_use:${existingSupplierId}:${actionId}`)
+        .row()
+        .text(`➕ Yo'q, "${cleanInput}" deb yangi ochish`, `sup_fuzzy_new:${actionId}`)
+        .row()
+        .text('❌ Bekor qilish', `sup_fuzzy_cancel:${actionId}`);
 }
 const getTemplateConfirmKeyboard = (editCb, actionId) => new grammy_1.InlineKeyboard()
     .text('✏️ Tahrirlash', editCb)
@@ -68,7 +95,7 @@ function getSavedInvoiceCardKeyboard(invoiceOrTxId, supplierId, photoFileId, txI
         .row()
         .text("✏️ Umumiy summani qo'lda kiritish", `edit_invoice_total:${invoiceOrTxId}`)
         .row()
-        .text('💱 Valyutani o\'zgartirish (UZS ↔ USD)', `toggle_invoice_currency:${invoiceOrTxId}`)
+        .text("💱 Valyutani o'zgartirish (UZS ↔ USD)", `toggle_invoice_currency:${invoiceOrTxId}`)
         .row();
     if (photoFileId && txId) {
         kb.text("🖼 Asl rasmni ko'rish", `sup:photo:${txId}`).row();
@@ -87,7 +114,7 @@ function addPaginationRow(kb, currentPage, totalPages, prefix) {
 function addTwoColButtons(kb, items, getName, getSum, getCb) {
     for (let i = 0; i < items.length; i += 2) {
         for (const item of items.slice(i, i + 2)) {
-            const n = getName(item);
+            const n = (0, transliterate_1.toLatinUz)(getName(item));
             kb.text(`${n.length > 12 ? `${n.slice(0, 12)}...` : n} | ${(0, formatters_1.formatCompactAmount)(getSum(item))}`, getCb(item));
         }
         kb.row();
@@ -96,7 +123,7 @@ function addTwoColButtons(kb, items, getName, getSum, getCb) {
 function getDisambiguationKeyboard(candidates, pendingId, selPrefix, newPrefix, cancelPrefix) {
     const kb = new grammy_1.InlineKeyboard();
     candidates.forEach((c, idx) => kb
-        .text((0, formatters_1.formatSupplierDebtLine)(c.name, c.debtUzs, c.debtUsd, '🏢 '), `${selPrefix}_${pendingId}_${idx}`)
+        .text((0, formatters_1.formatSupplierDebtLine)((0, transliterate_1.toLatinUz)(c.name), c.debtUzs, c.debtUsd, '🏢 '), `${selPrefix}_${pendingId}_${idx}`)
         .row());
     return kb
         .text("➕ Bu yangi ta'minotchi (Alohida ochish)", `${newPrefix}_${pendingId}`)

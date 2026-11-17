@@ -140,6 +140,7 @@ model Invoice {
   discountAmount     Decimal? @db.Decimal(18, 2)
   currency           Currency @default(UZS)
   paymentType        String   @default("CREDIT")
+  paymentSource      String   @default("TODAY_CASH")
   paidCashAmount     Decimal  @default(0) @db.Decimal(18, 2)
   creditAmount       Decimal  @default(0) @db.Decimal(18, 2)
   imageHash          String?  @db.VarChar(64)
@@ -154,6 +155,7 @@ model Invoice {
   @@index([ownerId, imageHash])
   @@index([ownerId, contentFingerprint])
   @@index([ownerId, createdAt])
+  @@index([ownerId, paymentSource, createdAt])
   @@index([supplierId])
   @@index([createdAt])
   @@index([imageHash])
@@ -191,17 +193,19 @@ model InvoiceItem {
 }
 
 model SupplierPayment {
-  id         String   @id @default(uuid())
-  ownerId    String   @default("")
-  supplierId String
-  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  amount     Decimal  @db.Decimal(18, 2)
-  currency   Currency @default(UZS)
-  comment    String?
-  createdAt  DateTime @default(now())
+  id            String   @id @default(uuid())
+  ownerId       String   @default("")
+  supplierId    String
+  supplier      Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  amount        Decimal  @db.Decimal(18, 2)
+  currency      Currency @default(UZS)
+  paymentSource String   @default("TODAY_CASH")
+  comment       String?
+  createdAt     DateTime @default(now())
 
   @@index([ownerId])
   @@index([ownerId, createdAt])
+  @@index([ownerId, paymentSource, createdAt])
   @@index([supplierId])
 }
 
@@ -213,6 +217,7 @@ model SupplierTransaction {
   invoiceId        String?
   type             TransactionType
   sourceType       String          @default("MANUAL")
+  paymentSource    String          @default("TODAY_CASH")
   amount           Decimal         @db.Decimal(18, 2)
   originalAmount   Decimal?        @db.Decimal(18, 2)
   discountAmount   Decimal?        @db.Decimal(18, 2)
@@ -226,6 +231,7 @@ model SupplierTransaction {
 
   @@index([ownerId])
   @@index([ownerId, date])
+  @@index([ownerId, paymentSource, date])
   @@index([supplierId])
   @@index([invoiceId])
   @@index([date])
@@ -273,14 +279,15 @@ model Expense {
 }
 
 model CashTransaction {
-  id        String   @id @default(uuid())
-  ownerId   String   @default("")
-  partyName String
-  amount    Decimal  @db.Decimal(18, 2)
-  currency  Currency @default(UZS)
-  items     String?
-  createdAt DateTime @default(now())
-  createdBy String?
+  id            String   @id @default(uuid())
+  ownerId       String   @default("")
+  partyName     String
+  amount        Decimal  @db.Decimal(18, 2)
+  currency      Currency @default(UZS)
+  paymentSource String   @default("TODAY_CASH")
+  items         String?
+  createdAt     DateTime @default(now())
+  createdBy     String?
 
   @@index([ownerId])
   @@index([ownerId, createdAt])

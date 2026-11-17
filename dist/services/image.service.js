@@ -19,10 +19,13 @@ function getFastSignature(buf) {
 }
 class ImageService {
     /**
-     * MODUL 4: Ultra-Fast "Real Skaner Apparati" in-memory pipeline.
-     * Converts raw photo buffer to a high-contrast black-and-white scanner JPEG (35-55 KB, <60 KB) in <150ms.
+     * MODUL 1.2: Ultra-Fast 2-3s Scanner Pipeline (sharp Turbo Scanner).
+     * Converts raw photo buffer to a high-contrast black-and-white scanner JPEG (30-45 KB, <= 45 KB) in <120ms.
      */
     static async optimizeForFastOCR(rawBuffer) {
+        if (!rawBuffer || rawBuffer.byteLength === 0) {
+            throw new Error("Rasm fayli bo'sh");
+        }
         const cachedWeak = memoryBufferCache.get(rawBuffer);
         if (cachedWeak)
             return cachedWeak;
@@ -33,10 +36,10 @@ class ImageService {
             return cachedSig;
         }
         let scannedBuffer = await (0, sharp_1.default)(rawBuffer, { failOn: 'none', sequentialRead: true })
-            .rotate()
+            .rotate() // EXIF bo'yicha avtomatik to'g'rilash
             .resize({
-            width: 960,
-            height: 1100,
+            width: 880,
+            height: 1050,
             fit: 'inside',
             withoutEnlargement: true,
             fastShrinkOnLoad: true,
@@ -44,14 +47,21 @@ class ImageService {
         })
             .grayscale()
             .normalize()
-            .linear(1.25, -20) // Yozuvlarni skaner kabi tiniq qora, fonni oq qilish
-            .jpeg({ quality: 58, progressive: false, mozjpeg: false, optimiseCoding: false })
+            .linear(1.3, -25) // Yozuvlarni tiniq qora, fonni toza oq skaner qilish
+            .jpeg({ quality: 55, progressive: false, mozjpeg: false, optimiseCoding: false })
             .toBuffer();
-        if (scannedBuffer.byteLength >= 58 * 1024) {
+        if (scannedBuffer.byteLength > 45 * 1024) {
             scannedBuffer = await (0, sharp_1.default)(scannedBuffer, { failOn: 'none', sequentialRead: true })
-                .resize({ width: 760, height: 960, fit: 'inside', withoutEnlargement: true, kernel: 'nearest' })
+                .resize({ width: 720, height: 900, fit: 'inside', withoutEnlargement: true, kernel: 'nearest' })
                 .grayscale()
-                .jpeg({ quality: 42, progressive: false, mozjpeg: false, optimiseCoding: false })
+                .jpeg({ quality: 32, progressive: false, mozjpeg: false, optimiseCoding: false })
+                .toBuffer();
+        }
+        if (scannedBuffer.byteLength > 45 * 1024) {
+            scannedBuffer = await (0, sharp_1.default)(scannedBuffer, { failOn: 'none', sequentialRead: true })
+                .resize({ width: 600, height: 760, fit: 'inside', withoutEnlargement: true, kernel: 'nearest' })
+                .grayscale()
+                .jpeg({ quality: 24, progressive: false, mozjpeg: false, optimiseCoding: false })
                 .toBuffer();
         }
         memoryBufferCache.set(rawBuffer, scannedBuffer);

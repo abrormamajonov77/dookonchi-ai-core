@@ -12,9 +12,8 @@ const fuse_js_1 = __importDefault(require("fuse.js"));
 const client_1 = require("@prisma/client");
 const prisma_1 = require("../database/prisma");
 const env_1 = require("../config/env");
-const translit_service_1 = require("./translit.service");
+const transliterate_1 = require("../utils/transliterate");
 const formatters_1 = require("../utils/formatters");
-const toKey = (s) => translit_service_1.TranslitService.toLatin(s || '').toLowerCase().trim();
 function formatDotDate(date) {
     const d = new Date(date);
     const dd = String(d.getDate()).padStart(2, '0');
@@ -59,12 +58,14 @@ function formatProductPriceTrackerCard(params) {
     const { priceDiff, diffStatus, diffText } = formatPriceDiffLine(params.currentPrice, params.previousPrice, params.currency);
     const qtyNum = Number(params.quantity);
     const qtyStr = Number.isInteger(qtyNum) ? String(qtyNum) : String(Number(qtyNum.toFixed(3)));
-    const unitStr = (params.unit || 'dona').trim();
+    const unitStr = (0, transliterate_1.toLatinUz)((params.unit || 'dona').trim());
+    const prodName = (0, transliterate_1.toLatinUz)(params.productName);
+    const supName = (0, transliterate_1.toLatinUz)(params.supplierName);
     const prevLine = params.previousPrice !== null && params.previousDate
         ? `${(0, formatters_1.formatCurrency)(params.previousPrice, params.currency)} (${formatDotDate(params.previousDate)})`
         : "Ma'lumot yo'q (Birinchi kirim)";
-    const formattedCard = `📦 Mahsulot: ${params.productName}\n` +
-        `🚚 Ta'minotchi: ${params.supplierName}\n` +
+    const formattedCard = `📦 Mahsulot: ${prodName}\n` +
+        `🚚 Ta'minotchi: ${supName}\n` +
         `🕒 Oxirgi kelgan vaqti: ${formatArrivalDateTime(params.latestDate)}\n` +
         `💰 Hozirgi kelish narxi: ${(0, formatters_1.formatCurrency)(params.currentPrice, params.currency)} (Soni: ${qtyStr} ${unitStr})\n` +
         `📊 Oldingi partiya narxi: ${prevLine}\n` +
@@ -75,18 +76,21 @@ class SearchService {
     static async searchProductsWithPriceDiff(query, ownerId = env_1.env.OWNER_TELEGRAM_ID) {
         const cleanOwnerId = String(ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
         const rawTrimmed = query.replace(/(ni|ga|dan|da|ning)$/i, '').trim();
-        const cleanQuery = toKey(rawTrimmed);
+        const latinQuery = (0, transliterate_1.toLatinUz)(rawTrimmed).trim();
+        const cleanQuery = (0, transliterate_1.normalizeForSearch)(rawTrimmed);
         if (!cleanQuery)
             return [];
-        // 1. Direct ILIKE search on InvoiceItem + Product isolated by ownerId
+        // 1. Direct ILIKE search on InvoiceItem + Product + Supplier isolated by ownerId
         let matchedInvoiceItems = await prisma_1.prisma.invoiceItem.findMany({
             where: {
                 ownerId: cleanOwnerId,
                 OR: [
+                    { rawName: { contains: latinQuery, mode: 'insensitive' } },
                     { rawName: { contains: rawTrimmed, mode: 'insensitive' } },
                     { normalizedName: { contains: cleanQuery, mode: 'insensitive' } },
-                    { product: { name: { contains: rawTrimmed, mode: 'insensitive' } } },
+                    { product: { name: { contains: latinQuery, mode: 'insensitive' } } },
                     { product: { searchTokens: { contains: cleanQuery, mode: 'insensitive' } } },
+                    { supplier: { name: { contains: latinQuery, mode: 'insensitive' } } },
                 ],
             },
             orderBy: [{ createdAt: 'desc' }, { invoice: { createdAt: 'desc' } }],
@@ -97,7 +101,7 @@ class SearchService {
             },
             take: 100,
         });
-        // 2. Fuzzy fallback if ILIKE returned 0 items
+        // 2. Phonetic & Fuzzy fallback if ILIKE returned 0 items
         if (matchedInvoiceItems.length === 0) {
             const recentItems = await prisma_1.prisma.invoiceItem.findMany({
                 where: { ownerId: cleanOwnerId },
@@ -107,23 +111,34 @@ class SearchService {
                     supplier: { select: { id: true, name: true } },
                     invoice: { select: { id: true, supplierId: true, createdAt: true, supplier: { select: { id: true, name: true } } } },
                 },
-                take: 200,
+                take: 250,
             });
-            const fuseDocs = recentItems.map((it) => ({
-                item: it,
-                searchName: toKey(it.rawName || it.product?.name || ''),
-            }));
-            const fuseHits = new fuse_js_1.default(fuseDocs, {
-                keys: ['searchName'],
-                threshold: 0.35,
-                ignoreLocation: true,
-            }).search(cleanQuery);
-            matchedInvoiceItems = fuseHits.map((h) => h.item.item);
+            const directPhoneticHits = recentItems.filter((it) => {
+                const key = (0, transliterate_1.normalizeForSearch)(`${it.rawName || ''} ${it.product?.name || ''} ${it.supplier?.name || it.invoice?.supplier?.name || ''}`);
+                return key.includes(cleanQuery);
+            });
+            if (directPhoneticHits.length > 0) {
+                matchedInvoiceItems = directPhoneticHits;
+            }
+            else {
+                const fuseDocs = recentItems.map((it) => ({
+                    item: it,
+                    searchName: (0, transliterate_1.normalizeForSearch)(`${it.rawName || it.product?.name || ''} ${it.supplier?.name || it.invoice?.supplier?.name || ''}`),
+                }));
+                const fuseHits = new fuse_js_1.default(fuseDocs, {
+                    keys: ['searchName'],
+                    threshold: 0.35,
+                    ignoreLocation: true,
+                }).search(cleanQuery);
+                matchedInvoiceItems = fuseHits.map((h) => h.item.item);
+            }
         }
         if (matchedInvoiceItems.length === 0)
             return [];
         const productIds = Array.from(new Set(matchedInvoiceItems.map((i) => i.productId)));
-        const normNames = Array.from(new Set(matchedInvoiceItems.map((i) => (i.normalizedName || toKey(i.rawName || i.product.name))).filter(Boolean)));
+        const normNames = Array.from(new Set(matchedInvoiceItems
+            .map((i) => i.normalizedName || (0, transliterate_1.normalizeForSearch)(i.rawName || i.product.name))
+            .filter(Boolean)));
         const allHistoryItems = await prisma_1.prisma.invoiceItem.findMany({
             where: {
                 ownerId: cleanOwnerId,
@@ -141,8 +156,8 @@ class SearchService {
         });
         const groups = new Map();
         for (const row of allHistoryItems) {
-            const pName = row.rawName || row.product?.name || "Noma'lum";
-            const normKey = row.normalizedName || toKey(pName);
+            const pName = (0, transliterate_1.toLatinUz)(row.rawName || row.product?.name || "Noma'lum");
+            const normKey = (0, transliterate_1.normalizeForSearch)(row.normalizedName || pName);
             const cur = (row.currency || 'UZS');
             const groupKey = `${normKey}::${cur}`;
             const list = groups.get(groupKey) || [];
@@ -158,15 +173,15 @@ class SearchService {
             });
             const latest = history[0];
             const previous = history.length > 1 ? history[1] : null;
-            const productName = latest.rawName || latest.product?.name || "Noma'lum";
-            const supplierName = latest.supplier?.name || latest.invoice?.supplier?.name || "Noma'lum ta'minotchi";
+            const productName = (0, transliterate_1.toLatinUz)(latest.rawName || latest.product?.name || "Noma'lum");
+            const supplierName = (0, transliterate_1.toLatinUz)(latest.supplier?.name || latest.invoice?.supplier?.name || "Noma'lum ta'minotchi");
             const supplierId = latest.supplierId || latest.invoice?.supplierId;
             const latestDate = latest.createdAt || latest.invoice.createdAt;
             const currentPrice = Number(latest.unitPrice);
             const previousPrice = previous ? Number(previous.unitPrice) : null;
             const previousDate = previous ? previous.createdAt || previous.invoice.createdAt : null;
             const quantity = Number(latest.quantity);
-            const unit = latest.unit || 'dona';
+            const unit = (0, transliterate_1.toLatinUz)(latest.unit || 'dona');
             const currency = (latest.currency || 'UZS');
             const cardInfo = formatProductPriceTrackerCard({
                 productName,
@@ -204,7 +219,7 @@ class SearchService {
     }
     static async multiSearch(query, ownerId = env_1.env.OWNER_TELEGRAM_ID) {
         const cleanOwnerId = String(ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
-        const cleanQuery = toKey(query.replace(/(ni|ga|dan|da|ning)$/i, '').trim());
+        const cleanQuery = (0, transliterate_1.normalizeForSearch)(query.replace(/(ni|ga|dan|da|ning)$/i, '').trim());
         const [productItems, allSuppliers, allDebts, recentTx] = await Promise.all([
             this.searchProductsWithPriceDiff(query, cleanOwnerId),
             prisma_1.prisma.supplier.findMany({
@@ -234,35 +249,36 @@ class SearchService {
         ]);
         const supplierDocs = allSuppliers.map((s) => ({
             id: s.id,
-            name: s.name,
-            searchName: toKey(s.name),
+            name: (0, transliterate_1.toLatinUz)(s.name),
+            searchName: (0, transliterate_1.normalizeForSearch)(s.name),
             debtUzs: Number(s.debtUzs),
             debtUsd: Number(s.debtUsd),
-            amountText: (0, formatters_1.formatSupplierDebtLine)(s.name, s.debtUzs, s.debtUsd, '').replace(/^[^:]+:\s*/, ''),
+            amountText: (0, formatters_1.formatSupplierDebtLine)((0, transliterate_1.toLatinUz)(s.name), s.debtUzs, s.debtUsd, '').replace(/^[^:]+:\s*/, ''),
             type: 'SUPPLIER',
         }));
         const groupedDebts = {};
         for (const d of allDebts) {
             const rem = Number(d.amount) - Number(d.paidAmount);
             if (rem > 0) {
-                groupedDebts[d.customerName] ??= { sum: 0, firstId: d.id, currency: d.currency };
-                groupedDebts[d.customerName].sum += rem;
+                const cName = (0, transliterate_1.toLatinUz)(d.customerName);
+                groupedDebts[cName] ??= { sum: 0, firstId: d.id, currency: d.currency };
+                groupedDebts[cName].sum += rem;
             }
         }
         const customerDocs = Object.entries(groupedDebts).map(([name, d]) => ({
             id: d.firstId,
             name,
-            searchName: toKey(name),
+            searchName: (0, transliterate_1.normalizeForSearch)(name),
             amount: d.sum,
             amountText: (0, formatters_1.formatCurrency)(d.sum, d.currency),
             type: 'CUSTOMER',
         }));
         const txDocs = recentTx.map((tx) => {
-            const name = `${tx.supplier.name} ${tx.type === 'INCOMING_GOODS' ? 'kirim' : "to'lov"} ${tx.description || ''}`.trim();
+            const name = (0, transliterate_1.toLatinUz)(`${tx.supplier.name} ${tx.type === 'INCOMING_GOODS' ? 'kirim' : "to'lov"} ${tx.description || ''}`.trim());
             return {
                 id: tx.id,
                 name,
-                searchName: toKey(name),
+                searchName: (0, transliterate_1.normalizeForSearch)(name),
                 amount: Number(tx.amount),
                 currency: tx.currency,
                 type: 'TRANSACTION',
@@ -271,7 +287,13 @@ class SearchService {
             };
         });
         const opts = { keys: ['searchName'], threshold: 0.35, ignoreLocation: true, includeScore: true };
-        const top5 = (list) => new fuse_js_1.default(list, opts).search(cleanQuery).slice(0, 5);
+        const top5 = (list) => {
+            const exactSub = list.filter((x) => x.searchName.includes(cleanQuery));
+            if (exactSub.length > 0) {
+                return exactSub.slice(0, 5).map((item) => ({ item, score: 0 }));
+            }
+            return new fuse_js_1.default(list, opts).search(cleanQuery).slice(0, 5);
+        };
         const matchedSuppliers = top5(supplierDocs).map((r) => ({
             type: 'SUPPLIER',
             id: r.item.id,
@@ -286,8 +308,8 @@ class SearchService {
                     matchedSuppliers.push({
                         type: 'SUPPLIER',
                         id: sup.id,
-                        name: sup.name,
-                        amountText: (0, formatters_1.formatSupplierDebtLine)(sup.name, sup.debtUzs, sup.debtUsd, '').replace(/^[^:]+:\s*/, ''),
+                        name: (0, transliterate_1.toLatinUz)(sup.name),
+                        amountText: (0, formatters_1.formatSupplierDebtLine)((0, transliterate_1.toLatinUz)(sup.name), sup.debtUzs, sup.debtUsd, '').replace(/^[^:]+:\s*/, ''),
                     });
                 }
             }

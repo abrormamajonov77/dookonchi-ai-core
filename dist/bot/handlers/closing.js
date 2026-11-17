@@ -54,13 +54,14 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
         const d = ctx.session.tempData || {};
         d.cashRemainingInDrawer = amount;
         const { startOfDay, endOfDay } = (0, formatters_1.getTashkentDayRange)();
-        const [cashInvoices, supplierPayments] = await Promise.all([
+        const [cashInvoices, todaySupplierPayments, prevSafePayments] = await Promise.all([
             prisma_1.prisma.invoice.findMany({
                 where: {
                     ownerId,
                     createdAt: { gte: startOfDay, lte: endOfDay },
                     currency: 'UZS',
                     paidCashAmount: { gt: 0 },
+                    paymentSource: 'TODAY_CASH',
                 },
                 select: { paidCashAmount: true },
             }),
@@ -69,12 +70,23 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
                     ownerId,
                     createdAt: { gte: startOfDay, lte: endOfDay },
                     currency: 'UZS',
+                    paymentSource: 'TODAY_CASH',
+                },
+                select: { amount: true },
+            }),
+            prisma_1.prisma.supplierPayment.findMany({
+                where: {
+                    ownerId,
+                    createdAt: { gte: startOfDay, lte: endOfDay },
+                    currency: 'UZS',
+                    paymentSource: 'PREVIOUS_SAFE',
                 },
                 select: { amount: true },
             }),
         ]);
         const dailyCashPurchasesUzs = cashInvoices.reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
-        const dailySupplierPaymentsUzs = supplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+        const dailySupplierPaymentsUzs = todaySupplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+        const previousSafePaymentsUzs = prevSafePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
         const totalDailySalesUzs = Number(d.terminalAmount || 0) +
             Number(d.clickAmount || 0) +
             Number(d.cashRemainingInDrawer || 0) +
@@ -82,20 +94,22 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
             dailySupplierPaymentsUzs;
         const actionId = `zrep_${Date.now()}`;
         ctx.session.step = actionId;
-        const previewText = [
+        const lines = [
             `📊 **KUNLIK Z-OTCHYOT TASDIQLASH**`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(d.terminalAmount)}`,
             `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(d.clickAmount)}`,
             `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(d.cashRemainingInDrawer)}`,
-            `📦 Naqd pulga sotib olingan tovarlar (avto): ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-            `🤝 Ta'minotchilarga berilgan pul (avto): ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)} (${supplierPayments.length} ta to'lov)`,
+            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
+            `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)} (${todaySupplierPayments.length} ta to'lov)`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💰 **KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}**`,
-            ``,
-            `Kassani yopaymi?`,
-        ].join('\n');
-        await ctx.reply(previewText, {
+        ];
+        if (previousSafePaymentsUzs > 0) {
+            lines.push(`_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`);
+        }
+        lines.push(``, `Kassani yopaymi?`);
+        await ctx.reply(lines.join('\n'), {
             parse_mode: 'Markdown',
             reply_markup: (0, inline_1.getConfirmationKeyboard)(actionId),
         });

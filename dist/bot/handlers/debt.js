@@ -6,6 +6,7 @@ const prisma_1 = require("../../database/prisma");
 const formatters_1 = require("../../utils/formatters");
 const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
+const transliterate_1 = require("../../utils/transliterate");
 exports.debtHandler = new grammy_1.Composer();
 const PER_PAGE = 10;
 async function applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency = 'UZS') {
@@ -237,13 +238,14 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
 });
 (0, telegram_1.registerTemplateActions)(exports.debtHandler, 'debt', 'ADD_DEBT_TEMPLATE', 'DEBT_TEMPLATE', async (ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
     const ownerId = String(ctx.from?.id || '');
+    const cleanCust = (0, transliterate_1.toLatinUz)(customerName);
     await prisma_1.prisma.customerDebt.create({
-        data: { ownerId, customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
+        data: { ownerId, customerName: cleanCust, amount, currency, phone: phone || null, itemsSummary: note ? (0, transliterate_1.toLatinUz)(note) : null },
     });
     const agg = await prisma_1.prisma.customerDebt.aggregate({
-        where: { ownerId, customerName, currency },
+        where: { ownerId, customerName: cleanCust, currency },
         _sum: { amount: true, paidAmount: true },
     });
     const totalRemaining = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
-    return `✅ Nasiya saqlandi: ${customerName} (+${(0, formatters_1.formatCurrency)(amount, currency)})\n💰 Yangilangan umumiy qarz: ${(0, formatters_1.formatCurrency)(totalRemaining, currency)}${note ? `\n📝 Izoh: ${note}` : ''}`;
+    return `✅ Nasiya saqlandi: ${cleanCust} (+${(0, formatters_1.formatCurrency)(amount, currency)})\n💰 Yangilangan umumiy qarz: ${(0, formatters_1.formatCurrency)(totalRemaining, currency)}${note ? `\n📝 Izoh: ${(0, transliterate_1.toLatinUz)(note)}` : ''}`;
 });

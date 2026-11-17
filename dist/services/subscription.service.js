@@ -10,25 +10,15 @@ const prisma_1 = require("../database/prisma");
 const env_1 = require("../config/env");
 const formatters_1 = require("../utils/formatters");
 const menu_1 = require("../bot/keyboards/menu");
-const userMemoryCache = new Map();
-const USER_CACHE_TTL_MS = 60 * 1000;
+const cache_1 = require("../utils/cache");
 function invalidateUserCache(telegramId) {
-    if (telegramId !== undefined && telegramId !== null) {
-        userMemoryCache.delete(String(telegramId));
-    }
-    else {
-        userMemoryCache.clear();
-    }
+    (0, cache_1.invalidateCache)(telegramId);
 }
 function getCachedUser(telegramId) {
-    const entry = userMemoryCache.get(telegramId);
-    if (entry && entry.expiresAt > Date.now()) {
-        return entry.user;
-    }
-    return null;
+    return cache_1.userStatusCache.get(String(telegramId).trim());
 }
 function setCachedUser(telegramId, user) {
-    userMemoryCache.set(telegramId, { user, expiresAt: Date.now() + USER_CACHE_TTL_MS });
+    cache_1.userStatusCache.set(String(telegramId).trim(), user);
 }
 function unitToDays(value, unitRaw) {
     const u = unitRaw.toLowerCase().trim();

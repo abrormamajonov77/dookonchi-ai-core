@@ -4,6 +4,8 @@ import { prisma } from '../database/prisma';
 import { env } from '../config/env';
 import { TranslitService } from './translit.service';
 import { cacheService } from './cache.service';
+import { toLatinUz, normalizeForSearch } from '../utils/transliterate';
+import { calculateSimilarity, levenshteinDistance } from '../utils/fuzzy';
 import {
   calculateDiscountedTotal,
   formatCurrency,
@@ -13,6 +15,18 @@ import {
   reconcileInvoiceTotals,
 } from '../utils/formatters';
 import { buildVerbatimTableText, InvoiceItemSchema, ParsedInvoiceItem } from './ai.service';
+
+export interface FuzzySupplierMatchResult {
+  status: 'EXACT_MATCH' | 'FUZZY_MATCH' | 'NEW_SUPPLIER';
+  isExactMatch: boolean;
+  isFuzzyMatch: boolean;
+  inputName: string;
+  supplier: any | null;
+  suggestedSupplier: any | null;
+  similarity: number;
+  distance: number;
+  promptText: string | null;
+}
 
 export class SupplierService {
   static computeImageHash(buffer: Buffer): string {
@@ -41,12 +55,9 @@ export class SupplierService {
       .slice(0, 3)
       .map((it: any) => {
         if (typeof it === 'string') {
-          return TranslitService.toLatin(it).toLowerCase().replace(/\s+/g, ' ').trim();
+          return normalizeForSearch(it);
         }
-        const n = TranslitService.toLatin(it.normalizedName || it.rawName || it.productName || '')
-          .toLowerCase()
-          .replace(/\s+/g, ' ')
-          .trim();
+        const n = normalizeForSearch(it.normalizedName || it.rawName || it.productName || '');
         const q = Number(it.quantity || 1);
         const tot = Number(it.lineTotal ?? it.totalPrice ?? 0).toFixed(2);
         return `${n}:${q}:${tot}`;
@@ -58,7 +69,7 @@ export class SupplierService {
 
   static formatDuplicateWarningMessage(existingInvoice: any): string {
     const cur: 'UZS' | 'USD' = existingInvoice.currency === 'USD' ? 'USD' : 'UZS';
-    const supName = existingInvoice.supplier?.name || "Noma'lum";
+    const supName = toLatinUz(existingInvoice.supplier?.name || "Noma'lum");
     const dt = formatDate(existingInvoice.createdAt);
     return (
       `⛔️ DIQQAT! Bu nakladnoy oldin kiritilgan, ikkinchi marta kiritish mumkin emas!\n` +
@@ -121,13 +132,138 @@ export class SupplierService {
   }
 
   static normalizeName(name: string): string {
-    return TranslitService.toLatin(name)
+    return toLatinUz(name)
       .toLowerCase()
       .trim()
       .replace(/(dan yuk keldi|yuk keldi)$/i, '')
       .replace(/\s+(aka|oka|opa|toga|tog'a|amma|boy|xon|hon|mulla|jon|bek|akadan|okadan)(dan|ga|ni|ning)?$/i, '')
       .replace(/(akadan|okadan|aka|oka|opa|toga|tog'a|amma|boy|xon|hon|mulla|jon|bek|dan|ga|ni|ning)$/i, '')
       .trim();
+  }
+
+  /**
+   * MODUL 4: Fuzzy Supplier Typo Guard ("Dinar" vs "Diner" / "Dinar kalbasa").
+   * 1) Checks exact match (case-insensitive & Latin-normalized).
+   * 2) Checks fuzzy similarity (Levenshtein distance <= 2 or similarity >= 70% or first-word match).
+   * 3) Suggests existing supplier before creating a duplicate/typo supplier profile!
+   */
+  static async findOrSuggestSupplier(
+    rawInputName: string,
+    ownerId: string = env.OWNER_TELEGRAM_ID
+  ): Promise<FuzzySupplierMatchResult> {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
+    const inputName = this.cleanSupplierName(toLatinUz(rawInputName || ''));
+    const inputNorm = normalizeForSearch(inputName);
+
+    if (!inputNorm || inputNorm.length < 2) {
+      return {
+        status: 'NEW_SUPPLIER',
+        isExactMatch: false,
+        isFuzzyMatch: false,
+        inputName,
+        supplier: null,
+        suggestedSupplier: null,
+        similarity: 0,
+        distance: Infinity,
+        promptText: null,
+      };
+    }
+
+    const activeSuppliers = await cacheService.getSuppliersList(cleanOwnerId);
+
+    // Step 1: Exact match check
+    for (const s of activeSuppliers) {
+      const sLatin = toLatinUz(s.name).trim();
+      const sNorm = normalizeForSearch(sLatin);
+      if (sLatin.toLowerCase() === inputName.toLowerCase() || sNorm === inputNorm) {
+        return {
+          status: 'EXACT_MATCH',
+          isExactMatch: true,
+          isFuzzyMatch: false,
+          inputName: s.name,
+          supplier: s,
+          suggestedSupplier: null,
+          similarity: 1,
+          distance: 0,
+          promptText: null,
+        };
+      }
+    }
+
+    // Step 2: Fuzzy / Levenshtein / First-Word similarity check
+    const inFirstWord = inputNorm.split(/\s+/)[0];
+    let bestSupplier: any = null;
+    let bestScore = 0;
+    let bestDist = Infinity;
+
+    for (const s of activeSuppliers) {
+      const sLatin = toLatinUz(s.name).trim();
+      const sNorm = normalizeForSearch(sLatin);
+      if (!sNorm) continue;
+
+      const sFirstWord = sNorm.split(/\s+/)[0];
+      const fullDist = levenshteinDistance(inputNorm, sNorm);
+      const fullSim = calculateSimilarity(inputNorm, sNorm);
+      const firstWordDist = levenshteinDistance(inFirstWord, sFirstWord);
+      const firstWordSim = calculateSimilarity(inFirstWord, sFirstWord);
+
+      const isCloseFull =
+        (inputNorm.length >= 4 && fullDist <= 2) ||
+        (inputNorm.length === 3 && fullDist <= 1) ||
+        fullSim >= 0.7;
+
+      const isCloseFirstWord =
+        inFirstWord.length >= 3 &&
+        sFirstWord.length >= 3 &&
+        (firstWordDist <= 2 || firstWordSim >= 0.7 || sFirstWord === inFirstWord);
+
+      const isSubstringMatch =
+        inputNorm.length >= 3 && (sNorm.startsWith(inputNorm) || inputNorm.startsWith(sFirstWord));
+
+      if (isCloseFull || isCloseFirstWord || isSubstringMatch) {
+        const effectiveSim = Math.max(fullSim, firstWordSim, isSubstringMatch ? 0.85 : 0);
+        const effectiveDist = Math.min(fullDist, firstWordDist);
+        if (effectiveSim > bestScore || (effectiveSim === bestScore && effectiveDist < bestDist)) {
+          bestScore = effectiveSim;
+          bestDist = effectiveDist;
+          bestSupplier = s;
+        }
+      }
+    }
+
+    if (bestSupplier) {
+      const uzsText = formatCurrency(bestSupplier.debtUzs, 'UZS');
+      const usdVal = Number(bestSupplier.debtUsd || 0);
+      const debtDisplay = usdVal > 0 ? `${uzsText} | ${formatCurrency(usdVal, 'USD')}` : uzsText;
+      const promptText =
+        `🤔 Bazada '${inputName}' topilmadi, lekin juda o'xshash ta'minotchi bor:\n\n` +
+        `🏢 ${bestSupplier.name} (Joriy qarz: ${debtDisplay})\n\n` +
+        `Shu ta'minotchiga qo'shamizmi yoki yangi sahifa ochamizmi?`;
+
+      return {
+        status: 'FUZZY_MATCH',
+        isExactMatch: false,
+        isFuzzyMatch: true,
+        inputName,
+        supplier: null,
+        suggestedSupplier: bestSupplier,
+        similarity: bestScore,
+        distance: bestDist,
+        promptText,
+      };
+    }
+
+    return {
+      status: 'NEW_SUPPLIER',
+      isExactMatch: false,
+      isFuzzyMatch: false,
+      inputName,
+      supplier: null,
+      suggestedSupplier: null,
+      similarity: 0,
+      distance: Infinity,
+      promptText: null,
+    };
   }
 
   static async findMatchingSuppliers(
@@ -144,13 +280,14 @@ export class SupplierService {
     if (suppliers.length <= 1) return suppliers;
     const exactMatch = suppliers.find(
       (s) =>
-        this.normalizeName(s.name) === cleanName || s.name.trim().toLowerCase() === rawName.trim().toLowerCase()
+        this.normalizeName(s.name) === cleanName ||
+        toLatinUz(s.name).trim().toLowerCase() === toLatinUz(rawName).trim().toLowerCase()
     );
     if (exactMatch) return [exactMatch];
     if (!contextComment) return suppliers;
-    const commentLower = contextComment.toLowerCase();
+    const commentLower = toLatinUz(contextComment).toLowerCase();
     const exact = suppliers.find((s) =>
-      s.name
+      toLatinUz(s.name)
         .toLowerCase()
         .replace(cleanName, '')
         .trim()
@@ -161,7 +298,7 @@ export class SupplierService {
   }
 
   static cleanSupplierName(name: string): string {
-    return name
+    return toLatinUz(name || '')
       .trim()
       .replace(/(aka|oka|opa|toga|tog'a|amma|boy|xon|hon|mulla)$/gi, '')
       .trim();
@@ -174,18 +311,19 @@ export class SupplierService {
     ownerId: string = env.OWNER_TELEGRAM_ID
   ) {
     const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
+    const latinRawName = toLatinUz(rawName).trim();
     if (exactSupplierId && exactSupplierId !== 'CREATE_NEW') {
       const s = await tx.supplier.findFirst({ where: { id: exactSupplierId, ownerId: cleanOwnerId } });
       if (s) return s;
     }
-    const normalizedName = this.cleanSupplierName(rawName);
+    const normalizedName = this.cleanSupplierName(latinRawName);
     const existing = await tx.supplier.findMany({
       where: {
         ownerId: cleanOwnerId,
         isActive: true,
         OR: [
           { name: { equals: normalizedName, mode: 'insensitive' } },
-          { name: { equals: rawName.trim(), mode: 'insensitive' } },
+          { name: { equals: latinRawName, mode: 'insensitive' } },
           { name: { contains: normalizedName, mode: 'insensitive' } },
         ],
       },
@@ -193,7 +331,7 @@ export class SupplierService {
     });
     if (!existing.length) {
       return tx.supplier.create({
-        data: { ownerId: cleanOwnerId, name: rawName.trim(), debtUzs: 0, debtUsd: 0 },
+        data: { ownerId: cleanOwnerId, name: latinRawName, debtUzs: 0, debtUsd: 0 },
       });
     }
     const primary = existing[0];
@@ -212,7 +350,7 @@ export class SupplierService {
   }
 
   static async checkOrRenameSupplier(supplierId: string, rawNewName: string, ownerId?: string) {
-    const newName = rawNewName.trim();
+    const newName = toLatinUz(rawNewName).trim();
     if (!newName || newName.length < 2) {
       throw new Error("Ta'minotchi nomi kamida 2 ta harfdan iborat bo'lishi kerak.");
     }
@@ -298,6 +436,7 @@ export class SupplierService {
           tx.supplier.update({
             where: { id: target.id },
             data: {
+              name: toLatinUz(target.name),
               debtUzs: newDebtUzs,
               debtUsd: newDebtUsd,
               phone: target.phone || source.phone,
@@ -327,6 +466,7 @@ export class SupplierService {
     printedFinalTotal?: number | null;
     currency?: 'UZS' | 'USD';
     paymentType?: 'CASH' | 'CREDIT' | 'PARTIAL';
+    paymentSource?: 'TODAY_CASH' | 'PREVIOUS_SAFE';
     paidCashAmount?: number;
     creditAmount?: number;
     imageHash?: string | null;
@@ -351,7 +491,9 @@ export class SupplierService {
   }) {
     const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
+    const paymentSource: 'TODAY_CASH' | 'PREVIOUS_SAFE' = params.paymentSource || 'TODAY_CASH';
     const createdAt = params.createdAt || new Date();
+    const latinSupplierName = toLatinUz(params.supplierName || "Noma'lum").trim();
 
     const normalizedItems: ParsedInvoiceItem[] = (params.items || []).map((it) =>
       InvoiceItemSchema.parse({
@@ -398,7 +540,7 @@ export class SupplierService {
       params.contentFingerprint ||
       this.computeContentFingerprint({
         ownerId,
-        supplierName: params.supplierName,
+        supplierName: latinSupplierName,
         currency,
         finalTotal: math.finalTotal,
         items: normalizedItems,
@@ -419,9 +561,10 @@ export class SupplierService {
       }
     }
 
-    const verbatimText =
+    const verbatimText = toLatinUz(
       params.verbatimText ||
-      (normalizedItems.length > 0 ? buildVerbatimTableText(normalizedItems, currency) : '');
+        (normalizedItems.length > 0 ? buildVerbatimTableText(normalizedItems, currency) : '')
+    );
 
     return prisma.$transaction(
       async (tx: Prisma.TransactionClient) => {
@@ -431,21 +574,29 @@ export class SupplierService {
 
         if (!supplier) {
           const found = await tx.supplier.findFirst({
-            where: { ownerId, name: { equals: params.supplierName.trim(), mode: 'insensitive' } },
+            where: { ownerId, name: { equals: latinSupplierName, mode: 'insensitive' } },
           });
           if (found) {
             supplier = await tx.supplier.update({
               where: { id: found.id },
               data:
                 currency === 'USD'
-                  ? { debtUsd: Number((Number(found.debtUsd) + creditAmount).toFixed(2)), isActive: true }
-                  : { debtUzs: Number((Number(found.debtUzs) + creditAmount).toFixed(2)), isActive: true },
+                  ? {
+                      name: toLatinUz(found.name),
+                      debtUsd: Number((Number(found.debtUsd) + creditAmount).toFixed(2)),
+                      isActive: true,
+                    }
+                  : {
+                      name: toLatinUz(found.name),
+                      debtUzs: Number((Number(found.debtUzs) + creditAmount).toFixed(2)),
+                      isActive: true,
+                    },
             });
           } else {
             supplier = await tx.supplier.create({
               data: {
                 ownerId,
-                name: params.supplierName.trim(),
+                name: latinSupplierName,
                 debtUzs: currency === 'UZS' ? creditAmount : 0,
                 debtUsd: currency === 'USD' ? creditAmount : 0,
                 isActive: true,
@@ -457,8 +608,16 @@ export class SupplierService {
             where: { id: supplier.id },
             data:
               currency === 'USD'
-                ? { debtUsd: Number((Number(supplier.debtUsd) + creditAmount).toFixed(2)), isActive: true }
-                : { debtUzs: Number((Number(supplier.debtUzs) + creditAmount).toFixed(2)), isActive: true },
+                ? {
+                    name: toLatinUz(supplier.name),
+                    debtUsd: Number((Number(supplier.debtUsd) + creditAmount).toFixed(2)),
+                    isActive: true,
+                  }
+                : {
+                    name: toLatinUz(supplier.name),
+                    debtUzs: Number((Number(supplier.debtUzs) + creditAmount).toFixed(2)),
+                    isActive: true,
+                  },
           });
         }
 
@@ -472,6 +631,7 @@ export class SupplierService {
             totalAmount: math.finalTotal,
             currency,
             paymentType,
+            paymentSource,
             paidCashAmount,
             creditAmount,
             imageHash,
@@ -489,6 +649,7 @@ export class SupplierService {
               partyName: supplier.name,
               amount: paidCashAmount,
               currency,
+              paymentSource,
               items: JSON.stringify(normalizedItems),
               createdBy: ownerId,
               createdAt,
@@ -498,8 +659,8 @@ export class SupplierService {
 
         if (normalizedItems.length > 0) {
           for (const item of normalizedItems) {
-            const itemName = item.rawName || item.productName;
-            const normName = item.normalizedName || TranslitService.toLatin(itemName).toLowerCase().trim();
+            const itemName = toLatinUz(item.rawName || item.productName).trim();
+            const normName = normalizeForSearch(itemName) || itemName.toLowerCase();
             const searchTokens = TranslitService.generateSearchTokens(itemName);
             const itemCurrency = item.currency || currency;
 
@@ -517,7 +678,13 @@ export class SupplierService {
             const product = foundProd
               ? await tx.product.update({
                   where: { id: foundProd.id },
-                  data: { lastPrice: item.unitPrice, currency: itemCurrency, updatedAt: createdAt },
+                  data: {
+                    name: itemName,
+                    searchTokens,
+                    lastPrice: item.unitPrice,
+                    currency: itemCurrency,
+                    updatedAt: createdAt,
+                  },
                   select: { id: true },
                 })
               : await tx.product.create({
@@ -542,7 +709,7 @@ export class SupplierService {
                 rawName: itemName,
                 normalizedName: normName,
                 quantity: item.quantity,
-                unit: item.unit || 'dona',
+                unit: toLatinUz(item.unit || 'dona'),
                 unitPrice: item.unitPrice,
                 totalPrice: item.lineTotal,
                 lineTotal: item.lineTotal,
@@ -572,6 +739,7 @@ export class SupplierService {
             invoiceId: invoice.id,
             type: 'INCOMING_GOODS',
             sourceType: 'PHOTO',
+            paymentSource,
             amount: math.finalTotal,
             originalAmount: math.rawTotal,
             discountAmount: math.discountAmount,
@@ -588,6 +756,7 @@ export class SupplierService {
               discountAmount: math.discountAmount,
               finalTotal: math.finalTotal,
               paymentType,
+              paymentSource,
               paidCashAmount,
               creditAmount,
               currency,
@@ -612,26 +781,39 @@ export class SupplierService {
     );
   }
 
+  /**
+   * MODUL 5: Record supplier payment with explicit `paymentSource` ("TODAY_CASH" vs "PREVIOUS_SAFE").
+   * Both deduct from `Supplier.debtUzs`/`debtUsd`, while only `TODAY_CASH` is added to today's Z-Report sales!
+   */
   static async recordSupplierPayment(params: {
     ownerId?: string;
     supplierId?: string;
     supplierName: string;
     amount: number;
     currency?: 'UZS' | 'USD';
+    paymentSource?: 'TODAY_CASH' | 'PREVIOUS_SAFE';
     comment?: string | null;
     note?: string | null;
     createdAt?: Date;
   }) {
     const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
+    const paymentSource: 'TODAY_CASH' | 'PREVIOUS_SAFE' = params.paymentSource || 'TODAY_CASH';
     const isUsd = currency === 'USD';
     const amount = Math.max(0, Number(Math.abs(params.amount || 0).toFixed(2)));
     const createdAt = params.createdAt || new Date();
-    const commentText = params.comment || params.note || "Ta'minotchiga to'lov";
+    const sourceLabel =
+      paymentSource === 'PREVIOUS_SAFE' ? "Kechagi puldan / Seyfdan to'lov" : "Bugungi kassadan to'lov";
+    const commentText = toLatinUz(params.comment || params.note || sourceLabel);
 
     return prisma.$transaction(
       async (tx) => {
-        const supplier = await this.getOrMergeSupplier(tx, params.supplierName, params.supplierId, ownerId);
+        const supplier = await this.getOrMergeSupplier(
+          tx,
+          toLatinUz(params.supplierName),
+          params.supplierId,
+          ownerId
+        );
         const newDebtUzs = Number((Number(supplier.debtUzs) - (isUsd ? 0 : amount)).toFixed(2));
         const newDebtUsd = Number((Number(supplier.debtUsd) - (isUsd ? amount : 0)).toFixed(2));
 
@@ -642,6 +824,7 @@ export class SupplierService {
               supplierId: supplier.id,
               amount,
               currency,
+              paymentSource,
               comment: commentText,
               createdAt,
             },
@@ -651,6 +834,7 @@ export class SupplierService {
               ownerId,
               supplierId: supplier.id,
               type: 'PAYMENT',
+              paymentSource,
               amount,
               currency,
               date: createdAt,
@@ -682,10 +866,10 @@ export class SupplierService {
     postDebt: number;
   }): string {
     const cur = params.currency;
-    const body = params.verbatimText ? `${params.verbatimText}\n` : '';
+    const body = params.verbatimText ? `${toLatinUz(params.verbatimText)}\n` : '';
     let text =
       `🧾 ELEKTRON NAKLADNOY\n` +
-      `🏢 Ta'minotchi: ${params.supplierName}\n` +
+      `🏢 Ta'minotchi: ${toLatinUz(params.supplierName)}\n` +
       `📅 Sana: ${formatDate(params.date)}\n` +
       `💱 Valyuta: ${cur === 'USD' ? 'USD ($)' : "UZS (so'm)"}\n` +
       `-----------------------------\n` +
@@ -807,6 +991,7 @@ export class SupplierService {
           });
         }
 
+        cacheService.invalidateSupplierNames(updatedSupplier.ownerId);
         return {
           invoice: updatedInvoice,
           supplier: updatedSupplier,
@@ -894,6 +1079,7 @@ export class SupplierService {
           });
         }
 
+        cacheService.invalidateSupplierNames(updatedSupplier.ownerId);
         return {
           invoice: updatedInvoice,
           supplier: updatedSupplier,
@@ -963,6 +1149,7 @@ export class SupplierService {
           });
         }
 
+        cacheService.invalidateSupplierNames(updatedSupplier.ownerId);
         return {
           invoice: updatedInvoice,
           supplier: updatedSupplier,
@@ -976,10 +1163,6 @@ export class SupplierService {
     );
   }
 
-  /**
-   * MODUL 1 & 3: Format Debtors / Suppliers list isolated by `ownerId`.
-   * Supports calling as `(page, perPage, ownerId)` or `(ownerId, page, perPage)`.
-   */
   static async getFormattedDebtorsReport(
     pageOrOwnerId: number | string = 1,
     perPageOrPage: number = 10,
@@ -1025,7 +1208,7 @@ export class SupplierService {
 
     const listLines = suppliers.length
       ? suppliers
-          .map((sup) => formatSupplierDebtLine(sup.name, sup.debtUzs, sup.debtUsd, '🏢 '))
+          .map((sup) => formatSupplierDebtLine(toLatinUz(sup.name), sup.debtUzs, sup.debtUsd, '🏢 '))
           .join('\n')
       : "Hozircha ta'minotchilar yo'q.";
 

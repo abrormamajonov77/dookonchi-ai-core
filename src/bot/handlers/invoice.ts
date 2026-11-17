@@ -8,6 +8,7 @@ import {
   getDisambiguationKeyboard,
   getSavedInvoiceCardKeyboard,
   getDuplicateInvoiceWarningKeyboard,
+  getFuzzySupplierSuggestionKeyboard,
 } from '../keyboards/inline';
 import { isMenuButton } from '../keyboards/menu';
 import { logger } from '../../config/logger';
@@ -27,10 +28,11 @@ import {
   formatFriendlyError,
 } from '../../utils/telegram';
 import { SupplierService } from '../../services/supplier.service';
+import { toLatinUz } from '../../utils/transliterate';
 
 export const invoiceHandler = new Composer<MyContext>();
 
-const CASH_REGEX = /naqd\s*pulga|naqdga|naqd|cash/i;
+const CASH_REGEX = /naqd\s*pulga|naqdga|naqd|naqt|cash/i;
 const EXPIRED_MSG = '⚠️ Ushbu operatsiya muddati tugagan. Iltimos, boshqatdan yuboring.';
 
 export function buildEditableInvoiceText(
@@ -38,7 +40,7 @@ export function buildEditableInvoiceText(
   _includeMoreHint = false,
   modifiedLabel = false
 ): { editableText: string; totalSum: number } {
-  const name = invoiceData.supplierName || invoiceData.supplier || "Noma'lum";
+  const name = toLatinUz(invoiceData.supplierName || invoiceData.supplier || "Noma'lum");
   const currency: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
   const header = modifiedLabel
     ? `🏢 Ta'minotchi: ${name} (O'zgartirildi)\n`
@@ -115,32 +117,70 @@ async function processParsedInvoice(
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
 
+  if (invoiceData.supplierName) {
+    invoiceData.supplierName = toLatinUz(invoiceData.supplierName).trim();
+  }
+
   if (!invoiceData.exactSupplierId && invoiceData.supplierName && invoiceData.supplierName !== "Noma'lum") {
-    const candidates = await SupplierService.findMatchingSuppliers(
-      invoiceData.supplierName,
-      rawCaption,
-      ownerId
-    );
-    if (candidates.length === 1) {
-      invoiceData.exactSupplierId = candidates[0].id;
-      invoiceData.supplierName = candidates[0].name;
-    } else if (candidates.length > 1) {
-      const candidateIds = candidates.map((c) => c.id);
+    const fuzzyCheck = await SupplierService.findOrSuggestSupplier(invoiceData.supplierName, ownerId);
+    if (fuzzyCheck.isExactMatch && fuzzyCheck.supplier) {
+      invoiceData.exactSupplierId = fuzzyCheck.supplier.id;
+      invoiceData.supplierName = fuzzyCheck.supplier.name;
+    } else if (fuzzyCheck.isFuzzyMatch && fuzzyCheck.suggestedSupplier && fuzzyCheck.promptText) {
       const pendingAction = await prisma.pendingAction.create({
         data: {
           userId: BigInt(ctx.from.id),
           type: 'INVOICE_DISAMBIGUATION',
-          data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
+          data: {
+            ownerId,
+            data: invoiceData,
+            imageUrl,
+            photoFileId,
+            userPhotoMsgId,
+            rawCaption,
+            candidateIds: [fuzzyCheck.suggestedSupplier.id],
+          },
         },
       });
-      const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${invoiceData.supplierName}" hisobiga yozilsin?`;
-      const disKb = getDisambiguationKeyboard(candidates, pendingAction.id, 'isel', 'inew', 'cancel_idis');
+      const fuzzyKb = getFuzzySupplierSuggestionKeyboard(
+        fuzzyCheck.suggestedSupplier.id,
+        fuzzyCheck.suggestedSupplier.name,
+        fuzzyCheck.inputName,
+        `inv_${pendingAction.id}`
+      );
       if (statusMsgId && ctx.chat?.id) {
         return ctx.api
-          .editMessageText(ctx.chat.id, statusMsgId, disText, { parse_mode: 'Markdown', reply_markup: disKb })
-          .catch(() => ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb }));
+          .editMessageText(ctx.chat.id, statusMsgId, fuzzyCheck.promptText, { reply_markup: fuzzyKb })
+          .catch(() => ctx.reply(fuzzyCheck.promptText!, { reply_markup: fuzzyKb }));
       }
-      return ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb });
+      return ctx.reply(fuzzyCheck.promptText, { reply_markup: fuzzyKb });
+    } else {
+      const candidates = await SupplierService.findMatchingSuppliers(
+        invoiceData.supplierName,
+        rawCaption,
+        ownerId
+      );
+      if (candidates.length === 1) {
+        invoiceData.exactSupplierId = candidates[0].id;
+        invoiceData.supplierName = candidates[0].name;
+      } else if (candidates.length > 1) {
+        const candidateIds = candidates.map((c) => c.id);
+        const pendingAction = await prisma.pendingAction.create({
+          data: {
+            userId: BigInt(ctx.from.id),
+            type: 'INVOICE_DISAMBIGUATION',
+            data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
+          },
+        });
+        const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${invoiceData.supplierName}" hisobiga yozilsin?`;
+        const disKb = getDisambiguationKeyboard(candidates, pendingAction.id, 'isel', 'inew', 'cancel_idis');
+        if (statusMsgId && ctx.chat?.id) {
+          return ctx.api
+            .editMessageText(ctx.chat.id, statusMsgId, disText, { parse_mode: 'Markdown', reply_markup: disKb })
+            .catch(() => ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb }));
+        }
+        return ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb });
+      }
     }
   }
 
@@ -985,3 +1025,62 @@ invoiceHandler.callbackQuery(/^inew_(.+)$/, async (ctx) => {
     { reply_markup: undefined }
   );
 });
+
+invoiceHandler.callbackQuery(/^sup_fuzzy_use:([^:]+):inv_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const [, supplierId, pendingId] = ctx.match;
+  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
+
+  const supplier = await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } });
+  if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
+
+  const pData = pendingAction.data as any;
+  pData.data.exactSupplierId = supplier.id;
+  pData.data.supplierName = supplier.name;
+
+  await Promise.all([
+    prisma.pendingAction.delete({ where: { id: pendingId } }),
+    ctx.deleteMessage().catch(() => {}),
+  ]);
+  await processParsedInvoice(
+    ctx,
+    pData.data,
+    pData.imageUrl,
+    pData.photoFileId,
+    pData.userPhotoMsgId,
+    pData.rawCaption
+  );
+});
+
+invoiceHandler.callbackQuery(/^sup_fuzzy_new:inv_(.+)$/, async (ctx) => {
+  const pendingId = ctx.match[1];
+  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
+
+  const pData = pendingAction.data as any;
+  pData.data.exactSupplierId = 'CREATE_NEW';
+  pData.data.supplierName = toLatinUz(pData.data.supplierName || "Noma'lum");
+
+  await Promise.all([
+    prisma.pendingAction.delete({ where: { id: pendingId } }),
+    ctx.deleteMessage().catch(() => {}),
+  ]);
+  await processParsedInvoice(
+    ctx,
+    pData.data,
+    pData.imageUrl,
+    pData.photoFileId,
+    pData.userPhotoMsgId,
+    pData.rawCaption
+  );
+});
+
+invoiceHandler.callbackQuery(/^sup_fuzzy_cancel:inv_(.+)$/, async (ctx) => {
+  const pendingId = ctx.match[1];
+  await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+  clearSession(ctx);
+  await ctx.editMessageText('❌ Nakladnoy bekor qilindi.', { reply_markup: undefined });
+});
+

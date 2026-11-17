@@ -10,6 +10,7 @@ import {
 } from '../../utils/formatters';
 import { addPaginationRow, addTwoColButtons, getTemplateConfirmKeyboard } from '../keyboards/inline';
 import { replyOrEdit, clearSession, registerTemplateActions } from '../../utils/telegram';
+import { toLatinUz } from '../../utils/transliterate';
 
 export const debtHandler = new Composer<MyContext>();
 const PER_PAGE = 10;
@@ -309,14 +310,15 @@ registerTemplateActions(
   'DEBT_TEMPLATE',
   async (ctx, { amount, currency = 'UZS', customerName, phone, note }) => {
     const ownerId = String(ctx.from?.id || '');
+    const cleanCust = toLatinUz(customerName);
     await prisma.customerDebt.create({
-      data: { ownerId, customerName, amount, currency, phone: phone || null, itemsSummary: note || null },
+      data: { ownerId, customerName: cleanCust, amount, currency, phone: phone || null, itemsSummary: note ? toLatinUz(note) : null },
     });
     const agg = await prisma.customerDebt.aggregate({
-      where: { ownerId, customerName, currency },
+      where: { ownerId, customerName: cleanCust, currency },
       _sum: { amount: true, paidAmount: true },
     });
     const totalRemaining = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
-    return `✅ Nasiya saqlandi: ${customerName} (+${formatCurrency(amount, currency)})\n💰 Yangilangan umumiy qarz: ${formatCurrency(totalRemaining, currency)}${note ? `\n📝 Izoh: ${note}` : ''}`;
+    return `✅ Nasiya saqlandi: ${cleanCust} (+${formatCurrency(amount, currency)})\n💰 Yangilangan umumiy qarz: ${formatCurrency(totalRemaining, currency)}${note ? `\n📝 Izoh: ${toLatinUz(note)}` : ''}`;
   }
 );

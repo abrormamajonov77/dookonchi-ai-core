@@ -37,6 +37,8 @@ export interface ZReportResult {
   dailyCashPurchasesCount: number;
   dailySupplierPaymentsUzs: number;
   dailySupplierPaymentsCount: number;
+  previousSafePaymentsUzs: number;
+  previousSafePaymentsCount: number;
   totalDailySalesUzs: number;
   formattedText: string;
 }
@@ -252,8 +254,10 @@ export class ReportService {
   }
 
   /**
-   * MODUL 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
+   * MODUL 5 & 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
    * isolated by `ownerId` for the current Tashkent day (`UTC+5`).
+   * Only `paymentSource === "TODAY_CASH"` supplier payments and cash purchases are added to today's sales!
+   * `paymentSource === "PREVIOUS_SAFE"` (from yesterday's Z-Report / safe) are excluded from today's sales and shown as info.
    */
   static async generateAndSaveZReport(input: ZReportInput): Promise<ZReportResult> {
     const ownerId = String(input.ownerId || env.OWNER_TELEGRAM_ID).trim();
@@ -264,13 +268,14 @@ export class ReportService {
     const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
     const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
 
-    const [cashInvoices, supplierPayments] = await Promise.all([
+    const [cashInvoices, todaySupplierPayments, prevSafeSupplierPayments] = await Promise.all([
       prisma.invoice.findMany({
         where: {
           ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paidCashAmount: { gt: 0 },
+          paymentSource: 'TODAY_CASH',
         },
         select: { paidCashAmount: true },
       }),
@@ -279,6 +284,16 @@ export class ReportService {
           ownerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
+          paymentSource: 'TODAY_CASH',
+        },
+        select: { amount: true },
+      }),
+      prisma.supplierPayment.findMany({
+        where: {
+          ownerId,
+          createdAt: { gte: startOfDay, lte: endOfDay },
+          currency: 'UZS',
+          paymentSource: 'PREVIOUS_SAFE',
         },
         select: { amount: true },
       }),
@@ -290,9 +305,14 @@ export class ReportService {
     const dailyCashPurchasesCount = cashInvoices.length;
 
     const dailySupplierPaymentsUzs = Number(
-      supplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
+      todaySupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
     );
-    const dailySupplierPaymentsCount = supplierPayments.length;
+    const dailySupplierPaymentsCount = todaySupplierPayments.length;
+
+    const previousSafePaymentsUzs = Number(
+      prevSafeSupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
+    );
+    const previousSafePaymentsCount = prevSafeSupplierPayments.length;
 
     const totalDailySalesUzs = Number(
       (
@@ -311,17 +331,25 @@ export class ReportService {
       timeZone: 'Asia/Tashkent',
     }).format(now);
 
-    const formattedText = [
+    const lines = [
       `📊 KUNLIK Z-OTCHYOT HISOBOTI (📅 ${dateFormatted})`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💳 Terminalda savdo: ${formatSom(terminalAmount)}`,
       `📱 Click / Karta savdo: ${formatSom(clickAmount)}`,
       `💵 Kassada qolgan naqd pul: ${formatSom(cashRemainingInDrawer)}`,
-      `📦 Naqd pulga sotib olingan tovarlar (avto): ${formatSom(dailyCashPurchasesUzs)}`,
-      `🤝 Ta'minotchilarga berilgan pul (avto): ${formatSom(dailySupplierPaymentsUzs)}`,
+      `📦 Bugungi kassadan naqdga olingan tovarlar: ${formatSom(dailyCashPurchasesUzs)}`,
+      `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${formatSom(dailySupplierPaymentsUzs)}`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💰 KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}`,
-    ].join('\n');
+    ];
+
+    if (previousSafePaymentsUzs > 0) {
+      lines.push(
+        `(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${formatSom(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)`
+      );
+    }
+
+    const formattedText = lines.join('\n');
 
     await prisma.$transaction(
       async (tx) => {
@@ -387,6 +415,8 @@ export class ReportService {
       dailyCashPurchasesCount,
       dailySupplierPaymentsUzs,
       dailySupplierPaymentsCount,
+      previousSafePaymentsUzs,
+      previousSafePaymentsCount,
       totalDailySalesUzs,
       formattedText,
     };

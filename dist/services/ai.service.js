@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AiService = exports.VoiceIntentSchema = exports.InvoiceSchema = exports.InvoiceItemSchema = void 0;
+exports.AiService = exports.COMPACT_SCANNER_PROMPT = exports.VoiceIntentSchema = exports.InvoiceSchema = exports.InvoiceItemSchema = exports.DEFAULT_GENERATION_CONFIG = void 0;
 exports.generateContentWithFallback = generateContentWithFallback;
 exports.parseCompactScannerRows = parseCompactScannerRows;
 exports.parseVerbatimTableToItems = parseVerbatimTableToItems;
@@ -11,9 +11,13 @@ const zod_1 = require("zod");
 const env_1 = require("../config/env");
 const retry_1 = require("../utils/retry");
 const logger_1 = require("../config/logger");
-const translit_service_1 = require("./translit.service");
+const transliterate_1 = require("../utils/transliterate");
 const formatters_1 = require("../utils/formatters");
 const ai = new genai_1.GoogleGenAI({ apiKey: env_1.env.GEMINI_API_KEY });
+exports.DEFAULT_GENERATION_CONFIG = {
+    temperature: 0.1,
+    maxOutputTokens: 2048,
+};
 exports.InvoiceItemSchema = zod_1.z
     .object({
     rawName: zod_1.z.string().optional(),
@@ -27,19 +31,20 @@ exports.InvoiceItemSchema = zod_1.z
     currency: zod_1.z.enum(['UZS', 'USD']).optional().default('UZS'),
 })
     .transform((item) => {
-    const rawName = (item.rawName || item.productName || "Noma'lum tovar").trim();
-    const normalizedName = (item.normalizedName || translit_service_1.TranslitService.toLatin(rawName).toLowerCase().trim()) || rawName.toLowerCase();
+    const rawName = (0, transliterate_1.toLatinUz)((item.rawName || item.productName || "Noma'lum tovar").trim());
+    const normalizedName = (0, transliterate_1.normalizeForSearch)(item.normalizedName || rawName) || rawName.toLowerCase();
     const quantity = Number(item.quantity || 1);
     const unitPrice = Number(Number(item.unitPrice || 0).toFixed(2));
     const computedLine = Number((quantity * unitPrice).toFixed(2));
     const rawLine = item.lineTotal ?? item.totalPrice ?? computedLine;
     const lineTotal = Number(Number(rawLine).toFixed(2));
+    const unit = (0, transliterate_1.toLatinUz)(item.unit || 'dona').trim() || 'dona';
     return {
         rawName,
         normalizedName,
         productName: rawName,
         quantity,
-        unit: item.unit || 'dona',
+        unit,
         unitPrice,
         lineTotal,
         totalPrice: lineTotal,
@@ -98,61 +103,79 @@ exports.VoiceIntentSchema = zod_1.z.object({
 const INTENT_RULES = `Maqsadlar (intent):
 - ADD_EXPENSE: Xarajat kiritish (masalan: "Ijaraga 500 dollar berdim", "Elektrga 200 ming so'm to'ladim").
 - ADD_SUPPLIER_TX: Ta'minotchi bilan oldi-berdi amaliyoti (qarzga).
-  * Agar "Yuk keldi / yuk chiqdi / yuk oldik" yoki musbat amaliyot bo'lsa (masalan: "+1 000 000 Milter", "Milter +500 ming", "Milterdan 500 minglik yuk keldi", "Milterdan 102.17$ lik yuk keldi") -> txType="INCOMING_GOODS".
-  * Agar "Pul berdik / to'ladik / to'lov qildim / qarzdan ayir / ayirdim" yoki manfiy amaliyot bo'lsa (masalan: "-1.000.000 Milterdan", "Milter -1.000.000", "-500 ming Akmal", "Milterdan 1 mln to'lov", "Azamatdan 500 ming ayir", "Milterga $50.17 berdim") -> txType="PAYMENT". Qarzdan ayirish amali!
-  MUHIM: "-1.000.000 Milterdan" yoki "Milter -1 mln" kabi yozuvlar qarz so'rash EMAS, balki qarzdan ayirish (to'lov / PAYMENT) amaliyotidir!
-- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim", "Naqd Nehir 200 ming"). MUHIM: Agar matnda "naqd" so'zi bo'lsa, uni albatta shu turkumga kirit.
-- ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi (masalan: "Rustam 50 ming so'mlik narsa oldi, yozib qo'y", "Akmal nasiya 100 ming").
-- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?", "Marvari bormi?").
-- GET_DEBT_INFO: FAQAT va FAQAT qarz miqdorini SO'RASH (masalan: "Milterdan qancha qarzim bor?", "Milter qarzi qancha?", "Akmalning qarzi qancha bo'ldi?"). Agar xabarda aniq amaliyot summasi yoki -/+ belgisi bo'lsa (masalan "-1 000 000"), bu qarz so'rash EMAS!
-- GENERAL_CHAT: Yuqoridagilardan tashqari erkin savdo, maslahat, yordam so'ralganda. Bunday holatda "replyText" ga o'zbek tilida to'liq maslahatchi sifatida professional javobni yoz.
-- UNKNOWN: Agar butunlay tushunarsiz yoki aloqasiz bo'lsa.
-VALYUTA VA SENT QOIDASI:
-- Agar xabarda $, USD, USDT, dollar, doll, dolar, ye, у.е., долл, sent, cent so'zlari/belgilari bo'lsa -> currency="USD".
-- "102 dollar 17 sent", "102.17$", "102,17 USDT" kabi summalarda kasr qismini (sentlarni, masalan 102.17) ASLO yaxlitlama, aynan 102.17 qilib qaytar!
-Summalarni (amount) doim MUSBAT (Math.abs) qilib raqamda yoz. Valyutani (currency) UZS yoki USD qilib belgil.
-Ism/nomni (name) kirit (ta'minotchi, mijoz yoki tovar nomi). Javob faqat JSON formatda bo'lsin.`;
-const COMPACT_SCANNER_PROMPT = `Sen ultra-tezkor kassa skaner apparatisansan (<=3s Single-Pass Scanner Mode).
-QOIDA:
-1. Nakladnoydagi BARCHA qatorlarni 1-qatordan oxirgi qatorgacha hech bir so'zni qisqartirmasdan o'qi.
-2. Uzun jadval yozma! Faqat "rows" massivida har bir qatorni "№|Nomi|Soni va birligi|1 dona narxi|Qator jami summasi" formatida qaytar.
-3. Eng pastdagi skidkagacha bo'lgan jami summani (subtotalBeforeDiscount), skidka foizini (discountPercent), skidka summasini (discountAmount) va qog'ozda yozilgan yakuniy summani (printedFinalTotal) yoz.
-4. Agar $, USD, USDT, у.е. bo'lsa yoki narxlar kichik kasr sonlarda (1.25, 102.17) bo'lsa -> currency="USD", aks holda "UZS". Sentlarni aslo yaxlitlama!
+  * Agar "Yuk keldi / yuk chiqdi / yuk oldik" yoki musbat amaliyot bo'lsa -> txType="INCOMING_GOODS".
+  * Agar "Pul berdik / to'ladik / to'lov qildim / qarzdan ayir / ayirdim" yoki manfiy amaliyot bo'lsa -> txType="PAYMENT".
+- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim").
+- ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi.
+- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?").
+- GET_DEBT_INFO: FAQAT qarz miqdorini SO'RASH (masalan: "Milterdan qancha qarzim bor?").
+- GENERAL_CHAT: Erkin savdo maslahati.
+- UNKNOWN: Tushunarsiz bo'lsa.
+Barcha ismlar va tovar nomlarini O'zbek Lotin alifbosiga o'girib qaytar! Javob faqat JSON formatda bo'lsin.`;
+exports.COMPACT_SCANNER_PROMPT = `Sen ultra-tezkor kassa skaner apparatisansan (2-3s Single-Pass Scanner Mode).
+DIQQAT: Agar rasmdagi nakladnoy teskari (180 daraja oyog'i osmondan) yoki yonbosh tushgan bo'lsa ham, uni o'zing to'g'rilab o'qi! Barcha qatorlarni 1-qatordan oxirgi qatorgacha hech birini qoldirmasdan o'qi va barcha Kirill harflarini darhol O'zbek Lotin alifbosiga (masalan: 'Ярко Кетчуп' -> 'Yarko Ketchup') o'girib qaytar!
+Agar rasmda matn ko'rinmasa yoki bo'sh bo'lsa, rows: [] va 0 summalar bilan bir qatorli ixcham JSON qaytar.
 
-Javobni FAQAT ushbu qisqa JSON formatda qaytar:
-{
-  "supplierName": "Milter",
-  "invoiceNumber": "145",
-  "invoiceDate": "2026-11-14",
-  "currency": "UZS",
-  "rows": [
-    "1|Marvari shokolad|10 kor|45000|450000",
-    "2|Milter Mayonez 500g|20 dona|15000|300000"
-  ],
-  "subtotalBeforeDiscount": 2000000,
-  "discountPercent": 5,
-  "discountAmount": 100000,
-  "printedFinalTotal": 1900000
-}`;
-async function generateContentWithFallback(aiCall, models = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']) {
+QOIDA:
+1. Uzun jadval yozma! Faqat "rows" massivida har bir qatorni "№|Lotincha Nomi|Soni va birligi|1 dona narxi|Qator jami summasi" formatida qaytar.
+2. Eng pastdagi skidkagacha bo'lgan jami summani (subtotalBeforeDiscount), skidka foizini (discountPercent), skidka summasini (discountAmount) va qog'ozda yozilgan yakuniy summani (printedFinalTotal) yoz.
+3. Agar $, USD, USDT, у.е. bo'lsa yoki narxlar kichik kasr sonlarda (1.25, 102.17) bo'lsa -> currency="USD", aks holda "UZS". Sentlarni aslo yaxlitlama!
+
+Javobni FAQAT ixcham (minifikatsiya qilingan) JSON formatda qaytar:
+{"supplierName":"Milter","invoiceNumber":"145","invoiceDate":"2026-11-17","currency":"UZS","rows":["1|Yarko Ketchup|10 kor|45000|450000"],"subtotalBeforeDiscount":450000,"discountPercent":0,"discountAmount":0,"printedFinalTotal":450000}`;
+function getCandidateModels(explicitModels) {
+    const envModel = process.env.GEMINI_MODEL?.trim();
+    const base = explicitModels && explicitModels.length > 0
+        ? explicitModels
+        : [
+            'gemini-3-flash-preview',
+            'gemini-flash-lite-latest',
+            'gemini-3.8-flash',
+            'gemini-flash-latest',
+            'gemini-3.7-flash',
+        ];
+    return Array.from(new Set([...(envModel ? [envModel] : []), ...base]));
+}
+function extractCleanJson(rawText) {
+    const trimmed = (rawText || '').trim();
+    if (!trimmed)
+        throw new Error('Empty response from Gemini');
+    const stripped = trimmed
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+    try {
+        return JSON.parse(stripped);
+    }
+    catch {
+        const start = stripped.indexOf('{');
+        const end = stripped.lastIndexOf('}');
+        if (start !== -1 && end > start) {
+            return JSON.parse(stripped.slice(start, end + 1));
+        }
+        throw new Error('Invalid JSON response from Gemini');
+    }
+}
+async function generateContentWithFallback(aiCall, models) {
+    const candidateModels = getCandidateModels(models);
     let lastError = null;
-    for (const model of models) {
+    for (const model of candidateModels) {
         for (let attempt = 1; attempt <= 2; attempt++) {
             let timer;
             try {
                 return await Promise.race([
                     aiCall(model),
                     new Promise((_, rej) => {
-                        timer = setTimeout(() => rej(new Error(`Model ${model} request timed out (12s)`)), 12000);
+                        timer = setTimeout(() => rej(new Error(`Model ${model} request timed out (15s)`)), 15000);
                     }),
                 ]);
             }
             catch (error) {
                 lastError = error;
-                const isRetryable = [503, 429].includes(error?.status) || /503|429|timed out|fetch failed/i.test(error?.message || '');
-                if (isRetryable && attempt < 2) {
-                    logger_1.logger.warn(`Model ${model} busy/slow (${error?.message?.slice(0, 60)}), retrying...`);
-                    await new Promise((res) => setTimeout(res, 800));
+                const isTransient = error?.status === 503 || /503|fetch failed|ECONNRESET/i.test(error?.message || '');
+                if (isTransient && attempt < 2) {
+                    logger_1.logger.warn(`Model ${model} busy (${error?.message?.slice(0, 60)}), retrying...`);
+                    await new Promise((res) => setTimeout(res, 500));
                     continue;
                 }
                 logger_1.logger.warn(`Model ${model} failed: ${error?.message?.slice(0, 120)}`);
@@ -166,24 +189,25 @@ async function generateContentWithFallback(aiCall, models = ['gemini-3.5-flash',
     }
     throw lastError;
 }
-const askJson = async (parts, maxOutputTokens, models) => {
-    const res = await generateContentWithFallback((model) => ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-            responseMimeType: 'application/json',
-            temperature: 0,
-            topK: 1,
-            thinkingConfig: { thinkingBudget: 0 },
-            ...(maxOutputTokens ? { maxOutputTokens } : {}),
-        },
-    }), models);
-    if (!res.text)
-        throw new Error('Empty response from Gemini');
-    return JSON.parse(res.text);
+const askJson = async (parts, maxOutputTokens = exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens, models) => {
+    return generateContentWithFallback(async (model) => {
+        const res = await ai.models.generateContent({
+            model,
+            contents: [{ role: 'user', parts }],
+            config: {
+                responseMimeType: 'application/json',
+                temperature: exports.DEFAULT_GENERATION_CONFIG.temperature,
+                maxOutputTokens,
+            },
+        });
+        if (!res.text)
+            throw new Error('Empty response from Gemini');
+        return extractCleanJson(res.text);
+    }, models);
 };
 /**
- * MODUL 1.3: Ultra-fast (<0.001s) Node.js parser for compact scanner `rows` ("№|Nomi|Soni|Narxi|Summasi").
+ * MODUL 1.3 & MODUL 3: Ultra-fast (<0.001s) Node.js parser for compact scanner `rows` ("№|Nomi|Soni|Narxi|Summasi").
+ * Automatically converts all Cyrillic item names and units to Uzbek Latin (`toLatinUz`).
  */
 function parseCompactScannerRows(rows, defaultCurrency = 'UZS') {
     if (!Array.isArray(rows) || rows.length === 0)
@@ -205,14 +229,15 @@ function parseCompactScannerRows(rows, defaultCurrency = 'UZS') {
         const totalCol = (firstIsIndex ? cols[4] : cols[3]) || '';
         const qtyMatch = qtyCol.match(/(\d+(?:[.,]\d+)?)\s*(.*)/);
         const quantity = qtyMatch ? parseFloat(qtyMatch[1].replace(',', '.')) || 1 : 1;
-        const unit = (qtyMatch?.[2] || '').replace(/[xх*]/gi, '').trim() || 'dona';
+        const unitRaw = (qtyMatch?.[2] || '').replace(/[xх*]/gi, '').trim() || 'dona';
+        const unit = (0, transliterate_1.toLatinUz)(unitRaw) || 'dona';
         const parsedPrice = (0, formatters_1.parseCurrencyAndAmount)(priceCol);
         const itemCurrency = parsedPrice.currency === 'USD' || /\$/i.test(priceCol) || /\$/i.test(totalCol) ? 'USD' : defaultCurrency;
         const unitPrice = Number(parsedPrice.amount.toFixed(2));
         const parsedTotal = totalCol ? (0, formatters_1.parseCurrencyAndAmount)(totalCol).amount : Number((quantity * unitPrice).toFixed(2));
         const lineTotal = Number((parsedTotal > 0 ? parsedTotal : quantity * unitPrice).toFixed(2));
-        const cleanRawName = rawName.trim();
-        const normalizedName = translit_service_1.TranslitService.toLatin(cleanRawName).toLowerCase().trim() || cleanRawName.toLowerCase();
+        const cleanRawName = (0, transliterate_1.toLatinUz)(rawName.trim());
+        const normalizedName = (0, transliterate_1.normalizeForSearch)(cleanRawName) || cleanRawName.toLowerCase();
         items.push({
             rawName: cleanRawName,
             normalizedName,
@@ -251,13 +276,13 @@ function parseVerbatimTableToItems(tableText, defaultCurrency = 'UZS') {
                 continue;
             }
             const firstIsIndex = /^\d+\.?$/.test(cols[0]) && cols.length >= 4;
-            const nameCol = firstIsIndex ? cols[1] : cols[0];
+            const nameCol = (0, transliterate_1.toLatinUz)(firstIsIndex ? cols[1] : cols[0]);
             const qtyCol = firstIsIndex ? cols[2] : cols[1] || '1';
             const priceCol = firstIsIndex ? cols[3] : cols[2] || '0';
             const totalCol = firstIsIndex ? cols[4] : cols[3] || '';
             const qtyMatch = qtyCol.match(/(\d+(?:[.,]\d+)?)\s*(.*)/);
             const quantity = qtyMatch ? parseFloat(qtyMatch[1].replace(',', '.')) || 1 : 1;
-            const unit = (qtyMatch?.[2] || '').replace(/[xх*]/gi, '').trim() || 'dona';
+            const unit = (0, transliterate_1.toLatinUz)((qtyMatch?.[2] || '').replace(/[xх*]/gi, '').trim()) || 'dona';
             const parsedPrice = (0, formatters_1.parseCurrencyAndAmount)(priceCol);
             const itemCurrency = parsedPrice.currency === 'USD' || /\$/i.test(priceCol) || /\$/i.test(totalCol) ? 'USD' : defaultCurrency;
             const unitPrice = parsedPrice.amount;
@@ -265,7 +290,7 @@ function parseVerbatimTableToItems(tableText, defaultCurrency = 'UZS') {
             const lineTotal = parsedTotal > 0 ? parsedTotal : Number((quantity * unitPrice).toFixed(2));
             extracted.push(exports.InvoiceItemSchema.parse({
                 rawName: nameCol,
-                normalizedName: translit_service_1.TranslitService.toLatin(nameCol).toLowerCase().trim(),
+                normalizedName: (0, transliterate_1.normalizeForSearch)(nameCol),
                 quantity,
                 unit,
                 unitPrice,
@@ -282,10 +307,11 @@ function buildVerbatimTableText(items, currency = 'UZS') {
     const header = `| № | Mahsulot nomi | Soni | 1 dona narxi | Jami summasi |\n|---|---|---|---|---|`;
     const rows = items.map((it, idx) => {
         const cur = it.currency || currency;
-        const qtyText = `${it.quantity} ${it.unit || 'dona'}`.trim();
+        const nameText = (0, transliterate_1.toLatinUz)(it.rawName || it.productName || '');
+        const qtyText = `${it.quantity} ${(0, transliterate_1.toLatinUz)(it.unit || 'dona')}`.trim();
         const priceText = (0, formatters_1.formatCurrency)(it.unitPrice, cur);
         const totalText = (0, formatters_1.formatCurrency)(it.lineTotal ?? it.totalPrice, cur);
-        return `| ${idx + 1} | ${it.rawName || it.productName} | ${qtyText} | ${priceText} | ${totalText} |`;
+        return `| ${idx + 1} | ${nameText} | ${qtyText} | ${priceText} | ${totalText} |`;
     });
     return [header, ...rows].join('\n');
 }
@@ -317,7 +343,7 @@ function normalizeVerbatimInvoice(raw, caption) {
     const printedFinalTotal = Number(raw.printedFinalTotal ?? raw.finalTotal ?? raw.netTotal ?? subtotalBeforeDiscount ?? itemsSum ?? 0);
     const discountPercent = raw.discountPercent ?? null;
     const discountAmountInput = raw.discountLabel ?? raw.discountAmount ?? raw.discount ?? 0;
-    // MODUL 2: Double-Discount Guard reconciliation
+    // Double-Discount Guard reconciliation
     const reconciled = (0, formatters_1.reconcileInvoiceTotals)({
         rows: items,
         itemsSum,
@@ -328,8 +354,8 @@ function normalizeVerbatimInvoice(raw, caption) {
     });
     const verbatimText = items.length > 0
         ? buildVerbatimTableText(items, currency)
-        : String(raw.verbatimText || raw.table_text || '').trim();
-    const supplierName = (caption || raw.supplierName || raw.supplier || "Noma'lum").trim();
+        : (0, transliterate_1.toLatinUz)(String(raw.verbatimText || raw.table_text || '').trim());
+    const supplierName = (0, transliterate_1.toLatinUz)((caption || raw.supplierName || raw.supplier || "Noma'lum").trim());
     const invoiceNo = raw.invoiceNumber ?? raw.invoiceNo ?? null;
     const discountLabel = raw.discountLabel || (reconciled.discountPercent > 0 ? `${reconciled.discountPercent}%` : null);
     return exports.InvoiceSchema.parse({
@@ -350,7 +376,7 @@ function normalizeVerbatimInvoice(raw, caption) {
         discountLabel,
         verbatimText,
         table_text: verbatimText,
-        supplier: raw.supplier ?? supplierName,
+        supplier: supplierName,
         supplierName,
         items,
         itemsCount: items.length || raw.itemsCount || 1,
@@ -358,22 +384,26 @@ function normalizeVerbatimInvoice(raw, caption) {
     });
 }
 class AiService {
-    static async parseInvoiceImage(imageBuffer, mimeType = 'image/jpeg', caption) {
+    static DEFAULT_GENERATION_CONFIG = exports.DEFAULT_GENERATION_CONFIG;
+    static async parseInvoiceImage(imageBuffer, _mimeType = 'image/jpeg', caption) {
+        if (!imageBuffer || imageBuffer.byteLength === 0) {
+            throw new Error("Nakladnoy rasm fayli bo'sh");
+        }
         return (0, retry_1.withRetry)(async () => {
             logger_1.logger.info('Sending invoice image to Gemini for Single-Pass Compact Scanner OCR');
             const parsed = await askJson([
-                { text: COMPACT_SCANNER_PROMPT },
-                { inlineData: { data: imageBuffer.toString('base64'), mimeType } },
-            ], 4096, ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
+                { text: exports.COMPACT_SCANNER_PROMPT },
+                { inlineData: { mimeType: 'image/jpeg', data: imageBuffer.toString('base64') } },
+            ], exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens);
             return normalizeVerbatimInvoice(parsed, caption);
-        }, 2, 1000, 90000);
+        }, 2, 800, 90000);
     }
     static async parseInvoiceText(invoiceText) {
         return (0, retry_1.withRetry)(async () => {
-            const prompt = `${COMPACT_SCANNER_PROMPT}\n\nFoydalanuvchi quyidagi nakladnoy matnini yubordi. Barcha qatorlarni rows massiviga va yakuniy raqamlarga ajrat:\nMatn: "${invoiceText}"`;
-            const parsed = await askJson([{ text: prompt }], 4096, ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash']);
+            const prompt = `${exports.COMPACT_SCANNER_PROMPT}\n\nFoydalanuvchi quyidagi nakladnoy matnini yubordi. Barcha qatorlarni rows massiviga va yakuniy raqamlarga ajrat:\nMatn: "${invoiceText}"`;
+            const parsed = await askJson([{ text: prompt }], exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens);
             return normalizeVerbatimInvoice(parsed);
-        }, 2, 1000, 30000);
+        }, 2, 800, 30000);
     }
     static async parseVoiceNote(audioBuffer, mimeType = 'audio/ogg') {
         return (0, retry_1.withRetry)(async () => {
@@ -383,12 +413,15 @@ class AiService {
                     text: `Sen do'kon yordamchisisan. Ovozli xabarni eshitib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.\n${INTENT_RULES}`,
                 },
                 { inlineData: { data: audioBuffer.toString('base64'), mimeType } },
-            ], undefined, ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash']);
+            ]);
             if (raw.amount !== undefined && raw.amount !== null) {
                 raw.amount = Number(Number(Math.abs(raw.amount)).toFixed(2));
             }
+            if (raw.name) {
+                raw.name = (0, transliterate_1.toLatinUz)(String(raw.name));
+            }
             return exports.VoiceIntentSchema.parse(raw);
-        }, 2, 1000, 30000);
+        }, 2, 800, 30000);
     }
     static async parseTextIntent(textMessage) {
         return (0, retry_1.withRetry)(async () => {
@@ -397,8 +430,7 @@ class AiService {
                 {
                     text: `Sen do'kon yordamchisisan. Foydalanuvchining yozgan xabarini o'qib, uning maqsadini (intent) va kerakli ma'lumotlarni JSON formatida qaytar.\n${INTENT_RULES}\nXabar matni: "${textMessage}"`,
                 },
-            ], undefined, ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash']);
-            // Deterministic currency & cent override from raw text message
+            ]);
             const parsedMoney = (0, formatters_1.parseCurrencyAndAmount)(textMessage);
             if (parsedMoney.currency === 'USD') {
                 raw.currency = 'USD';
@@ -409,8 +441,11 @@ class AiService {
             else if (raw.amount !== undefined && raw.amount !== null) {
                 raw.amount = Number(Number(Math.abs(raw.amount)).toFixed(2));
             }
+            if (raw.name) {
+                raw.name = (0, transliterate_1.toLatinUz)(String(raw.name));
+            }
             return exports.VoiceIntentSchema.parse(raw);
-        }, 2, 1000, 30000);
+        }, 2, 800, 30000);
     }
 }
 exports.AiService = AiService;

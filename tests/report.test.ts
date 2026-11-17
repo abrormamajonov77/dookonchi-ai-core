@@ -229,12 +229,14 @@ describe('Menu & Report Keyboard Permissions', () => {
     expect(isMenuButton('/hisobot')).toBe(true);
   });
 
-  it('includes 📈 Davriy Hisobot in OWNER menu but hides it from SELLER menu', () => {
-    const ownerMenu = JSON.stringify(getMainMenu('OWNER').build());
-    const sellerMenu = JSON.stringify(getMainMenu('SELLER').build());
+  it('includes 👑 Admin Panel in SUPER_ADMIN menu and 📈 Davriy Hisobot for STORE_OWNER', () => {
+    const adminMenu = JSON.stringify(getMainMenu('SUPER_ADMIN').build());
+    const ownerMenu = JSON.stringify(getMainMenu('STORE_OWNER').build());
 
+    expect(adminMenu).toContain('👑 Admin Panel');
+    expect(adminMenu).toContain('📈 Davriy Hisobot');
     expect(ownerMenu).toContain('📈 Davriy Hisobot');
-    expect(sellerMenu).not.toContain('📈 Davriy Hisobot');
+    expect(ownerMenu).not.toContain('👑 Admin Panel');
   });
 
   it('marks active period with checkmark in getReportKeyboard', () => {

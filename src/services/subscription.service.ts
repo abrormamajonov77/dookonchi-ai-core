@@ -13,27 +13,18 @@ export interface ParsedSubscriptionDuration {
   bonusLabel: string;
 }
 
-const userMemoryCache = new Map<string, { user: any; expiresAt: number }>();
-const USER_CACHE_TTL_MS = 60 * 1000;
+import { userStatusCache, invalidateCache } from '../utils/cache';
 
 export function invalidateUserCache(telegramId?: string | number | bigint) {
-  if (telegramId !== undefined && telegramId !== null) {
-    userMemoryCache.delete(String(telegramId));
-  } else {
-    userMemoryCache.clear();
-  }
+  invalidateCache(telegramId);
 }
 
 export function getCachedUser(telegramId: string) {
-  const entry = userMemoryCache.get(telegramId);
-  if (entry && entry.expiresAt > Date.now()) {
-    return entry.user;
-  }
-  return null;
+  return userStatusCache.get(String(telegramId).trim());
 }
 
 export function setCachedUser(telegramId: string, user: any) {
-  userMemoryCache.set(telegramId, { user, expiresAt: Date.now() + USER_CACHE_TTL_MS });
+  userStatusCache.set(String(telegramId).trim(), user);
 }
 
 function unitToDays(value: number, unitRaw: string): number {

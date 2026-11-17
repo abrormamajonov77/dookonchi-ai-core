@@ -1,10 +1,42 @@
 import { InlineKeyboard } from 'grammy';
 import { formatCurrency, formatCompactAmount, formatSupplierDebtLine } from '../../utils/formatters';
+import { toLatinUz } from '../../utils/transliterate';
 
 export function getConfirmationKeyboard(actionId: string, copyTextContent?: string) {
   const kb = new InlineKeyboard();
   if (copyTextContent) kb.switchInlineCurrent('✏️ Tahrirlash', copyTextContent).row();
   return kb.text('✅ Tasdiqlash', `confirm_${actionId}`).text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+
+/**
+ * MODUL 5.2: 1-Click Payment Source Selection for Supplier Payments
+ */
+export function getPaymentSourceConfirmationKeyboard(actionId: string) {
+  return new InlineKeyboard()
+    .text('💵 Bugungi kassadan (Z-otchyotga kiradi)', `pay_source:TODAY_CASH:${actionId}`)
+    .row()
+    .text('🏦 Kechagi puldan / Seyfdan (Z-otchyotga kirmaydi)', `pay_source:PREVIOUS_SAFE:${actionId}`)
+    .row()
+    .text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+
+/**
+ * MODUL 4.2: Fuzzy Supplier Typo Guard Keyboard ("Dinar" vs "Diner")
+ */
+export function getFuzzySupplierSuggestionKeyboard(
+  existingSupplierId: string,
+  existingSupplierName: string,
+  inputName: string,
+  actionId: string
+) {
+  const cleanExisting = toLatinUz(existingSupplierName);
+  const cleanInput = toLatinUz(inputName);
+  return new InlineKeyboard()
+    .text(`✅ Ha, "${cleanExisting}" ga qo'shish`, `sup_fuzzy_use:${existingSupplierId}:${actionId}`)
+    .row()
+    .text(`➕ Yo'q, "${cleanInput}" deb yangi ochish`, `sup_fuzzy_new:${actionId}`)
+    .row()
+    .text('❌ Bekor qilish', `sup_fuzzy_cancel:${actionId}`);
 }
 
 export const getTemplateConfirmKeyboard = (editCb: string, actionId: string) =>
@@ -78,7 +110,7 @@ export function getSavedInvoiceCardKeyboard(
     .row()
     .text("✏️ Umumiy summani qo'lda kiritish", `edit_invoice_total:${invoiceOrTxId}`)
     .row()
-    .text('💱 Valyutani o\'zgartirish (UZS ↔ USD)', `toggle_invoice_currency:${invoiceOrTxId}`)
+    .text("💱 Valyutani o'zgartirish (UZS ↔ USD)", `toggle_invoice_currency:${invoiceOrTxId}`)
     .row();
 
   if (photoFileId && txId) {
@@ -104,7 +136,7 @@ export function addTwoColButtons<T>(
 ) {
   for (let i = 0; i < items.length; i += 2) {
     for (const item of items.slice(i, i + 2)) {
-      const n = getName(item);
+      const n = toLatinUz(getName(item));
       kb.text(`${n.length > 12 ? `${n.slice(0, 12)}...` : n} | ${formatCompactAmount(getSum(item))}`, getCb(item));
     }
     kb.row();
@@ -121,7 +153,7 @@ export function getDisambiguationKeyboard(
   const kb = new InlineKeyboard();
   candidates.forEach((c, idx) =>
     kb
-      .text(formatSupplierDebtLine(c.name, c.debtUzs, c.debtUsd, '🏢 '), `${selPrefix}_${pendingId}_${idx}`)
+      .text(formatSupplierDebtLine(toLatinUz(c.name), c.debtUzs, c.debtUsd, '🏢 '), `${selPrefix}_${pendingId}_${idx}`)
       .row()
   );
   return kb
