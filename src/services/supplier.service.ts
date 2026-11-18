@@ -658,65 +658,75 @@ export class SupplierService {
         }
 
         if (normalizedItems.length > 0) {
+          const existingProducts = await tx.product.findMany({
+            where: { ownerId },
+            select: { id: true, name: true, searchTokens: true },
+          });
+          const invoiceItemsData: Prisma.InvoiceItemCreateManyInput[] = [];
+
           for (const item of normalizedItems) {
             const itemName = toLatinUz(item.rawName || item.productName).trim();
             const normName = normalizeForSearch(itemName) || itemName.toLowerCase();
             const searchTokens = TranslitService.generateSearchTokens(itemName);
             const itemCurrency = item.currency || currency;
+            const lowerItemName = itemName.toLowerCase();
 
-            const foundProd = await tx.product.findFirst({
-              where: {
-                ownerId,
-                OR: [
-                  { name: { equals: itemName, mode: 'insensitive' } },
-                  { searchTokens: { contains: normName, mode: 'insensitive' } },
-                ],
-              },
-              select: { id: true },
+            const foundProd =
+              existingProducts.find((p) => p.name.toLowerCase() === lowerItemName) ||
+              existingProducts.find((p) => p.searchTokens.toLowerCase().includes(normName));
+
+            let productId: string;
+            if (foundProd) {
+              await tx.product.update({
+                where: { id: foundProd.id },
+                data: {
+                  name: itemName,
+                  searchTokens,
+                  lastPrice: item.unitPrice,
+                  currency: itemCurrency,
+                  updatedAt: createdAt,
+                },
+                select: { id: true },
+              });
+              foundProd.name = itemName;
+              foundProd.searchTokens = searchTokens;
+              productId = foundProd.id;
+            } else {
+              const createdProd = await tx.product.create({
+                data: {
+                  ownerId,
+                  name: itemName,
+                  searchTokens,
+                  lastPrice: item.unitPrice,
+                  currency: itemCurrency,
+                  createdAt,
+                  updatedAt: createdAt,
+                },
+                select: { id: true, name: true, searchTokens: true },
+              });
+              existingProducts.push(createdProd);
+              productId = createdProd.id;
+            }
+
+            invoiceItemsData.push({
+              ownerId,
+              invoiceId: invoice.id,
+              supplierId: supplier.id,
+              productId,
+              rawName: itemName,
+              normalizedName: normName,
+              quantity: item.quantity,
+              unit: toLatinUz(item.unit || 'dona'),
+              unitPrice: item.unitPrice,
+              totalPrice: item.lineTotal,
+              lineTotal: item.lineTotal,
+              currency: itemCurrency,
+              createdAt,
             });
+          }
 
-            const product = foundProd
-              ? await tx.product.update({
-                  where: { id: foundProd.id },
-                  data: {
-                    name: itemName,
-                    searchTokens,
-                    lastPrice: item.unitPrice,
-                    currency: itemCurrency,
-                    updatedAt: createdAt,
-                  },
-                  select: { id: true },
-                })
-              : await tx.product.create({
-                  data: {
-                    ownerId,
-                    name: itemName,
-                    searchTokens,
-                    lastPrice: item.unitPrice,
-                    currency: itemCurrency,
-                    createdAt,
-                    updatedAt: createdAt,
-                  },
-                  select: { id: true },
-                });
-
-            await tx.invoiceItem.create({
-              data: {
-                ownerId,
-                invoiceId: invoice.id,
-                supplierId: supplier.id,
-                productId: product.id,
-                rawName: itemName,
-                normalizedName: normName,
-                quantity: item.quantity,
-                unit: toLatinUz(item.unit || 'dona'),
-                unitPrice: item.unitPrice,
-                totalPrice: item.lineTotal,
-                lineTotal: item.lineTotal,
-                currency: itemCurrency,
-                createdAt,
-              },
-            });
+          if (invoiceItemsData.length > 0) {
+            await tx.invoiceItem.createMany({ data: invoiceItemsData });
           }
         }
 
@@ -914,23 +924,17 @@ export class SupplierService {
       if (supTx && ownerId && supTx.ownerId !== ownerId) {
         throw new Error("Ruxsat yo'q.");
       }
-      if (supTx?.invoiceId) {
+      const linkedInvoiceId = supTx?.invoiceId || (supTx?.receiptData as any)?.invoiceId;
+      if (linkedInvoiceId) {
         invoice = await tx.invoice.findUnique({
-          where: { id: supTx.invoiceId },
-          include: { supplier: true },
-        });
-      }
-      if (!invoice && supTx) {
-        invoice = await tx.invoice.findFirst({
-          where: { supplierId: supTx.supplierId },
-          orderBy: { createdAt: 'desc' },
+          where: { id: String(linkedInvoiceId) },
           include: { supplier: true },
         });
       }
     }
 
     if (!invoice) {
-      throw new Error('Nakladnoy topilmadi.');
+      throw new Error("Ushbu amaliyotga bog'langan nakladnoy topilmadi.");
     }
     return { invoice, supTx };
   }

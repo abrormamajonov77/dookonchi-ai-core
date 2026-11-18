@@ -96,7 +96,7 @@ async function runAllFixesE2E() {
       'ai.service.ts must NOT contain thinkingConfig or thinkingBudget (causes 400 INVALID_ARGUMENT)'
     );
     assert.strictEqual(DEFAULT_GENERATION_CONFIG.temperature, 0.1);
-    assert.strictEqual(DEFAULT_GENERATION_CONFIG.maxOutputTokens, 2048);
+    assert.strictEqual(DEFAULT_GENERATION_CONFIG.maxOutputTokens, 4096);
     assert.ok(
       COMPACT_SCANNER_PROMPT.includes('180 daraja'),
       'Scanner prompt must instruct Gemini to read 180° upside-down receipts and transliterate Cyrillic to Latin'

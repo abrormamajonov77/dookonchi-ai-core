@@ -6,11 +6,13 @@ const prisma_1 = require("../../database/prisma");
 const formatters_1 = require("../../utils/formatters");
 const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
+const menu_1 = require("../keyboards/menu");
 const report_service_1 = require("../../services/report.service");
 exports.closingHandler = new grammy_1.Composer();
 exports.closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
     if (!ctx.from)
         return;
+    (0, telegram_1.clearSession)(ctx);
     const ownerId = String(ctx.from.id);
     const { dateKey } = (0, formatters_1.getTashkentDayRange)();
     const existing = await prisma_1.prisma.dailyRegister.findUnique({
@@ -30,8 +32,10 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
         return next();
     const ownerId = String(ctx.from.id);
     const rawText = ctx.message.text.trim();
-    if (rawText.startsWith('/'))
+    if (rawText.startsWith('/') || (0, menu_1.isMenuButton)(rawText)) {
+        (0, telegram_1.clearSession)(ctx);
         return next();
+    }
     const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawText);
     const amount = rawText === '0' ? 0 : parsed.amount;
     if (isNaN(amount) || amount < 0)

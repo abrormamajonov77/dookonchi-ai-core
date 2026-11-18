@@ -2,7 +2,7 @@ import { Composer, InlineKeyboard, InputFile } from 'grammy';
 import { MyContext } from '../context';
 import { ReportPeriod, ReportService } from '../../services/report.service';
 import { ExportService } from '../../services/export.service';
-import { replyOrEdit, withChatAction } from '../../utils/telegram';
+import { clearSession, replyOrEdit, withChatAction } from '../../utils/telegram';
 import { logger } from '../../config/logger';
 
 export const reportHandler = new Composer<MyContext>();
@@ -79,11 +79,13 @@ async function sendOwnerDatabaseExports(
 }
 
 reportHandler.hears('📈 Davriy Hisobot', async (ctx) => {
+  clearSession(ctx);
   const defaultPeriod: ReportPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
   await sendPeriodReport(ctx, defaultPeriod, false);
 });
 
 reportHandler.hears('📥 Bazani yuklab olish (Excel / PDF)', async (ctx) => {
+  clearSession(ctx);
   await sendOwnerDatabaseExports(ctx, 'all');
 });
 

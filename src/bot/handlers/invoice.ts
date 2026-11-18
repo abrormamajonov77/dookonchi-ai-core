@@ -26,9 +26,13 @@ import {
   safeDelete,
   clearSession,
   formatFriendlyError,
+  safeReply,
+  safeEditMessageText,
+  sanitizeMdV1,
 } from '../../utils/telegram';
 import { SupplierService } from '../../services/supplier.service';
 import { toLatinUz } from '../../utils/transliterate';
+import { parseTextCommandLocally } from '../../utils/local-parser';
 
 export const invoiceHandler = new Composer<MyContext>();
 
@@ -88,11 +92,14 @@ export function buildPendingPreviewMessage(invoiceData: any, editableText: strin
   const title = invoiceData.isCashOverride
     ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**'
     : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
-  let text = `${title}\n\n\`\`\`\n${editableText}\`\`\`\n`;
+  const safeCodeBlock = String(editableText || '')
+    .replace(/```/g, "'''")
+    .slice(0, 3200);
+  let text = `${title}\n\n\`\`\`\n${safeCodeBlock}\`\`\`\n`;
   text += `💱 Valyuta: **${currency === 'USD' ? 'USD ($)' : "UZS (so'm)"}**\n`;
   text += `📦 Tovarlarning asl summasi: **${formatCurrency(math.rawTotal, currency)}**\n`;
   if (math.discountAmount > 0) {
-    const label = percentText ? ` (${percentText})` : '';
+    const label = percentText ? ` (${sanitizeMdV1(percentText)})` : '';
     text += `🏷 Skidka${label}: **-${formatCurrency(math.discountAmount, currency)}**\n`;
   } else {
     text += `🏷 Skidka: **0**\n`;
@@ -138,6 +145,7 @@ async function processParsedInvoice(
             photoFileId,
             userPhotoMsgId,
             rawCaption,
+            suggestedSupplierId: fuzzyCheck.suggestedSupplier.id,
             candidateIds: [fuzzyCheck.suggestedSupplier.id],
           },
         },
@@ -172,14 +180,15 @@ async function processParsedInvoice(
             data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
           },
         });
-        const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${invoiceData.supplierName}" hisobiga yozilsin?`;
+        const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${sanitizeMdV1(invoiceData.supplierName)}" hisobiga yozilsin?`;
         const disKb = getDisambiguationKeyboard(candidates, pendingAction.id, 'isel', 'inew', 'cancel_idis');
         if (statusMsgId && ctx.chat?.id) {
-          return ctx.api
-            .editMessageText(ctx.chat.id, statusMsgId, disText, { parse_mode: 'Markdown', reply_markup: disKb })
-            .catch(() => ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb }));
+          return safeEditMessageText(ctx, ctx.chat.id, statusMsgId, disText, {
+            parse_mode: 'Markdown',
+            reply_markup: disKb,
+          }).catch(() => safeReply(ctx, disText, { parse_mode: 'Markdown', reply_markup: disKb }));
         }
-        return ctx.reply(disText, { parse_mode: 'Markdown', reply_markup: disKb });
+        return safeReply(ctx, disText, { parse_mode: 'Markdown', reply_markup: disKb });
       }
     }
   }
@@ -246,14 +255,15 @@ async function processParsedInvoice(
 
   let botMessageId = statusMsgId;
   if (statusMsgId && ctx.chat?.id) {
-    await ctx.api
-      .editMessageText(ctx.chat.id, statusMsgId, text, { parse_mode: 'Markdown', reply_markup: kb })
-      .catch(async () => {
-        const sent = await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
-        botMessageId = sent.message_id;
-      });
+    await safeEditMessageText(ctx, ctx.chat.id, statusMsgId, text, {
+      parse_mode: 'Markdown',
+      reply_markup: kb,
+    }).catch(async () => {
+      const sent = await safeReply(ctx, text, { parse_mode: 'Markdown', reply_markup: kb });
+      botMessageId = sent.message_id;
+    });
   } else {
-    const sentMessage = await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    const sentMessage = await safeReply(ctx, text, { parse_mode: 'Markdown', reply_markup: kb });
     botMessageId = sentMessage.message_id;
   }
 
@@ -365,6 +375,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
 
 invoiceHandler.on('message:photo', async (ctx) => {
   if (!ctx.user) return;
+  clearSession(ctx);
   const photos = ctx.message.photo;
   const photo = photos[Math.min(photos.length - 1, 2)];
   if (photo) await handleInvoiceImageUpload(ctx, photo.file_id, 'image/jpeg', 'Nakladnoyni');
@@ -372,6 +383,7 @@ invoiceHandler.on('message:photo', async (ctx) => {
 
 invoiceHandler.on('message:document', async (ctx, next) => {
   if (!ctx.user || !ctx.message.document.mime_type?.startsWith('image/')) return next();
+  clearSession(ctx);
   await handleInvoiceImageUpload(
     ctx,
     ctx.message.document.file_id,
@@ -380,9 +392,10 @@ invoiceHandler.on('message:document', async (ctx, next) => {
   );
 });
 
-invoiceHandler.hears('➕ Nakladnoy', (ctx) =>
-  ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni 100% kserokopiya shaklida tahlil qiladi.')
-);
+invoiceHandler.hears('➕ Nakladnoy', (ctx) => {
+  clearSession(ctx);
+  return ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni 100% kserokopiya shaklida tahlil qiladi.');
+});
 
 invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.+)$/, async (ctx) => {
   const rawId = ctx.match[1];
@@ -473,7 +486,12 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
     const { editableText } = buildEditableInvoiceText(invoiceData);
     const txt = buildPendingPreviewMessage(invoiceData, editableText);
     const kb = getInvoiceConfirmationKeyboard(`i_${cleanId}`, editableText, invoiceData.currency || 'UZS');
-    await ctx.editMessageText(txt, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, txt, {
+        parse_mode: 'Markdown',
+        reply_markup: kb,
+      }).catch(() => {});
+    }
     return ctx.answerCallbackQuery({ text: '❌ Skidka olib tashlandi!' });
   }
 
@@ -482,10 +500,13 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
     const cur = updated.currency;
     const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
     await ctx.answerCallbackQuery({ text: '❌ Skidka 0 ga tushirildi va balans yangilandi!' });
-    await ctx
-      .editMessageText(
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(
+        ctx,
+        ctx.chat.id,
+        ctx.callbackQuery.message.message_id,
         `✅ **Nakladnoy skidkasi olib tashlandi!**\n\n` +
-          `🏢 Ta'minotchi: **${updated.supplier.name}**\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(updated.supplier.name)}**\n` +
           `💰 Asl summa: **${formatCurrency(updated.rawTotal, cur)}**\n` +
           `🏷 Skidka: **0**\n` +
           `💵 Yakuniy summa: **${formatCurrency(updated.finalTotal, cur)}**\n` +
@@ -494,8 +515,8 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
           parse_mode: 'Markdown',
           reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
         }
-      )
-      .catch(() => {});
+      ).catch(() => {});
+    }
   } catch (err: any) {
     await ctx.answerCallbackQuery({ text: err?.message || 'Xatolik yuz berdi.', show_alert: true });
   }
@@ -527,7 +548,12 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
     const { editableText } = buildEditableInvoiceText(invoiceData);
     const txt = buildPendingPreviewMessage(invoiceData, editableText);
     const kb = getInvoiceConfirmationKeyboard(`i_${cleanId}`, editableText, invoiceData.currency);
-    await ctx.editMessageText(txt, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, txt, {
+        parse_mode: 'Markdown',
+        reply_markup: kb,
+      }).catch(() => {});
+    }
     return ctx.answerCallbackQuery({ text: `💱 Valyuta ${invoiceData.currency} ga o'zgartirildi!` });
   }
 
@@ -535,10 +561,13 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
     const updated = await SupplierService.toggleInvoiceCurrency(cleanId, ownerId);
     const cur = updated.currency;
     await ctx.answerCallbackQuery({ text: `💱 Valyuta ${cur} ga o'zgartirildi va balans yangilandi!` });
-    await ctx
-      .editMessageText(
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(
+        ctx,
+        ctx.chat.id,
+        ctx.callbackQuery.message.message_id,
         `✅ **Nakladnoy valyutasi ${cur} ga o'zgartirildi!**\n\n` +
-          `🏢 Ta'minotchi: **${updated.supplier.name}**\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(updated.supplier.name)}**\n` +
           `💵 Yakuniy summa: **${formatCurrency(updated.finalTotal, cur)}**\n` +
           `📊 Qarz balansi (UZS): **${formatCurrency(updated.supplier.debtUzs, 'UZS')}**\n` +
           `💵 Qarz balansi (USD): **${formatCurrency(updated.supplier.debtUsd, 'USD')}**`,
@@ -546,8 +575,8 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
           parse_mode: 'Markdown',
           reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
         }
-      )
-      .catch(() => {});
+      ).catch(() => {});
+    }
   } catch (err: any) {
     await ctx.answerCallbackQuery({ text: err?.message || 'Xatolik yuz berdi.', show_alert: true });
   }
@@ -574,7 +603,10 @@ invoiceHandler.on('message:text', async (ctx, next) => {
   if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/')) return next();
   const ownerId = String(ctx.from.id);
   const rawText = ctx.message.text.trim();
-  if (isMenuButton(rawText)) return next();
+  if (isMenuButton(rawText)) {
+    clearSession(ctx);
+    return next();
+  }
 
   // 1. Handle saved invoice discount edit
   if (ctx.session.step === 'AWAIT_SAVED_INVOICE_DISCOUNT') {
@@ -585,11 +617,12 @@ invoiceHandler.on('message:text', async (ctx, next) => {
       const updated = await SupplierService.updateInvoiceDiscount(invoiceId, rawText, ownerId);
       const cur = updated.currency;
       const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
-      return ctx.reply(
+      return safeReply(
+        ctx,
         `✅ **Nakladnoy skidkasi yangilandi!**\n\n` +
-          `🏢 Ta'minotchi: **${updated.supplier.name}**\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(updated.supplier.name)}**\n` +
           `💰 Asl summa: **${formatCurrency(updated.rawTotal, cur)}**\n` +
-          `🏷 Skidka (${rawText}): **-${formatCurrency(updated.discountAmount, cur)}**\n` +
+          `🏷 Skidka (${sanitizeMdV1(rawText)}): **-${formatCurrency(updated.discountAmount, cur)}**\n` +
           `💵 Yakuniy summa: **${formatCurrency(updated.finalTotal, cur)}**\n` +
           `📊 Ta'minotchi yangilangan qarzi (${cur}): **${formatCurrency(newDebt, cur)}**`,
         {
@@ -615,9 +648,10 @@ invoiceHandler.on('message:text', async (ctx, next) => {
       const updated = await SupplierService.overrideInvoiceTotal(invoiceId, first, second, ownerId);
       const cur = updated.currency;
       const newDebt = cur === 'USD' ? updated.supplier.debtUsd : updated.supplier.debtUzs;
-      return ctx.reply(
+      return safeReply(
+        ctx,
         `✅ **Nakladnoy summasi qo'lda yangilandi!**\n\n` +
-          `🏢 Ta'minotchi: **${updated.supplier.name}**\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(updated.supplier.name)}**\n` +
           `💰 Asl summa: **${formatCurrency(updated.rawTotal, cur)}**\n` +
           `🏷 Skidka: **-${formatCurrency(updated.discountAmount, cur)}**\n` +
           `💵 Yakuniy summa: **${formatCurrency(updated.finalTotal, cur)}**\n` +
@@ -632,25 +666,39 @@ invoiceHandler.on('message:text', async (ctx, next) => {
     }
   }
 
+  const isInvoiceStep =
+    ctx.session.step === 'await_invoice_discount' ||
+    ctx.session.step === 'await_invoice_manual_total' ||
+    ctx.session.step === 'await_new_supplier_name_inv' ||
+    Boolean(ctx.session.step?.startsWith('i_'));
+
+  const activePending = isInvoiceStep
+    ? await prisma.pendingAction.findFirst({
+        where: {
+          userId: BigInt(ctx.from.id),
+          type: { in: ['INVOICE', 'INVOICE_NEW_SUPP'] },
+          status: { in: ['PENDING', 'AWAIT_DISCOUNT', 'AWAIT_MANUAL_TOTAL', 'AWAIT_NEW_SUPPLIER_NAME_INV'] },
+          createdAt: { gte: new Date(Date.now() - 3600000) },
+          ...(ctx.session.step?.startsWith('i_')
+            ? { id: ctx.session.step.slice(2) }
+            : ctx.session.tempData?.pendingId
+            ? { id: String(ctx.session.tempData.pendingId) }
+            : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+    : null;
+
+  // If user is on an unconfirmed `i_<id>` preview (did NOT click edit discount/total/new supplier)
+  // and types a standalone business command (e.g. "Sirok 500.000 naqd", "Kola narxi"), let voiceHandler run it!
   if (
-    ctx.session.step &&
-    ctx.session.step !== 'await_invoice_discount' &&
-    ctx.session.step !== 'await_invoice_manual_total' &&
-    ctx.session.step !== 'await_new_supplier_name_inv' &&
-    !ctx.session.step.startsWith('i_')
+    activePending &&
+    activePending.status === 'PENDING' &&
+    parseTextCommandLocally(rawText) !== null
   ) {
+    clearSession(ctx);
     return next();
   }
-
-  const activePending = await prisma.pendingAction.findFirst({
-    where: {
-      userId: BigInt(ctx.from.id),
-      type: { in: ['INVOICE', 'INVOICE_NEW_SUPP'] },
-      status: { in: ['PENDING', 'AWAIT_DISCOUNT', 'AWAIT_MANUAL_TOTAL', 'AWAIT_NEW_SUPPLIER_NAME_INV'] },
-      createdAt: { gte: new Date(Date.now() - 3600000) },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
 
   if (activePending) {
     const pData = activePending.data as any;
@@ -703,6 +751,9 @@ invoiceHandler.on('message:text', async (ctx, next) => {
 
         invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = rawTotal;
         invoiceData.discountAmount = invoiceData.discount = discountAmount;
+        invoiceData.discountPercent =
+          rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
+        invoiceData.discountLabel = null;
         invoiceData.finalTotal = invoiceData.netTotal = invoiceData.printedFinalTotal = finalTotal;
 
         await Promise.all([
@@ -713,7 +764,8 @@ invoiceHandler.on('message:text', async (ctx, next) => {
         const { editableText } = buildEditableInvoiceText(invoiceData);
         const txt = buildPendingPreviewMessage(invoiceData, editableText);
         await updatePreviewMessage(txt, finalTotal);
-        clearSession(ctx);
+        ctx.session.step = `i_${pendingId}`;
+        ctx.session.tempData = null;
         return;
       }
     }
@@ -730,6 +782,11 @@ invoiceHandler.on('message:text', async (ctx, next) => {
         const math = calculateDiscountedTotal(rawTotal, rawText);
         invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
         invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
+        invoiceData.discountPercent = math.isPercent
+          ? Number(math.percent || 0)
+          : math.rawTotal > 0
+          ? Number(((math.discountAmount / math.rawTotal) * 100).toFixed(2))
+          : 0;
         invoiceData.finalTotal = invoiceData.netTotal = invoiceData.printedFinalTotal = math.finalTotal;
         invoiceData.discountLabel = rawText;
 
@@ -741,7 +798,8 @@ invoiceHandler.on('message:text', async (ctx, next) => {
         const { editableText } = buildEditableInvoiceText(invoiceData);
         const txt = buildPendingPreviewMessage(invoiceData, editableText);
         await updatePreviewMessage(txt, math.finalTotal);
-        clearSession(ctx);
+        ctx.session.step = `i_${pendingId}`;
+        ctx.session.tempData = null;
         return;
       }
 
@@ -793,7 +851,6 @@ const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
       .catch(() => {});
     return null;
   }
-  await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
   const pData = pendingAction.data as any;
   const invoiceData = pData.data;
   const rawTotal = Number(invoiceData.rawTotal ?? invoiceData.grossTotal ?? invoiceData.total_amount ?? 0);
@@ -806,6 +863,7 @@ const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
   });
   const currency: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
   return {
+    pendingId,
     ownerId: String(pData.ownerId || ctx.from?.id || ''),
     pData,
     invoiceData,
@@ -835,14 +893,19 @@ invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
   const { editableText } = buildEditableInvoiceText(invoiceData);
   const text = buildPendingPreviewMessage(invoiceData, editableText);
   const kb = getInvoiceConfirmationKeyboard(actionId, editableText, invoiceData.currency || 'UZS');
-  await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+  if (ctx.callbackQuery.message && ctx.chat?.id) {
+    await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, text, {
+      parse_mode: 'Markdown',
+      reply_markup: kb,
+    }).catch(() => {});
+  }
   await ctx.answerCallbackQuery({ text: "✅ Qayta kiritishga ruxsat berildi. To'lov turini tanlang." });
 });
 
 invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
-  const { ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+  const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
 
   try {
     const result = await SupplierService.createInvoiceWithItems({
@@ -868,6 +931,9 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
       rawImageUrl: pData.imageUrl || null,
     });
 
+    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    clearSession(ctx);
+
     if (result.isDuplicate && result.warningText) {
       await ctx.editMessageText(result.warningText, { reply_markup: undefined });
       return;
@@ -876,27 +942,30 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
     const finalDebt =
       currency === 'USD' ? Number(result.supplier.debtUsd) : Number(result.supplier.debtUzs);
 
+    const savedMsg =
+      `✅ **Nakladnoy (📝 Nasiyaga) muvaffaqiyatli saqlandi!**\n\n` +
+      `🏢 Ta'minotchi: **${sanitizeMdV1(result.supplier.name)}**\n` +
+      `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
+      (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
+      `💰 Skidkadan keyingi yakuniy summa (Itogo): **+${formatCurrency(finalPayable, currency)}**\n` +
+      `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formatCurrency(finalDebt, currency)}**`;
+
+    const savedKb = getSavedInvoiceCardKeyboard(
+      result.invoice.id,
+      result.supplier.id,
+      pData.photoFileId,
+      result.transaction?.id
+    );
+
     await Promise.all([
-      ctx.editMessageText(
-        `✅ **Nakladnoy (📝 Nasiyaga) muvaffaqiyatli saqlandi!**\n\n` +
-          `🏢 Ta'minotchi: **${result.supplier.name}**\n` +
-          `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
-          (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
-          `💰 Skidkadan keyingi yakuniy summa (Itogo): **+${formatCurrency(finalPayable, currency)}**\n` +
-          `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formatCurrency(finalDebt, currency)}**`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(
-            result.invoice.id,
-            result.supplier.id,
-            pData.photoFileId,
-            result.transaction?.id
-          ),
-        }
-      ),
+      ctx.callbackQuery.message && ctx.chat?.id
+        ? safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, savedMsg, {
+            parse_mode: 'Markdown',
+            reply_markup: savedKb,
+          })
+        : safeReply(ctx, savedMsg, { parse_mode: 'Markdown', reply_markup: savedKb }),
       safeDelete(ctx, ctx.chat?.id, pData.userPhotoMsgId),
     ]);
-    ctx.session.step = undefined;
   } catch (error) {
     logger.error(error, 'Transaction error saving invoice');
     await ctx.answerCallbackQuery({ text: "Xatolik yuz berdi. Qayta urinib ko'ring.", show_alert: true });
@@ -906,7 +975,7 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
 invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
-  const { ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+  const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
 
   try {
     const result = await SupplierService.createInvoiceWithItems({
@@ -932,32 +1001,38 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
       rawImageUrl: pData.imageUrl || null,
     });
 
+    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    clearSession(ctx);
+
     if (result.isDuplicate && result.warningText) {
       await ctx.editMessageText(result.warningText, { reply_markup: undefined });
       return;
     }
 
+    const savedMsg =
+      `✅ **Nakladnoy (💵 Naqdga) muvaffaqiyatli saqlandi!**\n\n` +
+      `🏢 Ta'minotchi: **${sanitizeMdV1(result.supplier.name)}**\n` +
+      `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
+      (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
+      `💵 Naqd to'langan summa (Itogo): **${formatCurrency(finalPayable, currency)}**\n` +
+      `📊 Qarzga yozilmadi (0). Bugungi Z-Otchyot naqd xaridlariga qo'shildi.`;
+
+    const savedKb = getSavedInvoiceCardKeyboard(
+      result.invoice.id,
+      result.supplier.id,
+      pData.photoFileId,
+      result.transaction?.id
+    );
+
     await Promise.all([
-      ctx.editMessageText(
-        `✅ **Nakladnoy (💵 Naqdga) muvaffaqiyatli saqlandi!**\n\n` +
-          `🏢 Ta'minotchi: **${result.supplier.name}**\n` +
-          `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
-          (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
-          `💵 Naqd to'langan summa (Itogo): **${formatCurrency(finalPayable, currency)}**\n` +
-          `📊 Qarzga yozilmadi (0). Bugungi Z-Otchyot naqd xaridlariga qo'shildi.`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(
-            result.invoice.id,
-            result.supplier.id,
-            pData.photoFileId,
-            result.transaction?.id
-          ),
-        }
-      ),
+      ctx.callbackQuery.message && ctx.chat?.id
+        ? safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, savedMsg, {
+            parse_mode: 'Markdown',
+            reply_markup: savedKb,
+          })
+        : safeReply(ctx, savedMsg, { parse_mode: 'Markdown', reply_markup: savedKb }),
       safeDelete(ctx, ctx.chat?.id, pData.userPhotoMsgId),
     ]);
-    ctx.session.step = undefined;
   } catch (error) {
     logger.error(error, 'Transaction error saving cash invoice');
     await ctx.answerCallbackQuery({ text: "Xatolik yuz berdi. Qayta urinib ko'ring.", show_alert: true });
@@ -973,7 +1048,7 @@ invoiceHandler.callbackQuery(/^cancel_(?:i|idis)_(.+)$/, async (ctx) => {
       prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {}),
     ]);
   }
-  ctx.session.step = undefined;
+  clearSession(ctx);
   await ctx.editMessageText('❌ Nakladnoy bekor qilindi.', { reply_markup: undefined });
 });
 
@@ -1026,17 +1101,20 @@ invoiceHandler.callbackQuery(/^inew_(.+)$/, async (ctx) => {
   );
 });
 
-invoiceHandler.callbackQuery(/^sup_fuzzy_use:([^:]+):inv_(.+)$/, async (ctx) => {
+invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):inv_(.+))$/, async (ctx) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
-  const [, supplierId, pendingId] = ctx.match;
+  const pendingId = ctx.match[1] || ctx.match[3];
   const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
-  const supplier = await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } });
+  const pData = pendingAction.data as any;
+  const supplierId = ctx.match[2] || pData.suggestedSupplierId || pData.candidateIds?.[0];
+  const supplier = supplierId
+    ? await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } })
+    : null;
   if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
 
-  const pData = pendingAction.data as any;
   pData.data.exactSupplierId = supplier.id;
   pData.data.supplierName = supplier.name;
 
@@ -1054,7 +1132,7 @@ invoiceHandler.callbackQuery(/^sup_fuzzy_use:([^:]+):inv_(.+)$/, async (ctx) => 
   );
 });
 
-invoiceHandler.callbackQuery(/^sup_fuzzy_new:inv_(.+)$/, async (ctx) => {
+invoiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):inv_(.+)$/, async (ctx) => {
   const pendingId = ctx.match[1];
   const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
@@ -1077,9 +1155,15 @@ invoiceHandler.callbackQuery(/^sup_fuzzy_new:inv_(.+)$/, async (ctx) => {
   );
 });
 
-invoiceHandler.callbackQuery(/^sup_fuzzy_cancel:inv_(.+)$/, async (ctx) => {
+invoiceHandler.callbackQuery(/^(?:sf_no|sup_fuzzy_cancel):inv_(.+)$/, async (ctx) => {
   const pendingId = ctx.match[1];
-  await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  if (pendingAction) {
+    await Promise.all([
+      safeDelete(ctx, ctx.chat?.id, (pendingAction.data as any)?.userPhotoMsgId),
+      prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {}),
+    ]);
+  }
   clearSession(ctx);
   await ctx.editMessageText('❌ Nakladnoy bekor qilindi.', { reply_markup: undefined });
 });

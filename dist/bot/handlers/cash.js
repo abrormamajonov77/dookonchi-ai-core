@@ -10,6 +10,7 @@ exports.cashHandler = new grammy_1.Composer();
 exports.cashHandler.hears('💵 Naqd', async (ctx) => {
     if (!ctx.from)
         return;
+    (0, telegram_1.clearSession)(ctx);
     const ownerId = String(ctx.from.id);
     const now = new Date();
     const [recentTx, monthStats, dayStats] = await Promise.all([
@@ -26,10 +27,10 @@ exports.cashHandler.hears('💵 Naqd', async (ctx) => {
     const txLines = recentTx.length
         ? `📝 **Oxirgi 10 ta amaliyot:**\n` +
             recentTx
-                .map((tx) => `🔹 ${(0, formatters_1.formatDate)(tx.createdAt)} | **${tx.partyName}** - ${(0, formatters_1.formatMoney)(tx.amount)}${tx.items ? `\n   ✏️ ${tx.items}` : ''}`)
+                .map((tx) => `🔹 ${(0, formatters_1.formatDate)(tx.createdAt)} | **${(0, telegram_1.sanitizeMdV1)(tx.partyName)}** - ${(0, formatters_1.formatMoney)(tx.amount)}${tx.items ? `\n   ✏️ ${(0, telegram_1.sanitizeMdV1)(tx.items).slice(0, 80)}` : ''}`)
                 .join('\n')
         : "Amaliyotlar yo'q.";
-    await ctx.reply(`💵 **Naqd Savdo va Xaridlar Arxiv:**\n\n📊 **Bugungi aylanma:** ${(0, formatters_1.formatMoney)(dayStats._sum.amount || 0)}\n📊 **Shu oydagi aylanma:** ${(0, formatters_1.formatMoney)(monthStats._sum.amount || 0)}\n\n${txLines}`, { parse_mode: 'Markdown', reply_markup: new grammy_1.InlineKeyboard().text('➕ Yangi naqd xarid', 'cash:new') });
+    await (0, telegram_1.safeReply)(ctx, `💵 **Naqd Savdo va Xaridlar Arxiv:**\n\n📊 **Bugungi aylanma:** ${(0, formatters_1.formatMoney)(dayStats._sum.amount || 0)}\n📊 **Shu oydagi aylanma:** ${(0, formatters_1.formatMoney)(monthStats._sum.amount || 0)}\n\n${txLines}`, { parse_mode: 'Markdown', reply_markup: new grammy_1.InlineKeyboard().text('➕ Yangi naqd xarid', 'cash:new') });
 });
 exports.cashHandler.callbackQuery('cash:new', async (ctx) => {
     ctx.session.step = 'ADD_CASH_TEMPLATE';

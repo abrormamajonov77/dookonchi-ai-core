@@ -14,7 +14,7 @@ const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
 
 export const DEFAULT_GENERATION_CONFIG = {
   temperature: 0.1,
-  maxOutputTokens: 2048,
+  maxOutputTokens: 4096,
 } as const;
 
 export const InvoiceItemSchema = z
@@ -137,9 +137,9 @@ function getCandidateModels(explicitModels?: string[]): string[] {
       : [
           'gemini-3-flash-preview',
           'gemini-flash-lite-latest',
-          'gemini-3.8-flash',
+          'gemini-3.1-flash-lite-preview',
           'gemini-flash-latest',
-          'gemini-3.7-flash',
+          'gemini-3.8-flash',
         ];
   return Array.from(new Set([...(envModel ? [envModel] : []), ...base]));
 }

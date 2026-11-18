@@ -9,6 +9,7 @@ const supplier_service_1 = require("../../services/supplier.service");
 const cache_service_1 = require("../../services/cache.service");
 const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
+const menu_1 = require("../keyboards/menu");
 const transliterate_1 = require("../../utils/transliterate");
 exports.suppliersHandler = new grammy_1.Composer();
 async function sendSuppliersPage(ctx, page, isEdit = false) {
@@ -65,8 +66,8 @@ async function sendSupplierDetails(ctx, supplierId, filter = 'all', isEdit = fal
     const filterText = filter === 'today' ? 'Bugun' : filter === 'month' ? 'Shu oy' : 'Barcha vaqt';
     const incText = incUsd > 0 ? `${(0, formatters_1.formatSom)(incUzs)} | 💵 ${(0, formatters_1.formatUsd)(incUsd)}` : (0, formatters_1.formatSom)(incUzs);
     const payText = payUsd > 0 ? `${(0, formatters_1.formatSom)(payUzs)} | 💵 ${(0, formatters_1.formatUsd)(payUsd)}` : (0, formatters_1.formatSom)(payUzs);
-    const text = `🏢 **Ta'minotchi:** ${(0, transliterate_1.toLatinUz)(supplier.name)}\n` +
-        `📞 **Tel:** ${supplier.phone || "Yo'q"}\n` +
+    const text = `🏢 **Ta'minotchi:** ${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplier.name))}\n` +
+        `📞 **Tel:** ${(0, telegram_1.sanitizeMdV1)(supplier.phone || "Yo'q")}\n` +
         `${uzsLine}\n` +
         `${usdLine}\n\n` +
         `📊 **Statistika (${filterText}):**\n` +
@@ -95,6 +96,7 @@ async function sendSupplierDetails(ctx, supplierId, filter = 'all', isEdit = fal
     await (0, telegram_1.replyOrEdit)(ctx, text, kb, isEdit);
 }
 exports.suppliersHandler.hears("📦 Ta'minotchilar", async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     await sendSuppliersPage(ctx, 1);
 });
 exports.suppliersHandler.callbackQuery(/^sup:p:(\d+)$/, (ctx) => sendSuppliersPage(ctx, parseInt(ctx.match[1], 10), true));
@@ -114,12 +116,51 @@ exports.suppliersHandler.callbackQuery(/^edit_supplier_name:(.+)$/, async (ctx) 
     ctx.session.step = 'AWAITING_SUPPLIER_NEW_NAME';
     ctx.session.tempData = { supplierId: supplier.id, oldName: supplier.name };
     const kb = new grammy_1.InlineKeyboard().text('❌ Bekor qilish', `cancel_edit_supplier_name:${supplier.id}`);
-    await ctx.reply(`✏️ **"${(0, transliterate_1.toLatinUz)(supplier.name)}"** ta'minotchisining yangi nomini yozib yuboring:`, { parse_mode: 'Markdown', reply_markup: kb });
+    await (0, telegram_1.safeReply)(ctx, `✏️ **"${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplier.name))}"** ta'minotchisining yangi nomini yozib yuboring:`, { parse_mode: 'Markdown', reply_markup: kb });
 });
 exports.suppliersHandler.callbackQuery(/^cancel_edit_supplier_name:(.+)$/, async (ctx) => {
     const supplierId = ctx.match[1];
     (0, telegram_1.clearSession)(ctx);
     await sendSupplierDetails(ctx, supplierId, 'all', true);
+});
+async function executeSupplierMerge(ctx, sourceId, targetId, ownerId) {
+    const merged = await supplier_service_1.SupplierService.mergeSuppliers(sourceId, targetId, ownerId);
+    (0, telegram_1.clearSession)(ctx);
+    await ctx.answerCallbackQuery({ text: "✅ Ta'minotchilar muvaffaqiyatli birlashtirildi!" });
+    if (ctx.callbackQuery?.message && ctx.chat?.id) {
+        await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `✅ Ta'minotchilar **"${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(merged.name))}"** hisobiga muvaffaqiyatli birlashtirildi!\n\n` +
+            `💰 Jami qarz (UZS): **${(0, formatters_1.formatSom)(merged.debtUzs)}**\n` +
+            `💵 Jami qarz (USD/USDT): **${(0, formatters_1.formatUsd)(merged.debtUsd)}**`, { parse_mode: 'Markdown' }).catch(() => { });
+    }
+    await sendSupplierDetails(ctx, merged.id, 'all', false);
+}
+exports.suppliersHandler.callbackQuery(/^sup_merge:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const pendingId = ctx.match[1];
+    const pending = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    if (!pending || pending.type !== 'SUPPLIER_MERGE') {
+        return ctx.editMessageText("⚠️ Ushbu so'rov muddati tugagan.", { reply_markup: undefined });
+    }
+    const { sourceId, targetId } = pending.data || {};
+    try {
+        await executeSupplierMerge(ctx, sourceId, targetId, ownerId);
+        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+    }
+    catch (err) {
+        await ctx.answerCallbackQuery({ text: err?.message || 'Xatolik yuz berdi.', show_alert: true });
+    }
+});
+exports.suppliersHandler.callbackQuery(/^cancel_merge:(.+)$/, async (ctx) => {
+    const pendingId = ctx.match[1];
+    const pending = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const sourceId = pending?.data?.sourceId;
+    await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+    (0, telegram_1.clearSession)(ctx);
+    await ctx.editMessageText('❌ Birlashtirish bekor qilindi.');
+    if (sourceId)
+        await sendSupplierDetails(ctx, sourceId, 'all', false);
 });
 exports.suppliersHandler.callbackQuery(/^confirm_merge_supplier:([^:]+):([^:]+)$/, async (ctx) => {
     if (!ctx.from)
@@ -127,13 +168,7 @@ exports.suppliersHandler.callbackQuery(/^confirm_merge_supplier:([^:]+):([^:]+)$
     const ownerId = String(ctx.from.id);
     const [, sourceId, targetId] = ctx.match;
     try {
-        const merged = await supplier_service_1.SupplierService.mergeSuppliers(sourceId, targetId, ownerId);
-        (0, telegram_1.clearSession)(ctx);
-        await ctx.answerCallbackQuery({ text: "✅ Ta'minotchilar muvaffaqiyatli birlashtirildi!" });
-        await ctx.editMessageText(`✅ Ta'minotchilar **"${(0, transliterate_1.toLatinUz)(merged.name)}"** hisobiga muvaffaqiyatli birlashtirildi!\n\n` +
-            `💰 Jami qarz (UZS): **${(0, formatters_1.formatSom)(merged.debtUzs)}**\n` +
-            `💵 Jami qarz (USD/USDT): **${(0, formatters_1.formatUsd)(merged.debtUsd)}**`, { parse_mode: 'Markdown' });
-        await sendSupplierDetails(ctx, merged.id, 'all', false);
+        await executeSupplierMerge(ctx, sourceId, targetId, ownerId);
     }
     catch (err) {
         await ctx.answerCallbackQuery({ text: err?.message || 'Xatolik yuz berdi.', show_alert: true });
@@ -191,9 +226,11 @@ exports.suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
         select: { id: true },
     });
     const checkNo = allIncoming.findIndex((i) => i.id === tx.id) + 1;
-    const receipt = tx.formattedReceipt
+    const receipt = (tx.formattedReceipt
         ? (0, transliterate_1.toLatinUz)(tx.formattedReceipt).replace('🧾 ELEKTRON NAKLADNOY', `🧾 NAKLADNOY CHEK #${checkNo}`)
-        : `🧾 NAKLADNOY CHEK #${checkNo}\n🏢 Ta'minotchi: ${(0, transliterate_1.toLatinUz)(tx.supplier.name)}\n📅 Sana: ${(0, formatters_1.formatDate)(tx.date)}\n💰 Summa: ${(0, formatters_1.formatCurrency)(tx.amount, tx.currency)}\n${tx.description ? `\nIzoh: ${(0, transliterate_1.toLatinUz)(tx.description)}` : ''}`;
+        : `🧾 NAKLADNOY CHEK #${checkNo}\n🏢 Ta'minotchi: ${(0, transliterate_1.toLatinUz)(tx.supplier.name)}\n📅 Sana: ${(0, formatters_1.formatDate)(tx.date)}\n💰 Summa: ${(0, formatters_1.formatCurrency)(tx.amount, tx.currency)}\n${tx.description ? `\nIzoh: ${(0, transliterate_1.toLatinUz)(tx.description)}` : ''}`)
+        .replace(/```/g, "'''")
+        .slice(0, 3500);
     const targetInvoiceId = tx.invoiceId || tx.receiptData?.invoiceId || tx.id;
     const kb = (0, inline_1.getSavedInvoiceCardKeyboard)(targetInvoiceId, tx.supplierId, tx.photoFileId, tx.id);
     await (0, telegram_1.replyOrEdit)(ctx, `\`\`\`\n${receipt}\n\`\`\``, kb, true);
@@ -235,7 +272,7 @@ const startManualSupplierTx = async (ctx, supplierId, step, action, prompt) => {
     const cleanName = (0, transliterate_1.toLatinUz)(supplier.name);
     ctx.session.step = step;
     ctx.session.tempData = { supplierId, supplierName: cleanName, action, currency: 'UZS' };
-    await ctx.reply(prompt(cleanName), {
+    await (0, telegram_1.safeReply)(ctx, prompt((0, telegram_1.sanitizeMdV1)(cleanName)), {
         parse_mode: 'Markdown',
         reply_markup: getCurrencySelectKeyboard('UZS'),
     });
@@ -259,42 +296,49 @@ exports.suppliersHandler.callbackQuery(/^sup:pay:(.+)$/, (ctx) => startManualSup
 exports.suppliersHandler.callbackQuery(/^sup:goods:(.+)$/, (ctx) => startManualSupplierTx(ctx, ctx.match[1], 'SUPPLIER_GOODS', 'INCOMING_GOODS', (n) => `📦 **${n}** dan qabul qilingan yuk summasini kiriting:\n` +
     `• So'mda: masalan \`500000\` yoki \`500.000\`\n` +
     `• Dollarda: masalan \`$102.17\`, \`102,17 USDT\` yoki \`102 dollar 17 sent\``));
-// MODUL 5.2: Handle 1-click payment source selection from manual supplier payment flow
-exports.suppliersHandler.callbackQuery(/^pay_source:(TODAY_CASH|PREVIOUS_SAFE):spay_(.+)$/, async (ctx) => {
+// MODUL 5.2: Handle 1-click payment source selection from manual supplier payment flow (`ps:T/S:spay_` + legacy)
+exports.suppliersHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE)|ps:(T|S)):spay_(.+)$/, async (ctx) => {
     if (!ctx.from)
         return;
     const ownerId = String(ctx.from.id);
-    const paymentSource = ctx.match[1];
-    const pendingId = ctx.match[2];
+    const paymentSource = ctx.match[1] === 'PREVIOUS_SAFE' || ctx.match[2] === 'S' ? 'PREVIOUS_SAFE' : 'TODAY_CASH';
+    const pendingId = ctx.match[3];
     const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
     if (!pendingAction) {
         return ctx.editMessageText("⚠️ Ushbu so'rov muddati tugagan.", { reply_markup: undefined });
     }
     const { supplierId, supplierName, amount, currency } = pendingAction.data;
-    await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
-    (0, telegram_1.clearSession)(ctx);
-    const res = await supplier_service_1.SupplierService.recordSupplierPayment({
-        ownerId,
-        supplierId,
-        supplierName,
-        amount: Number(amount),
-        currency,
-        paymentSource,
-    });
-    const isUsd = currency === 'USD';
-    const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
-    const formattedAmt = (0, formatters_1.formatCurrency)(amount, currency);
-    const formattedPostDebt = (0, formatters_1.formatCurrency)(currentDebt, currency);
-    const sourceBadge = paymentSource === 'PREVIOUS_SAFE'
-        ? "🏦 Kechagi puldan / Seyfdan (Z-otchyot savdosiga qo'shilmadi)"
-        : "💵 Bugungi kassadan (Bugungi Z-otchyotga qo'shildi)";
-    await ctx.editMessageText(`✅ **${(0, transliterate_1.toLatinUz)(supplierName)}** hisobiga **${formattedAmt}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
-        `🗂 Manba: ${sourceBadge}\n` +
-        `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`, {
-        parse_mode: 'Markdown',
-        reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
-    });
-    await sendSupplierDetails(ctx, supplierId, 'all', false);
+    try {
+        const res = await supplier_service_1.SupplierService.recordSupplierPayment({
+            ownerId,
+            supplierId,
+            supplierName,
+            amount: Number(amount),
+            currency,
+            paymentSource,
+        });
+        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+        (0, telegram_1.clearSession)(ctx);
+        const isUsd = currency === 'USD';
+        const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
+        const formattedAmt = (0, formatters_1.formatCurrency)(amount, currency);
+        const formattedPostDebt = (0, formatters_1.formatCurrency)(currentDebt, currency);
+        const sourceBadge = paymentSource === 'PREVIOUS_SAFE'
+            ? "🏦 Kechagi puldan / Seyfdan (Z-otchyot savdosiga qo'shilmadi)"
+            : "💵 Bugungi kassadan (Bugungi Z-otchyotga qo'shildi)";
+        if (ctx.callbackQuery.message && ctx.chat?.id) {
+            await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `✅ **${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplierName))}** hisobiga **${formattedAmt}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
+                `🗂 Manba: ${sourceBadge}\n` +
+                `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`, {
+                parse_mode: 'Markdown',
+                reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
+            });
+        }
+        await sendSupplierDetails(ctx, supplierId, 'all', false);
+    }
+    catch (err) {
+        await ctx.answerCallbackQuery({ text: "To'lovni saqlashda xatolik bo'ldi.", show_alert: true });
+    }
 });
 exports.suppliersHandler.callbackQuery(/^cancel_spay_(.+)$/, async (ctx) => {
     await prisma_1.prisma.pendingAction.delete({ where: { id: ctx.match[1] } }).catch(() => { });
@@ -311,15 +355,26 @@ exports.suppliersHandler.callbackQuery(/^sup:undo:(.+)$/, async (ctx) => {
         return ctx.answerCallbackQuery('Bu amaliyot topilmadi yoki allaqachon bekor qilingan.');
     const isUsd = transaction.currency === 'USD';
     const isIncoming = transaction.type === 'INCOMING_GOODS';
-    await prisma_1.prisma.$transaction([
-        prisma_1.prisma.supplier.update({
+    await prisma_1.prisma.$transaction(async (tx) => {
+        await tx.supplier.update({
             where: { id: transaction.supplierId },
             data: isUsd
                 ? { debtUsd: isIncoming ? { decrement: transaction.amount } : { increment: transaction.amount } }
                 : { debtUzs: isIncoming ? { decrement: transaction.amount } : { increment: transaction.amount } },
-        }),
-        prisma_1.prisma.supplierTransaction.delete({ where: { id: txId } }),
-    ]);
+        });
+        if (transaction.type === 'PAYMENT') {
+            await tx.supplierPayment.deleteMany({
+                where: {
+                    ownerId,
+                    supplierId: transaction.supplierId,
+                    amount: transaction.amount,
+                    currency: transaction.currency,
+                    createdAt: transaction.date,
+                },
+            });
+        }
+        await tx.supplierTransaction.delete({ where: { id: txId } });
+    });
     cache_service_1.cacheService.invalidateSupplierNames(ownerId);
     await ctx.answerCallbackQuery('Amaliyot bekor qilindi va balans tiklandi!');
     await sendSupplierDetails(ctx, transaction.supplierId, 'all', false);
@@ -329,9 +384,12 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         return next();
     const ownerId = String(ctx.from.id);
     if (ctx.session.step === 'AWAITING_SUPPLIER_NEW_NAME') {
-        const rawText = (0, transliterate_1.toLatinUz)(ctx.message.text.trim());
-        if (rawText.startsWith('/'))
+        const rawTrimmed = ctx.message.text.trim();
+        if (rawTrimmed.startsWith('/') || (0, menu_1.isMenuButton)(rawTrimmed)) {
+            (0, telegram_1.clearSession)(ctx);
             return next();
+        }
+        const rawText = (0, transliterate_1.toLatinUz)(rawTrimmed);
         const { supplierId } = ctx.session.tempData || {};
         if (!supplierId) {
             (0, telegram_1.clearSession)(ctx);
@@ -341,13 +399,24 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             const checkResult = await supplier_service_1.SupplierService.checkOrRenameSupplier(supplierId, rawText, ownerId);
             if (checkResult.status === 'MERGE_REQUIRED') {
                 (0, telegram_1.clearSession)(ctx);
+                const mergePending = await prisma_1.prisma.pendingAction.create({
+                    data: {
+                        userId: BigInt(ctx.from.id),
+                        type: 'SUPPLIER_MERGE',
+                        data: {
+                            ownerId,
+                            sourceId: checkResult.sourceSupplier.id,
+                            targetId: checkResult.targetSupplier.id,
+                        },
+                    },
+                });
                 const kb = new grammy_1.InlineKeyboard()
-                    .text('✅ Ha, birlashtir', `confirm_merge_supplier:${checkResult.sourceSupplier.id}:${checkResult.targetSupplier.id}`)
-                    .text("❌ Yo'q", `cancel_merge_supplier:${checkResult.sourceSupplier.id}`);
+                    .text('✅ Ha, birlashtir', `sup_merge:${mergePending.id}`)
+                    .text("❌ Yo'q", `cancel_merge:${mergePending.id}`);
                 return ctx.reply(`⚠️ '${(0, transliterate_1.toLatinUz)(checkResult.targetSupplier.name)}' nomli ta'minotchi bazada bor. Ikkalasini birlashtirib, barcha nakladnoy va qarzlarni (UZS va USD) bitta hisobga o'tkazaymi?`, { reply_markup: kb });
             }
             (0, telegram_1.clearSession)(ctx);
-            await ctx.reply(`✅ Ta'minotchi nomi **"${(0, transliterate_1.toLatinUz)(checkResult.supplier.name)}"** ga o'zgartirildi! Barcha nakladnoy va to'lovlar tarixi to'liq saqlandi.`, { parse_mode: 'Markdown' });
+            await (0, telegram_1.safeReply)(ctx, `✅ Ta'minotchi nomi **"${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(checkResult.supplier.name))}"** ga o'zgartirildi! Barcha nakladnoy va to'lovlar tarixi to'liq saqlandi.`, { parse_mode: 'Markdown' });
             return sendSupplierDetails(ctx, checkResult.supplier.id, 'all', false);
         }
         catch (err) {
@@ -356,8 +425,10 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
     }
     if (ctx.session.step === 'SUPPLIER_ADD') {
         const rawText = ctx.message.text.trim();
-        if (rawText.startsWith('/'))
+        if (rawText.startsWith('/') || (0, menu_1.isMenuButton)(rawText)) {
+            (0, telegram_1.clearSession)(ctx);
             return next();
+        }
         const phone = rawText.match(/(\+?998\d{9}|\d{9})/)?.[0] || null;
         const name = (0, transliterate_1.toLatinUz)(supplier_service_1.SupplierService.cleanSupplierName(rawText.replace(/(\+?998\d{9}|\d{9})/, '').trim()));
         if (!name || name.length < 2)
@@ -384,7 +455,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             data: { ownerId, name, phone, debtUzs: 0, debtUsd: 0, isActive: true },
         });
         cache_service_1.cacheService.invalidateSupplierNames(ownerId);
-        await ctx.reply(`✅ Yangi ta'minotchi muvaffaqiyatli qo'shildi: *${newSupplier.name}*`, {
+        await (0, telegram_1.safeReply)(ctx, `✅ Yangi ta'minotchi muvaffaqiyatli qo'shildi: *${(0, telegram_1.sanitizeMdV1)(newSupplier.name)}*`, {
             parse_mode: 'Markdown',
         });
         return sendSupplierDetails(ctx, newSupplier.id, 'all', false);
@@ -392,8 +463,15 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
     if (ctx.session.step !== 'SUPPLIER_PAYMENT' && ctx.session.step !== 'SUPPLIER_GOODS')
         return next();
     const rawText = ctx.message.text.trim();
-    if (rawText.startsWith('/'))
+    if (rawText.startsWith('/') || (0, menu_1.isMenuButton)(rawText)) {
+        (0, telegram_1.clearSession)(ctx);
         return next();
+    }
+    const { supplierId, supplierName, action } = ctx.session.tempData || {};
+    if (!supplierId || !supplierName) {
+        (0, telegram_1.clearSession)(ctx);
+        return next();
+    }
     const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawText);
     const amount = parsed.amount;
     const currency = parsed.currency === 'USD' ? 'USD' : ctx.session.tempData?.currency === 'USD' ? 'USD' : 'UZS';
@@ -401,9 +479,9 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         return ctx.reply("Iltimos, to'g'ri summa kiriting (masalan: 300000, 300.000 yoki $50.17). To'xtatish uchun /start ni bosing.");
     if (amount > 10_000_000_000)
         return ctx.reply("❌ Kiritilgan summa o'ta katta. Iltimos tekshirib qaytadan kiriting (maks: 10 mlrd). To'xtatish uchun /start.");
-    const { supplierId, supplierName, action } = ctx.session.tempData;
     const isPay = action === 'PAYMENT';
     const isUsd = currency === 'USD';
+    const safeSuppName = (0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplierName));
     // MODUL 5.2: For supplier payment in UZS, ask whether it came from TODAY_CASH or PREVIOUS_SAFE (unless specified in text)
     if (isPay) {
         const isPrevSafeText = /\b(kecha(?:gi)?|seyf(?:dan)?|seif(?:dan)?)\b/i.test(rawText);
@@ -416,12 +494,13 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
                     data: { ownerId, supplierId, supplierName: (0, transliterate_1.toLatinUz)(supplierName), amount, currency },
                 },
             });
-            (0, telegram_1.clearSession)(ctx);
-            return ctx.reply(`💸 **${(0, transliterate_1.toLatinUz)(supplierName)}** ga **${(0, formatters_1.formatCurrency)(amount, currency)}** to'lov.\n\n` +
+            await (0, telegram_1.safeReply)(ctx, `💸 **${safeSuppName}** ga **${(0, formatters_1.formatCurrency)(amount, currency)}** to'lov.\n\n` +
                 `👇 **Ushbu pul qaysi manbadan berildi?**`, {
                 parse_mode: 'Markdown',
                 reply_markup: (0, inline_1.getPaymentSourceConfirmationKeyboard)(`spay_${pendingAction.id}`),
             });
+            (0, telegram_1.clearSession)(ctx);
+            return;
         }
         const paymentSource = isPrevSafeText ? 'PREVIOUS_SAFE' : 'TODAY_CASH';
         const res = await supplier_service_1.SupplierService.recordSupplierPayment({
@@ -434,7 +513,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         });
         (0, telegram_1.clearSession)(ctx);
         const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
-        await ctx.reply(`✅ **${(0, transliterate_1.toLatinUz)(supplierName)}** hisobiga **${(0, formatters_1.formatCurrency)(amount, currency)}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
+        await (0, telegram_1.safeReply)(ctx, `✅ **${safeSuppName}** hisobiga **${(0, formatters_1.formatCurrency)(amount, currency)}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
             `📊 **Yakuniy qarz qoldig'i (${currency}):** **${(0, formatters_1.formatCurrency)(currentDebt, currency)}**`, {
             parse_mode: 'Markdown',
             reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
@@ -486,7 +565,7 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
     (0, telegram_1.clearSession)(ctx);
     const formattedAmt = (0, formatters_1.formatCurrency)(amount, currency);
     const formattedPostDebt = (0, formatters_1.formatCurrency)(currentDebt, currency);
-    await ctx.reply(`✅ **${(0, transliterate_1.toLatinUz)(supplierName)}** dan **${formattedAmt}** lik yuk qabul qilindi va ${currency} qarzga qo'shildi!\n📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`, {
+    await (0, telegram_1.safeReply)(ctx, `✅ **${safeSuppName}** dan **${formattedAmt}** lik yuk qabul qilindi va ${currency} qarzga qo'shildi!\n📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`, {
         parse_mode: 'Markdown',
         reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${createdTx.id}`),
     });

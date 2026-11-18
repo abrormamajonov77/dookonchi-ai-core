@@ -11,6 +11,7 @@ exports.expenseHandler = new grammy_1.Composer();
 exports.expenseHandler.hears('📉 Xarajatlar', async (ctx) => {
     if (!ctx.from)
         return;
+    (0, telegram_1.clearSession)(ctx);
     const ownerId = String(ctx.from.id);
     const now = new Date();
     const expenses = await prisma_1.prisma.expense.findMany({
@@ -26,9 +27,9 @@ exports.expenseHandler.hears('📉 Xarajatlar', async (ctx) => {
         byCategory[exp.category] = (byCategory[exp.category] || 0) + Number(exp.amount);
     }
     const lines = Object.entries(byCategory)
-        .map(([cat, sum]) => `🔹 ${cat}: ${(0, formatters_1.formatMoney)(sum)}`)
+        .map(([cat, sum]) => `🔹 ${(0, telegram_1.sanitizeMdV1)(cat)}: ${(0, formatters_1.formatMoney)(sum)}`)
         .join('\n');
-    await ctx.reply(`📉 **Shu oydagi xarajatlar:**\n\n${lines}\n\n**Jami: ${(0, formatters_1.formatMoney)(total)}**`, {
+    await (0, telegram_1.safeReply)(ctx, `📉 **Shu oydagi xarajatlar:**\n\n${lines}\n\n**Jami: ${(0, formatters_1.formatMoney)(total)}**`, {
         parse_mode: 'Markdown',
         reply_markup: kb,
     });

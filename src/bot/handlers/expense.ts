@@ -4,12 +4,13 @@ import { prisma } from '../../database/prisma';
 import { formatMoney } from '../../utils/formatters';
 import { AiService } from '../../services/ai.service';
 import { getTemplateConfirmKeyboard } from '../keyboards/inline';
-import { registerTemplateActions } from '../../utils/telegram';
+import { clearSession, registerTemplateActions, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 
 export const expenseHandler = new Composer<MyContext>();
 
 expenseHandler.hears('📉 Xarajatlar', async (ctx) => {
   if (!ctx.from) return;
+  clearSession(ctx);
   const ownerId = String(ctx.from.id);
   const now = new Date();
   const expenses = await prisma.expense.findMany({
@@ -25,9 +26,9 @@ expenseHandler.hears('📉 Xarajatlar', async (ctx) => {
     byCategory[exp.category] = (byCategory[exp.category] || 0) + Number(exp.amount);
   }
   const lines = Object.entries(byCategory)
-    .map(([cat, sum]) => `🔹 ${cat}: ${formatMoney(sum)}`)
+    .map(([cat, sum]) => `🔹 ${sanitizeMdV1(cat)}: ${formatMoney(sum)}`)
     .join('\n');
-  await ctx.reply(`📉 **Shu oydagi xarajatlar:**\n\n${lines}\n\n**Jami: ${formatMoney(total)}**`, {
+  await safeReply(ctx, `📉 **Shu oydagi xarajatlar:**\n\n${lines}\n\n**Jami: ${formatMoney(total)}**`, {
     parse_mode: 'Markdown',
     reply_markup: kb,
   });

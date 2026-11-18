@@ -3,13 +3,15 @@ import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
 import { formatSom, getTashkentDayRange, parseCurrencyAndAmount } from '../../utils/formatters';
 import { getConfirmationKeyboard } from '../keyboards/inline';
-import { clearSession } from '../../utils/telegram';
+import { clearSession, safeEditMessageText, safeReply } from '../../utils/telegram';
+import { isMenuButton } from '../keyboards/menu';
 import { ReportService } from '../../services/report.service';
 
 export const closingHandler = new Composer<MyContext>();
 
 closingHandler.hears('📊 Z-Hisobot (Kunlik)', async (ctx) => {
   if (!ctx.from) return;
+  clearSession(ctx);
   const ownerId = String(ctx.from.id);
   const { dateKey } = getTashkentDayRange();
   const existing = await prisma.dailyRegister.findUnique({
@@ -32,7 +34,10 @@ closingHandler.on('message:text', async (ctx, next) => {
   if (!ctx.session.step?.startsWith('Z_REPORT_') || !ctx.from) return next();
   const ownerId = String(ctx.from.id);
   const rawText = ctx.message.text.trim();
-  if (rawText.startsWith('/')) return next();
+  if (rawText.startsWith('/') || isMenuButton(rawText)) {
+    clearSession(ctx);
+    return next();
+  }
 
   const parsed = parseCurrencyAndAmount(rawText);
   const amount = rawText === '0' ? 0 : parsed.amount;

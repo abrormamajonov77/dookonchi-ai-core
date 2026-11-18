@@ -3,12 +3,13 @@ import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
 import { formatMoney, formatDate, getToday } from '../../utils/formatters';
 import { getTemplateConfirmKeyboard } from '../keyboards/inline';
-import { registerTemplateActions } from '../../utils/telegram';
+import { clearSession, registerTemplateActions, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 
 export const cashHandler = new Composer<MyContext>();
 
 cashHandler.hears('💵 Naqd', async (ctx) => {
   if (!ctx.from) return;
+  clearSession(ctx);
   const ownerId = String(ctx.from.id);
   const now = new Date();
   const [recentTx, monthStats, dayStats] = await Promise.all([
@@ -28,12 +29,13 @@ cashHandler.hears('💵 Naqd', async (ctx) => {
       recentTx
         .map(
           (tx) =>
-            `🔹 ${formatDate(tx.createdAt)} | **${tx.partyName}** - ${formatMoney(tx.amount)}${tx.items ? `\n   ✏️ ${tx.items}` : ''}`
+            `🔹 ${formatDate(tx.createdAt)} | **${sanitizeMdV1(tx.partyName)}** - ${formatMoney(tx.amount)}${tx.items ? `\n   ✏️ ${sanitizeMdV1(tx.items).slice(0, 80)}` : ''}`
         )
         .join('\n')
     : "Amaliyotlar yo'q.";
 
-  await ctx.reply(
+  await safeReply(
+    ctx,
     `💵 **Naqd Savdo va Xaridlar Arxiv:**\n\n📊 **Bugungi aylanma:** ${formatMoney(dayStats._sum.amount || 0)}\n📊 **Shu oydagi aylanma:** ${formatMoney(monthStats._sum.amount || 0)}\n\n${txLines}`,
     { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('➕ Yangi naqd xarid', 'cash:new') }
   );

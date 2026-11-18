@@ -3,8 +3,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.searchHandler = void 0;
 const grammy_1 = require("grammy");
 const search_service_1 = require("../../services/search.service");
+const menu_1 = require("../keyboards/menu");
+const telegram_1 = require("../../utils/telegram");
 exports.searchHandler = new grammy_1.Composer();
 exports.searchHandler.hears(['📝 Qidiruv', '🔍 Qidiruv'], async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     ctx.session.step = 'SEARCH';
     await ctx.reply("🔍 Qidirmoqchi bo'lgan mahsulot yoki ta'minotchi nomini yozing (kamida 2 ta harf):");
 });
@@ -13,8 +16,10 @@ exports.searchHandler.on('message:text', async (ctx, next) => {
         return next();
     const ownerId = String(ctx.from.id);
     const query = ctx.message.text.trim();
-    if (query.startsWith('/'))
+    if (query.startsWith('/') || (0, menu_1.isMenuButton)(query)) {
+        (0, telegram_1.clearSession)(ctx);
         return next();
+    }
     if (query.length < 2)
         return ctx.reply('Iltimos, kamida 2 ta harf yozing.');
     const r = await search_service_1.SearchService.multiSearch(query, ownerId);
@@ -25,26 +30,26 @@ exports.searchHandler.on('message:text', async (ctx, next) => {
     const kb = new grammy_1.InlineKeyboard();
     const messageBlocks = [];
     if (r.items.length > 0) {
-        for (const item of r.items) {
+        for (const item of r.items.slice(0, 8)) {
             messageBlocks.push(item.formattedCard);
         }
     }
     if (r.suppliers.length > 0) {
-        const supLines = r.suppliers.map((s) => `• 🏢 ${s.name} (${s.amountText})`).join('\n');
+        const supLines = r.suppliers.slice(0, 8).map((s) => `• 🏢 ${s.name} (${s.amountText})`).join('\n');
         messageBlocks.push(`🏢 Ta'minotchilar:\n${supLines}`);
-        for (const s of r.suppliers) {
-            kb.text(`🏢 ${s.name}`, `sup:v:${s.id}`).row();
+        for (const s of r.suppliers.slice(0, 8)) {
+            kb.text(`🏢 ${s.name.slice(0, 32)}`, `sup:v:${s.id}`).row();
         }
     }
     if (r.customers.length > 0) {
-        const custLines = r.customers.map((c) => `• 👤 ${c.name} (${c.amountText})`).join('\n');
+        const custLines = r.customers.slice(0, 8).map((c) => `• 👤 ${c.name} (${c.amountText})`).join('\n');
         messageBlocks.push(`👥 Nasiyadorlar:\n${custLines}`);
-        for (const c of r.customers) {
-            kb.text(`👤 ${c.name}`, `debt:v:${c.id}`).row();
+        for (const c of r.customers.slice(0, 8)) {
+            kb.text(`👤 ${c.name.slice(0, 32)}`, `debt:v:${c.id}`).row();
         }
     }
     ctx.session.step = undefined;
-    await ctx.reply(messageBlocks.join('\n\n────────────────────\n\n'), {
+    await (0, telegram_1.safeReply)(ctx, messageBlocks.join('\n\n────────────────────\n\n'), {
         reply_markup: kb.inline_keyboard.length > 0 ? kb : undefined,
     });
 });

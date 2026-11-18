@@ -54,11 +54,71 @@ export const clearSession = (ctx: MyContext) => {
   ctx.session.tempData = null;
 };
 
+export function sanitizeMdV1(text: string): string {
+  return String(text ?? '').replace(/[*_`\[\]]/g, '');
+}
+
+export function truncateForTelegram(text: string, maxLen = 3950): string {
+  const str = String(text ?? '');
+  if (str.length <= maxLen) return str;
+  const cut = str.slice(0, maxLen - 45);
+  const fenceCount = (cut.match(/```/g) || []).length;
+  const suffix = fenceCount % 2 === 1 ? '\n```\n... (qisqartirildi)' : '\n... (qisqartirildi)';
+  return `${cut}${suffix}`;
+}
+
+export async function safeReply(ctx: MyContext, text: string, opts: Record<string, any> = {}) {
+  const safeText = truncateForTelegram(text);
+  try {
+    return await ctx.reply(safeText, opts);
+  } catch (err: any) {
+    const desc = String(err?.description || err?.message || '');
+    if (opts.parse_mode && /parse entities|can't find end/i.test(desc)) {
+      const plainOpts = { ...opts };
+      delete plainOpts.parse_mode;
+      return await ctx.reply(truncateForTelegram(safeText.replace(/```/g, '')), plainOpts);
+    }
+    throw err;
+  }
+}
+
+export async function safeEditMessageText(
+  ctx: MyContext,
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  opts: Record<string, any> = {}
+) {
+  const safeText = truncateForTelegram(text);
+  try {
+    return await ctx.api.editMessageText(chatId, messageId, safeText, opts);
+  } catch (err: any) {
+    const desc = String(err?.description || err?.message || '');
+    if (/message is not modified/i.test(desc)) return;
+    if (opts.parse_mode && /parse entities|can't find end/i.test(desc)) {
+      const plainOpts = { ...opts };
+      delete plainOpts.parse_mode;
+      try {
+        return await ctx.api.editMessageText(chatId, messageId, truncateForTelegram(safeText.replace(/```/g, '')), plainOpts);
+      } catch (innerErr: any) {
+        if (/message is not modified/i.test(String(innerErr?.description || innerErr?.message || ''))) return;
+        throw innerErr;
+      }
+    }
+    throw err;
+  }
+}
+
 export async function replyOrEdit(ctx: MyContext, text: string, keyboard?: any, isEdit = false) {
   const opts: any = { parse_mode: 'Markdown', reply_markup: keyboard };
-  return isEdit && ctx.callbackQuery?.message
-    ? ctx.api.editMessageText(ctx.chat!.id, ctx.callbackQuery.message.message_id, text, opts).catch(() => {})
-    : ctx.reply(text, opts);
+  if (isEdit && ctx.callbackQuery?.message && ctx.chat?.id) {
+    try {
+      return await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, text, opts);
+    } catch {
+      return await safeReply(ctx, text, opts);
+    }
+  }
+  return await safeReply(ctx, text, opts);
 }
 
 export function formatFriendlyError(error: unknown): string {
@@ -84,7 +144,8 @@ export function registerTemplateActions(
       return ctx.answerCallbackQuery({ text: "Bu so'rov eskirgan, qaytadan kiriting!", show_alert: true });
     }
     try {
-      await ctx.editMessageText(await onConfirm(ctx, ctx.session.tempData.data));
+      const msg = await onConfirm(ctx, ctx.session.tempData.data);
+      await ctx.editMessageText(truncateForTelegram(msg));
       clearSession(ctx);
     } catch {
       await ctx.answerCallbackQuery({ text: "Saqlashda xatolik bo'ldi, qayta urinib ko'ring.", show_alert: true });

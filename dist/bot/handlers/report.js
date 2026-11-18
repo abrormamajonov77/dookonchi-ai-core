@@ -73,10 +73,12 @@ async function sendOwnerDatabaseExports(ctx, mode = 'all') {
     });
 }
 exports.reportHandler.hears('📈 Davriy Hisobot', async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     const defaultPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
     await sendPeriodReport(ctx, defaultPeriod, false);
 });
 exports.reportHandler.hears('📥 Bazani yuklab olish (Excel / PDF)', async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     await sendOwnerDatabaseExports(ctx, 'all');
 });
 exports.reportHandler.command(['report', 'hisobot'], async (ctx) => {

@@ -12,8 +12,9 @@ import { isMenuButton } from '../keyboards/menu';
 import { logger } from '../../config/logger';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 import { prisma } from '../../database/prisma';
-import { withChatAction, downloadTelegramFile, clearSession, formatFriendlyError } from '../../utils/telegram';
+import { withChatAction, downloadTelegramFile, clearSession, formatFriendlyError, safeEditMessageText, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { SupplierService } from '../../services/supplier.service';
+import { cacheService } from '../../services/cache.service';
 import { SearchService } from '../../services/search.service';
 import { parseTextCommandLocally } from '../../utils/local-parser';
 import { toLatinUz } from '../../utils/transliterate';
@@ -160,6 +161,7 @@ async function saveSupplierTxData(
     });
     finalDebt = isUsd ? Number(updated.debtUsd) : Number(updated.debtUzs);
   });
+  cacheService.invalidateSupplierNames(ownerId);
   return finalDebt;
 }
 
@@ -178,7 +180,7 @@ async function processIntent(ctx: MyContext, intentData: any) {
     const query = intentData.name || '';
     const items = await SearchService.searchProductsWithPriceDiff(query, ownerId);
     if (!items.length) return ctx.reply(`🤷‍♂️ "${query}" nomli mahsulot topilmadi.`);
-    return ctx.reply(items.map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
+    return safeReply(ctx, items.slice(0, 8).map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
   }
 
   if (intentData.intent === 'GET_DEBT_INFO') {
@@ -186,8 +188,9 @@ async function processIntent(ctx: MyContext, intentData: any) {
     const matchRes = await SupplierService.findOrSuggestSupplier(name, ownerId);
     const supplier = matchRes.supplier || matchRes.suggestedSupplier;
     if (!supplier) return ctx.reply(`🤷‍♂️ "${name}" ismli ta'minotchi topilmadi.`);
-    return ctx.reply(
-      `📊 **Qarz ma'lumoti:**\n\n🏢 Ta'minotchi: **${toLatinUz(supplier.name)}**\n💰 Qarz (UZS): **${formatCurrency(supplier.debtUzs, 'UZS')}**\n💵 Qarz (USD/USDT): **${formatCurrency(supplier.debtUsd, 'USD', true)}**`,
+    return safeReply(
+      ctx,
+      `📊 **Qarz ma'lumoti:**\n\n🏢 Ta'minotchi: **${sanitizeMdV1(toLatinUz(supplier.name))}**\n💰 Qarz (UZS): **${formatCurrency(supplier.debtUzs, 'UZS')}**\n💵 Qarz (USD/USDT): **${formatCurrency(supplier.debtUsd, 'USD', true)}**`,
       { parse_mode: 'Markdown' }
     );
   }
@@ -253,10 +256,14 @@ async function processIntent(ctx: MyContext, intentData: any) {
             data: { ...intentData, ownerId, candidateIds } as Prisma.InputJsonValue,
           },
         });
-        return ctx.reply(`⚠️ *Bir nechta ta'minotchi topildi:*\nQaysi "${intentData.name}" hisobiga yozilsin?`, {
-          parse_mode: 'Markdown',
-          reply_markup: getDisambiguationKeyboard(candidates, pendingAction.id, 'vsel', 'vnew', 'cancel_vdis'),
-        });
+        return safeReply(
+          ctx,
+          `⚠️ *Bir nechta ta'minotchi topildi:*\nQaysi "${sanitizeMdV1(intentData.name)}" hisobiga yozilsin?`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: getDisambiguationKeyboard(candidates, pendingAction.id, 'vsel', 'vnew', 'cancel_vdis'),
+          }
+        );
       }
     }
   }
@@ -278,10 +285,12 @@ async function processIntent(ctx: MyContext, intentData: any) {
     const isIncoming = intentData.txType === 'INCOMING_GOODS';
     const isUsd = cur === 'USD';
     const amt = Number(Math.abs(Number(intentData.amount || 0)).toFixed(2));
-    const supp = await prisma.supplier.findFirst({
-      where: { ownerId, name: { contains: intentData.name, mode: 'insensitive' }, isActive: true },
-      select: { debtUzs: true, debtUsd: true },
-    });
+    const supp = intentData.exactSupplierId && intentData.exactSupplierId !== 'CREATE_NEW'
+      ? await prisma.supplier.findFirst({ where: { id: intentData.exactSupplierId, ownerId }, select: { debtUzs: true, debtUsd: true } })
+      : await prisma.supplier.findFirst({
+          where: { ownerId, name: { equals: intentData.name, mode: 'insensitive' }, isActive: true },
+          select: { debtUzs: true, debtUsd: true },
+        });
     if (supp && !isCashPurchase) {
       const curDebt = Number(isUsd ? supp.debtUsd : supp.debtUzs);
       const nextDebt = Number((isIncoming ? curDebt + amt : curDebt - amt).toFixed(2));
@@ -306,22 +315,27 @@ async function processIntent(ctx: MyContext, intentData: any) {
   const isPaymentTx =
     intentData.intent === 'ADD_SUPPLIER_TX' && intentData.txType === 'PAYMENT';
 
+  const safeParty = sanitizeMdV1(intentData.name || intentData.supplierName || "Noma'lum");
+  const safeCategory = sanitizeMdV1(intentData.category || 'Boshqa');
+  const safeComment = sanitizeMdV1(intentData.comment || "Yo'q");
+
   const details =
     intentData.intent === 'ADD_EXPENSE'
-      ? `Operatsiya: Xarajat\nSumma: ${formatCurrency(intentData.amount, cur)}\nKategoriya: ${intentData.category || 'Boshqa'}\nIzoh: ${intentData.comment || "Yo'q"}`
+      ? `Operatsiya: Xarajat\nSumma: ${formatCurrency(intentData.amount, cur)}\nKategoriya: ${safeCategory}\nIzoh: ${safeComment}`
       : intentData.intent === 'ADD_SUPPLIER_TX' && intentData.paymentType === 'CASH'
-      ? `Operatsiya: 💵 Naqd yuk olish (Qarzga qo'shilmaydi)\nTa'minotchi: ${intentData.name}\nSumma: ${formatCurrency(Math.abs(Number(intentData.amount)), cur)}`
+      ? `Operatsiya: 💵 Naqd yuk olish (Qarzga qo'shilmaydi)\nTa'minotchi: ${safeParty}\nSumma: ${formatCurrency(Math.abs(Number(intentData.amount)), cur)}`
       : intentData.intent === 'ADD_SUPPLIER_TX'
-      ? `Operatsiya: Ta'minotchi bilan oldi-berdi\nTa'minotchi: ${intentData.name}\nAmal turi: ${intentData.txType === 'INCOMING_GOODS' ? "Yuk olish (Kirim - Qarzga qo'shish)" : "To'lov (Chiqim - Qarzdan ayirish)"}\nSumma: ${intentData.txType === 'INCOMING_GOODS' ? '+' : '-'}${formatCurrency(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
+      ? `Operatsiya: Ta'minotchi bilan oldi-berdi\nTa'minotchi: ${safeParty}\nAmal turi: ${intentData.txType === 'INCOMING_GOODS' ? "Yuk olish (Kirim - Qarzga qo'shish)" : "To'lov (Chiqim - Qarzdan ayirish)"}\nSumma: ${intentData.txType === 'INCOMING_GOODS' ? '+' : '-'}${formatCurrency(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
       : intentData.intent === 'ADD_CASH_TX'
-      ? `Operatsiya: Naqd xarid\nKimdan: ${intentData.name || "Noma'lum"}\nSumma: ${formatCurrency(intentData.amount, cur)}`
+      ? `Operatsiya: Naqd xarid\nKimdan: ${safeParty}\nSumma: ${formatCurrency(intentData.amount, cur)}`
       : intentData.intent === 'ADD_CUSTOMER_DEBT'
-      ? `Operatsiya: Nasiya savdo\nMijoz: ${intentData.name}\nSumma: +${formatCurrency(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
+      ? `Operatsiya: Nasiya savdo\nMijoz: ${safeParty}\nSumma: +${formatCurrency(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
       : '';
 
   // MODUL 5.2: For supplier payments without an explicit source, ask 1-click payment source
   if (isPaymentTx && !intentData.hasExplicitSource) {
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `💸 **Ta'minotchiga to'lov tasdiqlash**\n\n${details}\n\n👇 **Pul qaysi manbadan berildi?**`,
       {
         parse_mode: 'Markdown',
@@ -331,25 +345,30 @@ async function processIntent(ctx: MyContext, intentData: any) {
     return;
   }
 
-  await ctx.reply(`⚡️ **Tahlil Natijasi**\n\n${details}\n\nMa'lumotlar to'g'rimi?`, {
+  await safeReply(ctx, `⚡️ **Tahlil Natijasi**\n\n${details}\n\nMa'lumotlar to'g'rimi?`, {
     parse_mode: 'Markdown',
     reply_markup: getConfirmationKeyboard(actionId),
   });
 }
 
-// MODUL 4: Fuzzy Supplier Typo Guard Callbacks
-voiceHandler.callbackQuery(/^sup_fuzzy_use:([^:]+):(.+)$/, async (ctx) => {
+// MODUL 4: Fuzzy Supplier Typo Guard Callbacks (compact `sf_*` + legacy `sup_fuzzy_*`)
+voiceHandler.callbackQuery(/^(?:sf_use:(.+)|sup_fuzzy_use:([^:]+):(.+))$/, async (ctx, next) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
-  const [, supplierId, pendingId] = ctx.match;
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const rawPendingId = ctx.match[1] || ctx.match[3];
+  if (rawPendingId.startsWith('inv_')) return next();
+
+  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: rawPendingId } }).catch(() => null);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
-  const supplier = await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } });
+  const pData = pendingAction.data as any;
+  const supplierId = ctx.match[2] || pData.suggestedSupplierId;
+  const supplier = supplierId
+    ? await prisma.supplier.findFirst({ where: { id: supplierId, ownerId } })
+    : null;
   if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
 
-  const pData = pendingAction.data as any;
-  await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+  await prisma.pendingAction.delete({ where: { id: rawPendingId } }).catch(() => {});
   await ctx.deleteMessage().catch(() => {});
 
   const intentData = {
@@ -361,8 +380,10 @@ voiceHandler.callbackQuery(/^sup_fuzzy_use:([^:]+):(.+)$/, async (ctx) => {
   await processIntent(ctx, intentData);
 });
 
-voiceHandler.callbackQuery(/^sup_fuzzy_new:(.+)$/, async (ctx) => {
+voiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):(.+)$/, async (ctx, next) => {
   const pendingId = ctx.match[1];
+  if (pendingId.startsWith('inv_')) return next();
+
   const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
@@ -379,19 +400,22 @@ voiceHandler.callbackQuery(/^sup_fuzzy_new:(.+)$/, async (ctx) => {
   await processIntent(ctx, intentData);
 });
 
-voiceHandler.callbackQuery(/^sup_fuzzy_cancel:(.+)$/, async (ctx) => {
+voiceHandler.callbackQuery(/^(?:sf_no|sup_fuzzy_cancel):(.+)$/, async (ctx, next) => {
   const pendingId = ctx.match[1];
+  if (pendingId.startsWith('inv_')) return next();
+
   await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
   clearSession(ctx);
   await ctx.editMessageText('❌ Amal bekor qilindi.', { reply_markup: undefined });
 });
 
-// MODUL 5.2: 1-Click Payment Source Callbacks (`pay_source:TODAY_CASH:v_<id>` / `pay_source:PREVIOUS_SAFE:v_<id>`)
-voiceHandler.callbackQuery(/^pay_source:(TODAY_CASH|PREVIOUS_SAFE):v_(.+)$/, async (ctx) => {
+// MODUL 5.2: 1-Click Payment Source Callbacks (`ps:T:v_<id>` / `ps:S:v_<id>` + legacy)
+voiceHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE)|ps:(T|S)):v_(.+)$/, async (ctx) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
-  const paymentSource = ctx.match[1] as 'TODAY_CASH' | 'PREVIOUS_SAFE';
-  const pendingId = ctx.match[2];
+  const paymentSource: 'TODAY_CASH' | 'PREVIOUS_SAFE' =
+    ctx.match[1] === 'PREVIOUS_SAFE' || ctx.match[2] === 'S' ? 'PREVIOUS_SAFE' : 'TODAY_CASH';
+  const pendingId = ctx.match[3];
 
   const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
@@ -407,14 +431,19 @@ voiceHandler.callbackQuery(/^pay_source:(TODAY_CASH|PREVIOUS_SAFE):v_(.+)$/, asy
         ? "🏦 Kechagi puldan / Seyfdan (Z-otchyot savdosiga qo'shilmadi)"
         : "💵 Bugungi kassadan (Bugungi Z-otchyotga qo'shildi)";
 
-    await ctx.editMessageText(
-      `✅ **To'lov muvaffaqiyatli saqlandi!**\n\n` +
-        `🏢 Ta'minotchi: **${toLatinUz(data.name)}**\n` +
-        `💸 To'lov: **-${formatCurrency(amt, cur)}**\n` +
-        `🗂 Manba: ${sourceBadge}\n` +
-        `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`,
-      { parse_mode: 'Markdown' }
-    );
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(
+        ctx,
+        ctx.chat.id,
+        ctx.callbackQuery.message.message_id,
+        `✅ **To'lov muvaffaqiyatli saqlandi!**\n\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(toLatinUz(data.name))}**\n` +
+          `💸 To'lov: **-${formatCurrency(amt, cur)}**\n` +
+          `🗂 Manba: ${sourceBadge}\n` +
+          `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`,
+        { parse_mode: 'Markdown' }
+      );
+    }
     await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
     ctx.session.step = undefined;
   } catch (error) {
@@ -441,18 +470,34 @@ voiceHandler.on('message:text', async (ctx, next) => {
   if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/')) return next();
   const ownerId = String(ctx.from.id);
   const text = ctx.message.text.trim();
-  if (isMenuButton(text) || (ctx.session.step && ctx.session.step !== 'await_new_supplier_name')) return next();
-
-  const activePending = await prisma.pendingAction.findFirst({
-    where: { userId: BigInt(ctx.from.id), status: 'AWAIT_NEW_SUPPLIER_NAME' },
-    orderBy: { createdAt: 'desc' },
-  });
-
-  if (activePending) {
-    const intentData = { ...(activePending.data as any), exactSupplierId: 'CREATE_NEW', name: toLatinUz(text) };
-    await prisma.pendingAction.delete({ where: { id: activePending.id } });
+  if (isMenuButton(text)) {
     clearSession(ctx);
-    return processIntent(ctx, intentData);
+    return next();
+  }
+
+  if (ctx.session.step === 'await_new_supplier_name') {
+    const pendingId = ctx.session.tempData?.pendingId;
+    const activePending = pendingId
+      ? await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null)
+      : await prisma.pendingAction.findFirst({
+          where: {
+            userId: BigInt(ctx.from.id),
+            status: 'AWAIT_NEW_SUPPLIER_NAME',
+            createdAt: { gte: new Date(Date.now() - 3600000) },
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+
+    if (activePending) {
+      const intentData = { ...(activePending.data as any), exactSupplierId: 'CREATE_NEW', name: toLatinUz(text) };
+      await prisma.pendingAction.delete({ where: { id: activePending.id } });
+      clearSession(ctx);
+      return processIntent(ctx, intentData);
+    }
+    clearSession(ctx);
+  } else if (ctx.session.step) {
+    // Earlier handlers already processed text-input steps; leftover confirmation button steps (v_*, i_*, zrep_*) shouldn't block new commands.
+    clearSession(ctx);
   }
 
   // MODUL 2: Instant Local Text Parser (<0.001s, 100% AI-free — never hits AI rate limits!)
@@ -461,7 +506,7 @@ voiceHandler.on('message:text', async (ctx, next) => {
     if (localParsed.intent === 'SEARCH_PRODUCT') {
       const items = await SearchService.searchProductsWithPriceDiff(localParsed.name, ownerId);
       if (!items.length) return ctx.reply(`🤷‍♂️ "${localParsed.name}" nomli tovar bazadan topilmadi.`);
-      return ctx.reply(items.map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
+      return safeReply(ctx, items.slice(0, 8).map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
     }
     return processIntent(ctx, localParsed);
   }
@@ -492,7 +537,11 @@ voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
 
   const data = pendingAction.data as any;
   const cur: 'UZS' | 'USD' = (data.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
+  const safeName = sanitizeMdV1(toLatinUz(data.name || "Noma'lum"));
   try {
+    let replyMsg = '';
+    let useMarkdown = true;
+
     if (data.intent === 'ADD_EXPENSE') {
       await prisma.expense.create({
         data: {
@@ -503,35 +552,26 @@ voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
           note: toLatinUz(data.comment || ''),
         },
       });
-      await ctx.editMessageText(`✅ Xarajat saqlandi: ${formatCurrency(data.amount, cur)}`);
+      replyMsg = `✅ Xarajat saqlandi: ${formatCurrency(data.amount, cur)}`;
+      useMarkdown = false;
     } else if (data.intent === 'ADD_SUPPLIER_TX') {
       const isCashPurchase = data.paymentType === 'CASH';
       const isIncoming = data.txType === 'INCOMING_GOODS';
       const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
       const finalDebt = await saveSupplierTxData(data, ownerId);
 
-      if (isCashPurchase) {
-        await ctx.editMessageText(
-          `✅ **Naqd xarid muvaffaqiyatli saqlandi!**\n\n` +
-            `🏢 Ta'minotchi: **${toLatinUz(data.name)}**\n` +
-            `💵 Naqd summa: **${formatCurrency(amt, cur)}**\n` +
-            `📊 Qarzga qo'shilmadi (0). Bugungi Z-otchyot naqd xaridlariga kiritildi.`,
-          { parse_mode: 'Markdown' }
-        );
-      } else {
-        await ctx.editMessageText(
-          `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
-            `🏢 Ta'minotchi: **${toLatinUz(data.name)}**\n` +
-            `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${formatCurrency(amt, cur)}**\n` +
-            `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`,
-          { parse_mode: 'Markdown' }
-        );
-      }
+      replyMsg = isCashPurchase
+        ? `✅ **Naqd xarid muvaffaqiyatli saqlandi!**\n\n` +
+          `🏢 Ta'minotchi: **${safeName}**\n` +
+          `💵 Naqd summa: **${formatCurrency(amt, cur)}**\n` +
+          `📊 Qarzga qo'shilmadi (0). Bugungi Z-otchyot naqd xaridlariga kiritildi.`
+        : `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
+          `🏢 Ta'minotchi: **${safeName}**\n` +
+          `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${formatCurrency(amt, cur)}**\n` +
+          `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`;
     } else if (data.intent === 'ADD_CASH_TX') {
       await saveSupplierTxData({ ...data, paymentType: 'CASH' }, ownerId);
-      await ctx.editMessageText(
-        `✅ Naqd xarid saqlandi:\nKimdan: ${toLatinUz(data.name)}\nSumma: ${formatCurrency(data.amount, cur)}${data.comment ? `\nIzoh: ${toLatinUz(data.comment)}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`
-      );
+      replyMsg = `✅ Naqd xarid saqlandi:\nKimdan: ${safeName}\nSumma: ${formatCurrency(data.amount, cur)}${data.comment ? `\nIzoh: ${sanitizeMdV1(toLatinUz(data.comment))}` : ''}\n_(Ushbu summa qarzga ta'sir qilmadi)_`;
     } else if (data.intent === 'ADD_CUSTOMER_DEBT') {
       const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
       const cleanCust = toLatinUz(data.name);
@@ -548,16 +588,24 @@ voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
         _sum: { amount: true, paidAmount: true },
       });
       const totalCustRem = Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0);
-      await ctx.editMessageText(
+      replyMsg =
         `✅ Nasiya muvaffaqiyatli saqlandi!\n\n` +
-          `👤 Mijoz: **${cleanCust}**\n` +
-          `💰 Nasiya summasi: **+${formatCurrency(amt, cur)}**\n` +
-          `📊 **Mijozning umumiy nasiya qoldig'i (${cur}):** **${formatCurrency(totalCustRem, cur)}**`,
-        { parse_mode: 'Markdown' }
-      );
+        `👤 Mijoz: **${sanitizeMdV1(cleanCust)}**\n` +
+        `💰 Nasiya summasi: **+${formatCurrency(amt, cur)}**\n` +
+        `📊 **Mijozning umumiy nasiya qoldig'i (${cur}):** **${formatCurrency(totalCustRem, cur)}**`;
     }
+
     await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
     ctx.session.step = undefined;
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(
+        ctx,
+        ctx.chat.id,
+        ctx.callbackQuery.message.message_id,
+        replyMsg,
+        useMarkdown ? { parse_mode: 'Markdown' } : {}
+      );
+    }
   } catch (error) {
     logger.error(error, 'Transaction error saving voice intent');
     await ctx.answerCallbackQuery({ text: "Saqlashda xatolik bo'ldi, qayta urinib ko'ring.", show_alert: true });
@@ -578,15 +626,20 @@ voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
     const isIncoming = data.txType === 'INCOMING_GOODS';
     const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
     const finalDebt = await saveSupplierTxData(data, ownerId);
-    await ctx.editMessageText(
-      `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
-        `🏢 Ta'minotchi: **${toLatinUz(data.name)}**\n` +
-        `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${formatCurrency(amt, cur)}**\n` +
-        `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`,
-      { parse_mode: 'Markdown' }
-    );
     await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
     ctx.session.step = undefined;
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+      await safeEditMessageText(
+        ctx,
+        ctx.chat.id,
+        ctx.callbackQuery.message.message_id,
+        `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
+          `🏢 Ta'minotchi: **${sanitizeMdV1(toLatinUz(data.name))}**\n` +
+          `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${formatCurrency(amt, cur)}**\n` +
+          `📊 **Yakuniy qarz qoldig'i (${cur}):** **${formatCurrency(finalDebt, cur)}**`,
+        { parse_mode: 'Markdown' }
+      );
+    }
   } catch (error) {
     logger.error(error, 'Error saving supplier tx confirmation');
     await ctx.answerCallbackQuery({ text: "Saqlashda xatolik bo'ldi.", show_alert: true });

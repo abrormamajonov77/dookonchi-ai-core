@@ -5,6 +5,7 @@ const grammy_1 = require("grammy");
 const prisma_1 = require("../../database/prisma");
 const formatters_1 = require("../../utils/formatters");
 const inline_1 = require("../keyboards/inline");
+const menu_1 = require("../keyboards/menu");
 const telegram_1 = require("../../utils/telegram");
 const transliterate_1 = require("../../utils/transliterate");
 exports.debtHandler = new grammy_1.Composer();
@@ -90,6 +91,7 @@ async function sendDebtorsPage(ctx, page, isEdit = false) {
     await (0, telegram_1.replyOrEdit)(ctx, text, kb, isEdit);
 }
 exports.debtHandler.hears('👥 Nasiyadorlar', async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     await sendDebtorsPage(ctx, 1);
 });
 exports.debtHandler.callbackQuery(/^debt:p:(\d+)$/, (ctx) => sendDebtorsPage(ctx, parseInt(ctx.match[1], 10), true));
@@ -120,7 +122,7 @@ exports.debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
             totalUsd = Number((totalUsd + rem).toFixed(2));
         else
             totalUzs = Number((totalUzs + rem).toFixed(2));
-        return `🔹 ${(0, formatters_1.formatDate)(d.createdAt)} | **${(0, formatters_1.formatCurrency)(rem, d.currency)}**${d.itemsSummary ? `\n   📝 ${d.itemsSummary}` : ''}`;
+        return `🔹 ${(0, formatters_1.formatDate)(d.createdAt)} | **${(0, formatters_1.formatCurrency)(rem, d.currency)}**${d.itemsSummary ? `\n   📝 ${(0, telegram_1.sanitizeMdV1)(d.itemsSummary)}` : ''}`;
     })
         .join('\n');
     const shareText = `Hurmatli ${name}, do'konimiz hisobida sizning qolgan nasiya summangiz: ${(0, formatters_1.formatCurrency)(totalUzs, 'UZS')}${totalUsd > 0 ? ` va ${(0, formatters_1.formatCurrency)(totalUsd, 'USD')}` : ''}. Rahmat!`;
@@ -132,7 +134,7 @@ exports.debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
         .url('📤 Mijozga eslatma yuborish', `https://t.me/share/url?url=${encodeURIComponent(shareText)}`)
         .row()
         .text('🔙 Orqaga', 'debt:back');
-    await (0, telegram_1.replyOrEdit)(ctx, `👤 **Mijoz:** ${name}\n\n${lines}\n\n${(0, formatters_1.formatTotalDebtBlock)(totalUzs, totalUsd)}`, kb, true);
+    await (0, telegram_1.replyOrEdit)(ctx, `👤 **Mijoz:** ${(0, telegram_1.sanitizeMdV1)(name)}\n\n${lines}\n\n${(0, formatters_1.formatTotalDebtBlock)(totalUzs, totalUsd)}`, kb, true);
 });
 exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
     if (!ctx.from)
@@ -146,7 +148,12 @@ exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
     if (!firstDebt)
         return ctx.answerCallbackQuery('Mijoz topilmadi.');
     const agg = await prisma_1.prisma.customerDebt.aggregate({
-        where: { ownerId, customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+        where: {
+            ownerId,
+            customerName: firstDebt.customerName,
+            currency: firstDebt.currency,
+            status: { in: ['PENDING', 'PARTIALLY_PAID'] },
+        },
         _sum: { amount: true, paidAmount: true },
     });
     const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
@@ -158,7 +165,7 @@ exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
             .row()
             .text(`🌓 Yarmini yopish (${(0, formatters_1.formatCurrency)(Number((totalRem / 2).toFixed(2)), firstDebt.currency)})`, `debt:qpay:${firstId}:${Number((totalRem / 2).toFixed(2))}`)
         : undefined;
-    await ctx.reply(`💸 **${firstDebt.customerName}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`, { parse_mode: 'Markdown', reply_markup: kb });
+    await (0, telegram_1.safeReply)(ctx, `💸 **${(0, telegram_1.sanitizeMdV1)(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`, { parse_mode: 'Markdown', reply_markup: kb });
 });
 exports.debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
     if (!ctx.from)
@@ -177,11 +184,13 @@ exports.debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
     (0, telegram_1.clearSession)(ctx);
     const suffix = remainingTotal > 0
         ? `💰 **Qolgan nasiya summasi:** ${(0, formatters_1.formatCurrency)(remainingTotal, firstDebt.currency)}`
-        : `🎉 **${customerName} barcha qarzlarini to'liq yopdi!**`;
-    await ctx.editMessageText(`✅ **${customerName}** tomonidan **${(0, formatters_1.formatCurrency)(payAmount, firstDebt.currency)}** to'lov qabul qilindi!\n\n${suffix}`, {
-        parse_mode: 'Markdown',
-        reply_markup: new grammy_1.InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),
-    });
+        : `🎉 **${(0, telegram_1.sanitizeMdV1)(customerName)} barcha qarzlarini to'liq yopdi!**`;
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+        await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `✅ **${(0, telegram_1.sanitizeMdV1)(customerName)}** tomonidan **${(0, formatters_1.formatCurrency)(payAmount, firstDebt.currency)}** to'lov qabul qilindi!\n\n${suffix}`, {
+            parse_mode: 'Markdown',
+            reply_markup: new grammy_1.InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),
+        });
+    }
 });
 exports.debtHandler.callbackQuery('debt:new', async (ctx) => {
     ctx.session.step = 'ADD_DEBT_TEMPLATE';
@@ -194,19 +203,25 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
     if (ctx.session.step === 'DEBT_PAYMENT' && ctx.from) {
         const ownerId = String(ctx.from.id);
         const rawText = ctx.message.text.trim();
-        if (rawText.startsWith('/'))
+        if (rawText.startsWith('/') || (0, menu_1.isMenuButton)(rawText)) {
+            (0, telegram_1.clearSession)(ctx);
             return next();
+        }
+        const customerName = ctx.session.tempData?.customerName;
+        if (!customerName) {
+            (0, telegram_1.clearSession)(ctx);
+            return next();
+        }
         const { amount: payAmount, currency } = (0, formatters_1.parseCurrencyAndAmount)(rawText);
         if (!payAmount || payAmount <= 0 || isNaN(payAmount)) {
             return ctx.reply("❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 50 ming yoki $25.50). To'xtatish uchun /start.");
         }
-        const { customerName } = ctx.session.tempData;
         const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency);
         (0, telegram_1.clearSession)(ctx);
         const suffix = remainingTotal > 0
             ? `💰 **Qolgan nasiya summasi:** ${(0, formatters_1.formatCurrency)(remainingTotal, currency)}`
-            : `🎉 **${customerName} barcha qarzlarini to'liq yopdi!**`;
-        return ctx.reply(`✅ **${customerName}** tomonidan **${(0, formatters_1.formatCurrency)(payAmount, currency)}** to'lov qabul qilindi!\n\n${suffix}`, {
+            : `🎉 **${(0, telegram_1.sanitizeMdV1)(customerName)} barcha qarzlarini to'liq yopdi!**`;
+        return (0, telegram_1.safeReply)(ctx, `✅ **${(0, telegram_1.sanitizeMdV1)(customerName)}** tomonidan **${(0, formatters_1.formatCurrency)(payAmount, currency)}** to'lov qabul qilindi!\n\n${suffix}`, {
             parse_mode: 'Markdown',
             reply_markup: new grammy_1.InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),
         });

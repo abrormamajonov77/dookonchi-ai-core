@@ -153,8 +153,8 @@ function parseCurrencyAndAmount(input) {
     }
     // 3. Multipliers (mln / ming) — strip "so'm" / "som" first so "'m" is never mistaken for "m" (million)
     const textWithoutSom = text.replace(/so['`’]?m\b/gi, '');
-    const isMln = /\b(?:mln|million)\b/i.test(textWithoutSom);
-    const isMing = /\b(?:ming|k)\b/i.test(textWithoutSom);
+    const isMln = /(?:\b|\d)\s*(?:mln|million)\b|\d\s*m\b/i.test(textWithoutSom);
+    const isMing = /(?:\b|\d)\s*(?:ming|k)\b/i.test(textWithoutSom);
     // Extract the first numeric sequence (digits, spaces, dots, commas)
     const numMatch = text.match(/\d(?:[\d\s.,]*\d)?/);
     if (!numMatch) {
@@ -281,16 +281,17 @@ function reconcileInvoiceTotals(input) {
         rawTotal = printedFinalTotal;
     }
     rawTotal = Number(rawTotal.toFixed(2));
+    const tolerance = rawTotal >= 10_000 ? 100 : Math.min(1, Number((rawTotal * 0.005).toFixed(2)));
     // 2. Double-Deduction Prevention when discountPercent > 0
     if (discountPercent > 0) {
         const expectedDiscount = Number(((rawTotal * discountPercent) / 100).toFixed(2));
         const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
-        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= 100;
+        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= tolerance;
         if ((printedFinalTotal > 0 &&
-            (Math.abs(printedFinalTotal - expectedFinal) <= 100 || printedFinalTotal < rawTotal)) ||
+            (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) ||
             aiPutFinalInSubtotal) {
             // Discount was ALREADY subtracted on the paper receipt! Do NOT deduct 5% a second time.
-            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= 100
+            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= tolerance
                 ? expectedFinal
                 : printedFinalTotal;
             const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
@@ -315,11 +316,11 @@ function reconcileInvoiceTotals(input) {
     if (explicitDiscountAmount > 0) {
         const expectedDiscount = Math.min(rawTotal, explicitDiscountAmount);
         const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
-        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= 100;
+        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= tolerance;
         if ((printedFinalTotal > 0 &&
-            (Math.abs(printedFinalTotal - expectedFinal) <= 100 || printedFinalTotal < rawTotal)) ||
+            (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) ||
             aiPutFinalInSubtotal) {
-            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= 100
+            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= tolerance
                 ? expectedFinal
                 : printedFinalTotal;
             const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
@@ -376,6 +377,6 @@ function getTashkentDayRange(now = new Date()) {
     const day = tashkentTime.getUTCDate();
     const startOfDay = new Date(Date.UTC(year, month, day, 0, 0, 0, 0) - tashkentOffsetMs);
     const endOfDay = new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - tashkentOffsetMs);
-    const dateKey = (0, exports.getToday)();
+    const dateKey = new Date(Date.UTC(year, month, day));
     return { startOfDay, endOfDay, dateKey };
 }

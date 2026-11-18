@@ -13,9 +13,9 @@ export function getConfirmationKeyboard(actionId: string, copyTextContent?: stri
  */
 export function getPaymentSourceConfirmationKeyboard(actionId: string) {
   return new InlineKeyboard()
-    .text('💵 Bugungi kassadan (Z-otchyotga kiradi)', `pay_source:TODAY_CASH:${actionId}`)
+    .text('💵 Bugungi kassadan (Z-otchyotga kiradi)', `ps:T:${actionId}`)
     .row()
-    .text('🏦 Kechagi puldan / Seyfdan (Z-otchyotga kirmaydi)', `pay_source:PREVIOUS_SAFE:${actionId}`)
+    .text('🏦 Kechagi puldan / Seyfdan (Z-otchyotga kirmaydi)', `ps:S:${actionId}`)
     .row()
     .text('❌ Bekor qilish', `cancel_${actionId}`);
 }
@@ -24,19 +24,19 @@ export function getPaymentSourceConfirmationKeyboard(actionId: string) {
  * MODUL 4.2: Fuzzy Supplier Typo Guard Keyboard ("Dinar" vs "Diner")
  */
 export function getFuzzySupplierSuggestionKeyboard(
-  existingSupplierId: string,
+  _existingSupplierId: string,
   existingSupplierName: string,
   inputName: string,
   actionId: string
 ) {
-  const cleanExisting = toLatinUz(existingSupplierName);
-  const cleanInput = toLatinUz(inputName);
+  const cleanExisting = toLatinUz(existingSupplierName).slice(0, 28);
+  const cleanInput = toLatinUz(inputName).slice(0, 28);
   return new InlineKeyboard()
-    .text(`✅ Ha, "${cleanExisting}" ga qo'shish`, `sup_fuzzy_use:${existingSupplierId}:${actionId}`)
+    .text(`✅ Ha, "${cleanExisting}" ga qo'shish`, `sf_use:${actionId}`)
     .row()
-    .text(`➕ Yo'q, "${cleanInput}" deb yangi ochish`, `sup_fuzzy_new:${actionId}`)
+    .text(`➕ Yo'q, "${cleanInput}" deb yangi ochish`, `sf_new:${actionId}`)
     .row()
-    .text('❌ Bekor qilish', `sup_fuzzy_cancel:${actionId}`);
+    .text('❌ Bekor qilish', `sf_no:${actionId}`);
 }
 
 export const getTemplateConfirmKeyboard = (editCb: string, actionId: string) =>

@@ -4,8 +4,9 @@ import { prisma } from '../../database/prisma';
 import { env } from '../../config/env';
 import { SubscriptionService, parseSubscriptionDuration } from '../../services/subscription.service';
 import { formatDate, formatDateShort, formatSom, parseCurrencyAndAmount } from '../../utils/formatters';
-import { clearSession, replyOrEdit } from '../../utils/telegram';
+import { clearSession, replyOrEdit, sanitizeMdV1 } from '../../utils/telegram';
 import { addPaginationRow } from '../keyboards/inline';
+import { isMenuButton } from '../keyboards/menu';
 
 export const adminHandler = new Composer<MyContext>();
 
@@ -73,10 +74,12 @@ async function showAdminMainPanel(ctx: MyContext, isEdit = false) {
 }
 
 adminHandler.hears('👑 Admin Panel', async (ctx) => {
+  clearSession(ctx);
   await showAdminMainPanel(ctx, false);
 });
 
 adminHandler.command('admin', async (ctx) => {
+  clearSession(ctx);
   await showAdminMainPanel(ctx, false);
 });
 
@@ -104,11 +107,12 @@ async function showSubscribersList(ctx: MyContext, page = 1, isEdit = true) {
   const lines: string[] = [];
 
   for (const u of slice) {
-    const name = u.fullName || u.name || "Noma'lum";
+    const rawName = u.fullName || u.name || "Noma'lum";
+    const safeName = sanitizeMdV1(rawName);
     const badge = getStatusBadge(u.status);
     const rem = getRemainingDaysText(u.subscriptionExpiresAt);
-    lines.push(`• **${name}** (\`${u.telegramId}\`) — ${badge} (${rem})`);
-    kb.text(`${badge} ${name.slice(0, 16)} (${rem})`, `adm:user:${u.telegramId}`).row();
+    lines.push(`• **${safeName}** (\`${u.telegramId}\`) — ${badge} (${rem})`);
+    kb.text(`${badge} ${rawName.slice(0, 16)} (${rem})`, `adm:user:${u.telegramId}`).row();
   }
 
   addPaginationRow(kb, currentPage, totalPages, 'adm:users:');
@@ -139,12 +143,12 @@ export async function showSubscriberDetail(ctx: MyContext, telegramId: string, i
   const text =
     `👤 **MIJOZ KARTOCHKASI**\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `• **Ismi:** ${user.fullName || user.name || "Noma'lum"}\n` +
-    `• **Telefon:** ${user.phone || 'Kiritilmagan'}\n` +
-    `• **Username:** ${user.username ? `@${user.username}` : 'Kiritilmagan'}\n` +
+    `• **Ismi:** ${sanitizeMdV1(user.fullName || user.name || "Noma'lum")}\n` +
+    `• **Telefon:** ${sanitizeMdV1(user.phone || 'Kiritilmagan')}\n` +
+    `• **Username:** ${user.username ? `@${sanitizeMdV1(user.username)}` : 'Kiritilmagan'}\n` +
     `• **Telegram ID:** \`${user.telegramId}\`\n` +
     `• **Holati:** ${getStatusBadge(user.status)}\n` +
-    `• **Tarif:** ${user.subscriptionPlan || 'Belgilanmagan'} (Bonus: ${user.bonusDaysGranted || 0} kun)\n` +
+    `• **Tarif:** ${sanitizeMdV1(user.subscriptionPlan || 'Belgilanmagan')} (Bonus: ${user.bonusDaysGranted || 0} kun)\n` +
     `• **Tugash vaqti:** ${user.subscriptionExpiresAt ? `${formatDateShort(user.subscriptionExpiresAt)} (${getRemainingDaysText(user.subscriptionExpiresAt)})` : "Yo'q"}\n` +
     `• **Shaxsiy bazasi:** ${suppliersCount} ta ta'minotchi | ${invoicesCount} ta nakladnoy\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -557,7 +561,10 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
   if (!ensureSuperAdmin(ctx)) return next();
 
   const text = ctx.message.text?.trim() || '';
-  if (text.startsWith('/')) return next();
+  if (text.startsWith('/') || (text && isMenuButton(text))) {
+    clearSession(ctx);
+    return next();
+  }
 
   // 1. Custom Subscription Duration for User
   if (step === 'ADM_CUSTOM_DURATION' && text) {

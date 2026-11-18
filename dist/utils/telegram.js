@@ -7,6 +7,10 @@ exports.clearSession = exports.safeDelete = exports.httpsKeepAliveAgent = export
 exports.withChatAction = withChatAction;
 exports.handleInlineAction = handleInlineAction;
 exports.downloadTelegramFile = downloadTelegramFile;
+exports.sanitizeMdV1 = sanitizeMdV1;
+exports.truncateForTelegram = truncateForTelegram;
+exports.safeReply = safeReply;
+exports.safeEditMessageText = safeEditMessageText;
 exports.replyOrEdit = replyOrEdit;
 exports.formatFriendlyError = formatFriendlyError;
 exports.registerTemplateActions = registerTemplateActions;
@@ -63,11 +67,68 @@ const clearSession = (ctx) => {
     ctx.session.tempData = null;
 };
 exports.clearSession = clearSession;
+function sanitizeMdV1(text) {
+    return String(text ?? '').replace(/[*_`\[\]]/g, '');
+}
+function truncateForTelegram(text, maxLen = 3950) {
+    const str = String(text ?? '');
+    if (str.length <= maxLen)
+        return str;
+    const cut = str.slice(0, maxLen - 45);
+    const fenceCount = (cut.match(/```/g) || []).length;
+    const suffix = fenceCount % 2 === 1 ? '\n```\n... (qisqartirildi)' : '\n... (qisqartirildi)';
+    return `${cut}${suffix}`;
+}
+async function safeReply(ctx, text, opts = {}) {
+    const safeText = truncateForTelegram(text);
+    try {
+        return await ctx.reply(safeText, opts);
+    }
+    catch (err) {
+        const desc = String(err?.description || err?.message || '');
+        if (opts.parse_mode && /parse entities|can't find end/i.test(desc)) {
+            const plainOpts = { ...opts };
+            delete plainOpts.parse_mode;
+            return await ctx.reply(truncateForTelegram(safeText.replace(/```/g, '')), plainOpts);
+        }
+        throw err;
+    }
+}
+async function safeEditMessageText(ctx, chatId, messageId, text, opts = {}) {
+    const safeText = truncateForTelegram(text);
+    try {
+        return await ctx.api.editMessageText(chatId, messageId, safeText, opts);
+    }
+    catch (err) {
+        const desc = String(err?.description || err?.message || '');
+        if (/message is not modified/i.test(desc))
+            return;
+        if (opts.parse_mode && /parse entities|can't find end/i.test(desc)) {
+            const plainOpts = { ...opts };
+            delete plainOpts.parse_mode;
+            try {
+                return await ctx.api.editMessageText(chatId, messageId, truncateForTelegram(safeText.replace(/```/g, '')), plainOpts);
+            }
+            catch (innerErr) {
+                if (/message is not modified/i.test(String(innerErr?.description || innerErr?.message || '')))
+                    return;
+                throw innerErr;
+            }
+        }
+        throw err;
+    }
+}
 async function replyOrEdit(ctx, text, keyboard, isEdit = false) {
     const opts = { parse_mode: 'Markdown', reply_markup: keyboard };
-    return isEdit && ctx.callbackQuery?.message
-        ? ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, text, opts).catch(() => { })
-        : ctx.reply(text, opts);
+    if (isEdit && ctx.callbackQuery?.message && ctx.chat?.id) {
+        try {
+            return await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, text, opts);
+        }
+        catch {
+            return await safeReply(ctx, text, opts);
+        }
+    }
+    return await safeReply(ctx, text, opts);
 }
 function formatFriendlyError(error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -87,7 +148,8 @@ function registerTemplateActions(composer, prefix, stepName, tempType, onConfirm
             return ctx.answerCallbackQuery({ text: "Bu so'rov eskirgan, qaytadan kiriting!", show_alert: true });
         }
         try {
-            await ctx.editMessageText(await onConfirm(ctx, ctx.session.tempData.data));
+            const msg = await onConfirm(ctx, ctx.session.tempData.data);
+            await ctx.editMessageText(truncateForTelegram(msg));
             (0, exports.clearSession)(ctx);
         }
         catch {

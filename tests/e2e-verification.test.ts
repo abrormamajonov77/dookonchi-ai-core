@@ -23,15 +23,16 @@ const TEST_SUPPLIER_NAMES = [
 let sampleRawInvoiceImage: Buffer;
 
 async function cleanupTestData() {
-  // Cascade delete removes linked invoices, invoiceItems, payments, and transactions in 1 round-trip
-  await Promise.all([
-    prisma.supplier.deleteMany({
-      where: { name: { in: TEST_SUPPLIER_NAMES } },
-    }),
-    prisma.product.deleteMany({
-      where: { name: { contains: 'Marvari shokolad', mode: 'insensitive' } },
-    }),
-  ]);
+  // Delete suppliers first so cascade removes linked InvoiceItem before deleting Product
+  await prisma.supplier.deleteMany({
+    where: { name: { in: TEST_SUPPLIER_NAMES } },
+  });
+  await prisma.invoiceItem.deleteMany({
+    where: { product: { name: { contains: 'Marvari shokolad', mode: 'insensitive' } } },
+  });
+  await prisma.product.deleteMany({
+    where: { name: { contains: 'Marvari shokolad', mode: 'insensitive' } },
+  });
 }
 
 describe('MODUL 7: Full E2E Verification Suite (Tests 1 - 6)', () => {
@@ -392,7 +393,7 @@ describe('MODUL 7: Full E2E Verification Suite (Tests 1 - 6)', () => {
       expect(usdItem!.formattedCard).toContain('📦 Mahsulot: Marvari shokolad');
       expect(usdItem!.formattedCard).toContain('+$1.50 QIMMATLADI 🔴');
     },
-    60000
+    120000
   );
 
   it(

@@ -16,7 +16,7 @@ const formatters_1 = require("../utils/formatters");
 const ai = new genai_1.GoogleGenAI({ apiKey: env_1.env.GEMINI_API_KEY });
 exports.DEFAULT_GENERATION_CONFIG = {
     temperature: 0.1,
-    maxOutputTokens: 2048,
+    maxOutputTokens: 4096,
 };
 exports.InvoiceItemSchema = zod_1.z
     .object({
@@ -130,9 +130,9 @@ function getCandidateModels(explicitModels) {
         : [
             'gemini-3-flash-preview',
             'gemini-flash-lite-latest',
-            'gemini-3.8-flash',
+            'gemini-3.1-flash-lite-preview',
             'gemini-flash-latest',
-            'gemini-3.7-flash',
+            'gemini-3.8-flash',
         ];
     return Array.from(new Set([...(envModel ? [envModel] : []), ...base]));
 }

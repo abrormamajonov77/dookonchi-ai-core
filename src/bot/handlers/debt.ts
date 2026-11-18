@@ -9,7 +9,8 @@ import {
   parseCurrencyAndAmount,
 } from '../../utils/formatters';
 import { addPaginationRow, addTwoColButtons, getTemplateConfirmKeyboard } from '../keyboards/inline';
-import { replyOrEdit, clearSession, registerTemplateActions } from '../../utils/telegram';
+import { isMenuButton } from '../keyboards/menu';
+import { replyOrEdit, clearSession, registerTemplateActions, safeEditMessageText, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { toLatinUz } from '../../utils/transliterate';
 
 export const debtHandler = new Composer<MyContext>();
@@ -114,6 +115,7 @@ async function sendDebtorsPage(ctx: MyContext, page: number, isEdit = false) {
 }
 
 debtHandler.hears('👥 Nasiyadorlar', async (ctx) => {
+  clearSession(ctx);
   await sendDebtorsPage(ctx, 1);
 });
 debtHandler.callbackQuery(/^debt:p:(\d+)$/, (ctx) =>
@@ -145,7 +147,7 @@ debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
       const rem = Number((Number(d.amount) - Number(d.paidAmount)).toFixed(2));
       if (d.currency === 'USD') totalUsd = Number((totalUsd + rem).toFixed(2));
       else totalUzs = Number((totalUzs + rem).toFixed(2));
-      return `🔹 ${formatDate(d.createdAt)} | **${formatCurrency(rem, d.currency)}**${d.itemsSummary ? `\n   📝 ${d.itemsSummary}` : ''}`;
+      return `🔹 ${formatDate(d.createdAt)} | **${formatCurrency(rem, d.currency)}**${d.itemsSummary ? `\n   📝 ${sanitizeMdV1(d.itemsSummary)}` : ''}`;
     })
     .join('\n');
 
@@ -161,7 +163,7 @@ debtHandler.callbackQuery(/^debt:v:(.+)$/, async (ctx) => {
 
   await replyOrEdit(
     ctx,
-    `👤 **Mijoz:** ${name}\n\n${lines}\n\n${formatTotalDebtBlock(totalUzs, totalUsd)}`,
+    `👤 **Mijoz:** ${sanitizeMdV1(name)}\n\n${lines}\n\n${formatTotalDebtBlock(totalUzs, totalUsd)}`,
     kb,
     true
   );
@@ -178,7 +180,12 @@ debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
   if (!firstDebt) return ctx.answerCallbackQuery('Mijoz topilmadi.');
 
   const agg = await prisma.customerDebt.aggregate({
-    where: { ownerId, customerName: firstDebt.customerName, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+    where: {
+      ownerId,
+      customerName: firstDebt.customerName,
+      currency: firstDebt.currency,
+      status: { in: ['PENDING', 'PARTIALLY_PAID'] },
+    },
     _sum: { amount: true, paidAmount: true },
   });
   const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
@@ -200,8 +207,9 @@ debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
           )
       : undefined;
 
-  await ctx.reply(
-    `💸 **${firstDebt.customerName}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`,
+  await safeReply(
+    ctx,
+    `💸 **${sanitizeMdV1(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`,
     { parse_mode: 'Markdown', reply_markup: kb }
   );
 });
@@ -224,14 +232,19 @@ debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
   const suffix =
     remainingTotal > 0
       ? `💰 **Qolgan nasiya summasi:** ${formatCurrency(remainingTotal, firstDebt.currency)}`
-      : `🎉 **${customerName} barcha qarzlarini to'liq yopdi!**`;
-  await ctx.editMessageText(
-    `✅ **${customerName}** tomonidan **${formatCurrency(payAmount, firstDebt.currency)}** to'lov qabul qilindi!\n\n${suffix}`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: new InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),
-    }
-  );
+      : `🎉 **${sanitizeMdV1(customerName)} barcha qarzlarini to'liq yopdi!**`;
+  if (ctx.callbackQuery.message && ctx.chat?.id) {
+    await safeEditMessageText(
+      ctx,
+      ctx.chat.id,
+      ctx.callbackQuery.message.message_id,
+      `✅ **${sanitizeMdV1(customerName)}** tomonidan **${formatCurrency(payAmount, firstDebt.currency)}** to'lov qabul qilindi!\n\n${suffix}`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: new InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),
+      }
+    );
+  }
 });
 
 debtHandler.callbackQuery('debt:new', async (ctx) => {
@@ -252,7 +265,15 @@ debtHandler.on('message:text', async (ctx, next) => {
   if (ctx.session.step === 'DEBT_PAYMENT' && ctx.from) {
     const ownerId = String(ctx.from.id);
     const rawText = ctx.message.text.trim();
-    if (rawText.startsWith('/')) return next();
+    if (rawText.startsWith('/') || isMenuButton(rawText)) {
+      clearSession(ctx);
+      return next();
+    }
+    const customerName = ctx.session.tempData?.customerName;
+    if (!customerName) {
+      clearSession(ctx);
+      return next();
+    }
     const { amount: payAmount, currency } = parseCurrencyAndAmount(rawText);
     if (!payAmount || payAmount <= 0 || isNaN(payAmount)) {
       return ctx.reply(
@@ -260,15 +281,15 @@ debtHandler.on('message:text', async (ctx, next) => {
       );
     }
 
-    const { customerName } = ctx.session.tempData;
     const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency);
     clearSession(ctx);
     const suffix =
       remainingTotal > 0
         ? `💰 **Qolgan nasiya summasi:** ${formatCurrency(remainingTotal, currency)}`
-        : `🎉 **${customerName} barcha qarzlarini to'liq yopdi!**`;
-    return ctx.reply(
-      `✅ **${customerName}** tomonidan **${formatCurrency(payAmount, currency)}** to'lov qabul qilindi!\n\n${suffix}`,
+        : `🎉 **${sanitizeMdV1(customerName)} barcha qarzlarini to'liq yopdi!**`;
+    return safeReply(
+      ctx,
+      `✅ **${sanitizeMdV1(customerName)}** tomonidan **${formatCurrency(payAmount, currency)}** to'lov qabul qilindi!\n\n${suffix}`,
       {
         parse_mode: 'Markdown',
         reply_markup: new InlineKeyboard().text("👥 Nasiyadorlar ro'yxatiga qaytish", 'debt:back'),

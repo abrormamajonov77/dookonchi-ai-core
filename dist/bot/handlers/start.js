@@ -7,6 +7,7 @@ const telegram_1 = require("../../utils/telegram");
 const subscription_service_1 = require("../../services/subscription.service");
 const env_1 = require("../../config/env");
 const formatters_1 = require("../../utils/formatters");
+const menu_2 = require("../keyboards/menu");
 exports.startHandler = new grammy_1.Composer();
 exports.startHandler.command('start', async (ctx) => {
     if (!ctx.from)
@@ -23,7 +24,7 @@ exports.startHandler.command('start', async (ctx) => {
     ctx.user = user;
     // 1. Super-Admin gets immediate full menu + 👑 Admin Panel
     if (subscription_service_1.SubscriptionService.isSuperAdmin(telegramId)) {
-        await ctx.reply(`👑 Assalomu alaykum, *${user.fullName || user.name || 'Super Admin'}*!\n\n` +
+        await (0, telegram_1.safeReply)(ctx, `👑 Assalomu alaykum, *${(0, telegram_1.sanitizeMdV1)(user.fullName || user.name || 'Super Admin')}*!\n\n` +
             `⚡️ *SmartBaqqol AI (SaaS Super-Admin)* tizimiga xush kelibsiz.\n` +
             `Sizning shaxsiy bazangiz va 👑 Admin Panel boshqaruvi tayyor.`, {
             parse_mode: 'Markdown',
@@ -36,7 +37,7 @@ exports.startHandler.command('start', async (ctx) => {
         const expText = user.subscriptionExpiresAt
             ? `\n📅 Faol obuna muddati: *${(0, formatters_1.formatDateShort)(user.subscriptionExpiresAt)}* gacha`
             : '';
-        await ctx.reply(`👋 Assalomu alaykum, *${user.fullName || user.name || "Do'kon egasi"}*!\n\n` +
+        await (0, telegram_1.safeReply)(ctx, `👋 Assalomu alaykum, *${(0, telegram_1.sanitizeMdV1)(user.fullName || user.name || "Do'kon egasi")}*!\n\n` +
             `⚡️ *SmartBaqqol AI* shaxsiy bazangiz faol holatda.${expText}\n` +
             `Nakladnoy rasmini, ovozli xabar yoki matn yuborishingiz mumkin!`, {
             parse_mode: 'Markdown',
@@ -158,17 +159,19 @@ exports.startHandler.on('message:text', async (ctx, next) => {
     if (ctx.session.step !== 'USER_REPLY_TO_ADMIN')
         return next();
     const text = ctx.message.text.trim();
-    if (text.startsWith('/'))
+    if (text.startsWith('/') || (0, menu_2.isMenuButton)(text)) {
+        (0, telegram_1.clearSession)(ctx);
         return next();
+    }
     (0, telegram_1.clearSession)(ctx);
     const telegramId = String(ctx.from?.id || '');
-    const senderName = ctx.user?.fullName ||
+    const senderName = (0, telegram_1.sanitizeMdV1)(ctx.user?.fullName ||
         ctx.user?.name ||
         ctx.from?.first_name ||
-        "Do'kon egasi";
+        "Do'kon egasi");
     const kb = new grammy_1.InlineKeyboard().text('💬 Javob yozish', `adm_msg:${telegramId}`);
     await ctx.api
-        .sendMessage(env_1.env.OWNER_TELEGRAM_ID, `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${text}`, { parse_mode: 'Markdown', reply_markup: kb })
+        .sendMessage(env_1.env.OWNER_TELEGRAM_ID, `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${(0, telegram_1.sanitizeMdV1)(text)}`, { parse_mode: 'Markdown', reply_markup: kb })
         .catch(() => { });
     await ctx.reply('✅ Xabaringiz Adminga yetkazildi!');
 });

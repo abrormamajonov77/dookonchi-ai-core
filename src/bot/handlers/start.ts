@@ -1,10 +1,11 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
 import { getMainMenu, getPendingRegistrationKeyboard } from '../keyboards/menu';
-import { clearSession, safeDelete } from '../../utils/telegram';
+import { clearSession, safeDelete, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { SubscriptionService } from '../../services/subscription.service';
 import { env } from '../../config/env';
 import { formatDateShort, formatSom } from '../../utils/formatters';
+import { isMenuButton } from '../keyboards/menu';
 
 export const startHandler = new Composer<MyContext>();
 
@@ -24,8 +25,9 @@ startHandler.command('start', async (ctx) => {
 
   // 1. Super-Admin gets immediate full menu + 👑 Admin Panel
   if (SubscriptionService.isSuperAdmin(telegramId)) {
-    await ctx.reply(
-      `👑 Assalomu alaykum, *${user.fullName || user.name || 'Super Admin'}*!\n\n` +
+    await safeReply(
+      ctx,
+      `👑 Assalomu alaykum, *${sanitizeMdV1(user.fullName || user.name || 'Super Admin')}*!\n\n` +
         `⚡️ *SmartBaqqol AI (SaaS Super-Admin)* tizimiga xush kelibsiz.\n` +
         `Sizning shaxsiy bazangiz va 👑 Admin Panel boshqaruvi tayyor.`,
       {
@@ -41,8 +43,9 @@ startHandler.command('start', async (ctx) => {
     const expText = user.subscriptionExpiresAt
       ? `\n📅 Faol obuna muddati: *${formatDateShort(user.subscriptionExpiresAt)}* gacha`
       : '';
-    await ctx.reply(
-      `👋 Assalomu alaykum, *${user.fullName || user.name || "Do'kon egasi"}*!\n\n` +
+    await safeReply(
+      ctx,
+      `👋 Assalomu alaykum, *${sanitizeMdV1(user.fullName || user.name || "Do'kon egasi")}*!\n\n` +
         `⚡️ *SmartBaqqol AI* shaxsiy bazangiz faol holatda.${expText}\n` +
         `Nakladnoy rasmini, ovozli xabar yoki matn yuborishingiz mumkin!`,
       {
@@ -201,21 +204,25 @@ startHandler.callbackQuery('user_reply_admin', async (ctx) => {
 startHandler.on('message:text', async (ctx, next) => {
   if (ctx.session.step !== 'USER_REPLY_TO_ADMIN') return next();
   const text = ctx.message.text.trim();
-  if (text.startsWith('/')) return next();
+  if (text.startsWith('/') || isMenuButton(text)) {
+    clearSession(ctx);
+    return next();
+  }
 
   clearSession(ctx);
   const telegramId = String(ctx.from?.id || '');
-  const senderName =
+  const senderName = sanitizeMdV1(
     ctx.user?.fullName ||
-    ctx.user?.name ||
-    ctx.from?.first_name ||
-    "Do'kon egasi";
+      ctx.user?.name ||
+      ctx.from?.first_name ||
+      "Do'kon egasi"
+  );
 
   const kb = new InlineKeyboard().text('💬 Javob yozish', `adm_msg:${telegramId}`);
   await ctx.api
     .sendMessage(
       env.OWNER_TELEGRAM_ID,
-      `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${text}`,
+      `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${sanitizeMdV1(text)}`,
       { parse_mode: 'Markdown', reply_markup: kb }
     )
     .catch(() => {});

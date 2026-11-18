@@ -19,7 +19,9 @@ const RE_EXPENSE_KW = /\b(ijara(?:ga)?|elektr(?:ga)?|svet(?:ga)?|gaz(?:ga)?|soli
 const RE_STRIP_AMT = /(?:[+-]\s*)?\$?\s*\d[\d\s.,_]*(?:\s*(?:(?:mln|million|ming|k|m|usd|usdt|dollar(?:u)?|doll|dolar|sent|cent|so'?m)\b|\$))?/gi;
 const RE_STRIP_CENTS = /\b(\d{1,2}\s*(?:sent|cent))\b/gi;
 const RE_STRIP_KEYWORDS = /\b(naqd(?:ga)?|naqt(?:ga)?|nal|cash|nasiya(?:ga)?|qarz(?:ga)?|kirim|yuk(?:\s*keldi)?|to'?lov|tolov|tulov|berdim|berdik|to'?ladim|toladim|ayir(?:dim|ing|ish)?|minus|kecha(?:gi)?|pul(?:dan|ga)?|seyf(?:dan)?|seif(?:dan)?|bugun(?:gi)?|kassa(?:dan)?|so'?m|som|usd|usdt|dollar|sent|cent)\b/gi;
-const RE_STRIP_CASE_SUFFIX = /^([a-zA-Z0-9'ʻʼ]{3,})(?:dan|ga)\b/i;
+const RE_STRIP_CASE_SUFFIX = /([a-zA-Z0-9'ʻʼ]{3,})(?:dan|ga)$/i;
+const RE_MULTI_NUM_UNITS = /\d+\s*(?:dona|ta|korobka|kor|sht|kg|gr|litr|up|pachka|blok)\b.*\d/i;
+const RE_INCOMING_CASE_HINT = /\b(yuk|keldi|oldi[mk]?|kirim)\b|(?:dan|ga)\s+[+-]?\$?\s*\d/i;
 /**
  * MODUL 2.1: Clean and parse numeric amounts including thousands separators ("500.000", "500_000", "1.200.000"),
  * shorthand multipliers ("500k", "1.5m", "1.5 mln"), and USD cents ("102.17$", "102 dollar 17 sent").
@@ -85,7 +87,7 @@ function parseTextCommandLocally(rawInput) {
             hasExplicitSource: false,
         };
     }
-    if (!/\d/.test(latinText))
+    if (!/\d/.test(latinText) || RE_MULTI_NUM_UNITS.test(latinText))
         return null;
     const { amount, currency } = cleanAmount(latinText);
     if (!amount || amount <= 0 || isNaN(amount))
@@ -105,12 +107,13 @@ function parseTextCommandLocally(rawInput) {
         .replace(/[+$_-]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-    const supplierName = hasMinusSign || hasPaymentKeyword
+    const shouldStripCase = hasMinusSign || hasPaymentKeyword || RE_INCOMING_CASE_HINT.test(latinText);
+    const supplierName = shouldStripCase
         ? rawNameCleaned.replace(RE_STRIP_CASE_SUFFIX, '$1').trim()
         : rawNameCleaned.trim();
     if (!supplierName || supplierName.length < 2)
         return null;
-    if (hasExpenseKeyword && !hasMinusSign && !hasCashKeyword) {
+    if (hasExpenseKeyword && !hasMinusSign) {
         return {
             intent: 'ADD_EXPENSE',
             supplierName,
