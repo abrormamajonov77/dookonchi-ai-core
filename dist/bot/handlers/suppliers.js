@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.suppliersHandler = void 0;
 exports.sendSupplierDetails = sendSupplierDetails;
+exports.handleSupplierPayment = handleSupplierPayment;
 const grammy_1 = require("grammy");
 const prisma_1 = require("../../database/prisma");
 const formatters_1 = require("../../utils/formatters");
@@ -271,7 +272,15 @@ const startManualSupplierTx = async (ctx, supplierId, step, action, prompt) => {
         return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
     const cleanName = (0, transliterate_1.toLatinUz)(supplier.name);
     ctx.session.step = step;
-    ctx.session.tempData = { supplierId, supplierName: cleanName, action, currency: 'UZS' };
+    ctx.session.tempData = {
+        supplierId,
+        activeSupplierId: supplierId,
+        supplierName: cleanName,
+        activeSupplierName: cleanName,
+        action,
+        currency: 'UZS',
+        paymentCurrency: 'UZS',
+    };
     await (0, telegram_1.safeReply)(ctx, prompt((0, telegram_1.sanitizeMdV1)(cleanName)), {
         parse_mode: 'Markdown',
         reply_markup: getCurrencySelectKeyboard('UZS'),
@@ -281,6 +290,7 @@ exports.suppliersHandler.callbackQuery(/^sup:set_cur:(UZS|USD)$/, async (ctx) =>
     const selected = ctx.match[1];
     if (ctx.session.tempData) {
         ctx.session.tempData.currency = selected;
+        ctx.session.tempData.paymentCurrency = selected;
     }
     await ctx.answerCallbackQuery({
         text: selected === 'USD' ? "💵 Valyuta: USD ($) tanlandi" : "🇺🇿 Valyuta: So'm (UZS) tanlandi",
@@ -296,6 +306,47 @@ exports.suppliersHandler.callbackQuery(/^sup:pay:(.+)$/, (ctx) => startManualSup
 exports.suppliersHandler.callbackQuery(/^sup:goods:(.+)$/, (ctx) => startManualSupplierTx(ctx, ctx.match[1], 'SUPPLIER_GOODS', 'INCOMING_GOODS', (n) => `📦 **${n}** dan qabul qilingan yuk summasini kiriting:\n` +
     `• So'mda: masalan \`500000\` yoki \`500.000\`\n` +
     `• Dollarda: masalan \`$102.17\`, \`102,17 USDT\` yoki \`102 dollar 17 sent\``));
+/**
+ * 3-MUAMMO & 6-MODUL: Yagona, xatosiz va dublikatsiz ta'minotchi to'lov funksiyasi (`handleSupplierPayment`).
+ */
+async function handleSupplierPayment(params) {
+    const { ctx, ownerId, supplierId, supplierName, amount, currency, paymentSource, isCallbackEdit } = params;
+    const cleanName = (0, transliterate_1.toLatinUz)(supplierName);
+    const res = await supplier_service_1.SupplierService.recordSupplierPayment({
+        ownerId,
+        supplierId,
+        supplierName: cleanName,
+        amount: Number(amount),
+        currency,
+        paymentSource,
+    });
+    (0, telegram_1.clearSession)(ctx);
+    const isUsd = currency === 'USD';
+    const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
+    const formattedAmt = (0, formatters_1.formatCurrency)(amount, currency);
+    const formattedPostDebt = (0, formatters_1.formatCurrency)(currentDebt, currency);
+    const sourceBadge = paymentSource === 'PREVIOUS_SAFE'
+        ? "🏦 Kechagi puldan / Seyfdan (Z-otchyot savdosiga qo'shilmadi)"
+        : "💵 Bugungi kassadan (Bugungi Z-otchyotga qo'shildi)";
+    const msgText = `✅ **${(0, telegram_1.sanitizeMdV1)(cleanName)}** hisobiga **${formattedAmt}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
+        `🗂 Manba: ${sourceBadge}\n` +
+        `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`;
+    const undoKb = new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`);
+    if (isCallbackEdit && ctx.callbackQuery?.message && ctx.chat?.id) {
+        await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, msgText, {
+            parse_mode: 'Markdown',
+            reply_markup: undoKb,
+        });
+    }
+    else {
+        await (0, telegram_1.safeReply)(ctx, msgText, {
+            parse_mode: 'Markdown',
+            reply_markup: undoKb,
+        });
+    }
+    await sendSupplierDetails(ctx, supplierId, 'all', false);
+    return res;
+}
 // MODUL 5.2: Handle 1-click payment source selection from manual supplier payment flow (`ps:T/S:spay_` + legacy)
 exports.suppliersHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE)|ps:(T|S)):spay_(.+)$/, async (ctx) => {
     if (!ctx.from)
@@ -309,32 +360,17 @@ exports.suppliersHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE
     }
     const { supplierId, supplierName, amount, currency } = pendingAction.data;
     try {
-        const res = await supplier_service_1.SupplierService.recordSupplierPayment({
+        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+        await handleSupplierPayment({
+            ctx,
             ownerId,
             supplierId,
             supplierName,
             amount: Number(amount),
             currency,
             paymentSource,
+            isCallbackEdit: true,
         });
-        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
-        (0, telegram_1.clearSession)(ctx);
-        const isUsd = currency === 'USD';
-        const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
-        const formattedAmt = (0, formatters_1.formatCurrency)(amount, currency);
-        const formattedPostDebt = (0, formatters_1.formatCurrency)(currentDebt, currency);
-        const sourceBadge = paymentSource === 'PREVIOUS_SAFE'
-            ? "🏦 Kechagi puldan / Seyfdan (Z-otchyot savdosiga qo'shilmadi)"
-            : "💵 Bugungi kassadan (Bugungi Z-otchyotga qo'shildi)";
-        if (ctx.callbackQuery.message && ctx.chat?.id) {
-            await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `✅ **${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplierName))}** hisobiga **${formattedAmt}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
-                `🗂 Manba: ${sourceBadge}\n` +
-                `📊 **Yakuniy qarz qoldig'i (${currency}):** **${formattedPostDebt}**`, {
-                parse_mode: 'Markdown',
-                reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
-            });
-        }
-        await sendSupplierDetails(ctx, supplierId, 'all', false);
     }
     catch (err) {
         await ctx.answerCallbackQuery({ text: "To'lovni saqlashda xatolik bo'ldi.", show_alert: true });
@@ -467,19 +503,23 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
         (0, telegram_1.clearSession)(ctx);
         return next();
     }
-    const { supplierId, supplierName, action } = ctx.session.tempData || {};
+    const tempData = ctx.session.tempData || {};
+    const supplierId = tempData.activeSupplierId || tempData.supplierId;
+    const supplierName = tempData.activeSupplierName || tempData.supplierName;
+    const action = tempData.action;
     if (!supplierId || !supplierName) {
         (0, telegram_1.clearSession)(ctx);
         return next();
     }
     const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawText);
-    const amount = parsed.amount;
-    const currency = parsed.currency === 'USD' ? 'USD' : ctx.session.tempData?.currency === 'USD' ? 'USD' : 'UZS';
+    const amount = (0, formatters_1.parseSmartAmount)(rawText) || parsed.amount;
+    const selectedCur = tempData.paymentCurrency || tempData.currency;
+    const currency = parsed.currency === 'USD' ? 'USD' : selectedCur === 'USD' ? 'USD' : 'UZS';
     if (!amount || amount <= 0 || isNaN(amount))
-        return ctx.reply("Iltimos, to'g'ri summa kiriting (masalan: 300000, 300.000 yoki $50.17). To'xtatish uchun /start ni bosing.");
+        return ctx.reply("Iltimos, to'g'ri summa kiriting (masalan: 500000, 500.000 yoki $50.17). To'xtatish uchun /start ni bosing.");
     if (amount > 10_000_000_000)
         return ctx.reply("❌ Kiritilgan summa o'ta katta. Iltimos tekshirib qaytadan kiriting (maks: 10 mlrd). To'xtatish uchun /start.");
-    const isPay = action === 'PAYMENT';
+    const isPay = action === 'PAYMENT' || ctx.session.step === 'SUPPLIER_PAYMENT';
     const isUsd = currency === 'USD';
     const safeSuppName = (0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplierName));
     // MODUL 5.2: For supplier payment in UZS, ask whether it came from TODAY_CASH or PREVIOUS_SAFE (unless specified in text)
@@ -503,22 +543,16 @@ exports.suppliersHandler.on('message:text', async (ctx, next) => {
             return;
         }
         const paymentSource = isPrevSafeText ? 'PREVIOUS_SAFE' : 'TODAY_CASH';
-        const res = await supplier_service_1.SupplierService.recordSupplierPayment({
+        return handleSupplierPayment({
+            ctx,
             ownerId,
             supplierId,
-            supplierName: (0, transliterate_1.toLatinUz)(supplierName),
+            supplierName,
             amount,
             currency,
             paymentSource,
+            isCallbackEdit: false,
         });
-        (0, telegram_1.clearSession)(ctx);
-        const currentDebt = isUsd ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
-        await (0, telegram_1.safeReply)(ctx, `✅ **${safeSuppName}** hisobiga **${(0, formatters_1.formatCurrency)(amount, currency)}** to'lov kiritildi va ${currency} qarzdan ayirildi!\n` +
-            `📊 **Yakuniy qarz qoldig'i (${currency}):** **${(0, formatters_1.formatCurrency)(currentDebt, currency)}**`, {
-            parse_mode: 'Markdown',
-            reply_markup: new grammy_1.InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
-        });
-        return sendSupplierDetails(ctx, supplierId, 'all', false);
     }
     const { createdTx, currentDebt } = await prisma_1.prisma.$transaction(async (tx) => {
         const supplier = await tx.supplier.findFirst({

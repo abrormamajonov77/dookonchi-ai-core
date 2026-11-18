@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getToday = exports.parseAmount = exports.escapeMarkdown = exports.formatCompactAmount = exports.formatDateShort = exports.formatDate = exports.formatTotalDebtBlock = exports.formatSupplierDebtLine = exports.formatMoney = exports.formatCurrency = exports.formatUsd = exports.formatSom = void 0;
 exports.parseCurrencyAndAmount = parseCurrencyAndAmount;
+exports.parseSmartAmount = parseSmartAmount;
 exports.calculateDiscountedTotal = calculateDiscountedTotal;
 exports.reconcileInvoiceTotals = reconcileInvoiceTotals;
 exports.getTashkentDayRange = getTashkentDayRange;
@@ -176,6 +177,39 @@ const parseAmount = (rawText) => {
     return parseCurrencyAndAmount(rawText).amount;
 };
 exports.parseAmount = parseAmount;
+/**
+ * 3-MUAMMO & 4-MUAMMO: Smart Amount Parser (`parseSmartAmount`).
+ * - Nuqta yoki verguldan keyin 3 ta raqam bo'lsa (masalan: "500.000", "500,000", "5.000", "12.000", "1.371.040"),
+ *   uni minglik ajratuvchi sifatida tozalab, butun son qaytaradi (500000, 5000, 12000, 1371040).
+ * - Nuqta yoki verguldan keyin 1-2 ta raqam bo'lsa (masalan: "50.17$", "102,17", "224219,38"),
+ *   uni o'nlik kasr (sent/tiyin) sifatida saqlab qoladi (50.17, 102.17, 224219.38).
+ */
+function parseSmartAmount(input) {
+    if (input === null || input === undefined)
+        return 0;
+    if (typeof input === 'number') {
+        return isNaN(input) ? 0 : Number(input.toFixed(2));
+    }
+    const raw = String(input).trim();
+    if (!raw)
+        return 0;
+    // Check if explicitly formatted with 3-digit thousands group(s): e.g. "500.000", "5.000", "1.371.040", "500,000", "500 000"
+    const strippedCurrency = raw
+        .replace(/so['`’]?m\b|uzs\b|sum\b|\$|usd\b|usdt\b|dollar(?:u|i|da|dan|ga)?\b/gi, '')
+        .trim();
+    if (/^[+-]?\d{1,3}(?:[.,\s]\d{3})+$/.test(strippedCurrency)) {
+        const sign = strippedCurrency.startsWith('-') ? -1 : 1;
+        const digitsOnly = strippedCurrency.replace(/[^\d]/g, '');
+        return sign * (Number(digitsOnly) || 0);
+    }
+    // Check if decimal with 1 or 2 fractional digits: e.g. "50.17", "102,17", "224 219,38", "-59 602,62"
+    if (/^[+-]?\d[\d\s]*(?:[.,]\d{1,2})$/.test(strippedCurrency)) {
+        const normalized = strippedCurrency.replace(/\s+/g, '').replace(',', '.');
+        const val = parseFloat(normalized);
+        return isNaN(val) ? 0 : Number(val.toFixed(2));
+    }
+    return parseCurrencyAndAmount(raw).amount;
+}
 function calculateDiscountedTotal(rawTotalInput, discountInput) {
     const rawTotal = Math.max(0, Number(Number(rawTotalInput || 0).toFixed(2)));
     if (discountInput === undefined || discountInput === null || discountInput === '' || discountInput === 0 || discountInput === '0') {
@@ -187,7 +221,7 @@ function calculateDiscountedTotal(rawTotalInput, discountInput) {
         };
     }
     if (typeof discountInput === 'number') {
-        const discountAmount = Math.min(rawTotal, Math.max(0, Number(discountInput.toFixed(2))));
+        const discountAmount = Math.min(rawTotal, Math.max(0, Number(Math.abs(discountInput).toFixed(2))));
         const finalTotal = Math.max(0, Number((rawTotal - discountAmount).toFixed(2)));
         return {
             rawTotal,
@@ -212,7 +246,7 @@ function calculateDiscountedTotal(rawTotalInput, discountInput) {
             percent: validPercent,
         };
     }
-    const { amount } = parseCurrencyAndAmount(str);
+    const amount = Math.abs(parseSmartAmount(str));
     const discountAmount = Math.min(rawTotal, Math.max(0, Number(amount.toFixed(2))));
     const finalTotal = Math.max(0, Number((rawTotal - discountAmount).toFixed(2)));
     return {
@@ -223,9 +257,14 @@ function calculateDiscountedTotal(rawTotalInput, discountInput) {
     };
 }
 /**
- * MODUL 2: Double-Discount Guard (`reconcileInvoiceTotals`).
- * Prevents deducting a discount a second time when `printedFinalTotal` on the paper receipt
- * already has the discount subtracted (e.g. 2,000,000 - 5% = 1,900,000 printed on receipt).
+ * 2-MUAMMO: Strict Discount Guard & Double-Discount Prevention (`reconcileInvoiceTotals`).
+ * - Agar qog'ozda "Скидка", "Наценка", "Переоценка", "Chegirma", "%" yozuvi bo'lmasa
+ *   (discountPercent === 0 && discountAmount === 0 yoki hasExplicitDiscount === false),
+ *   qatorlar yig'indisi bilan Itogo o'rtasidagi farqdan ASLO sun'iy skidka (masalan 1.6%) chiqarilmaydi!
+ * - Agar qog'ozda haqiqatan skidka yozilgan bo'lsa (masalan Nestle -21% / -59,602.62 -> 224,219.38
+ *   yoki 2,000,000 - 5% = 1,900,000), uni ikkinchi marta ayirmaydi.
+ * - Agar bitta A4 varaqda 2 ta jadval va 2 ta "Итого" bo'lsa (tableTotals: [1371040, 772432]),
+ *   ularni qo'shib umumiy 2,143,472 so'm chiqaradi.
  */
 function reconcileInvoiceTotals(input) {
     let computedItemsSum = Number(input.itemsSum || 0);
@@ -234,41 +273,66 @@ function reconcileInvoiceTotals(input) {
             if (typeof r === 'string') {
                 const parts = r.split('|').map((p) => p.trim());
                 const lastCol = parts[parts.length - 1] || '0';
-                return sum + parseCurrencyAndAmount(lastCol).amount;
+                return sum + parseSmartAmount(lastCol);
             }
             return sum + Number(r?.lineTotal ?? r?.totalPrice ?? 0);
         }, 0);
     }
     const itemsSum = Math.max(0, Number(computedItemsSum.toFixed(2)));
     const subtotalBeforeDiscount = Math.max(0, Number(Number(input.subtotalBeforeDiscount || 0).toFixed(2)));
-    const printedFinalTotal = Math.max(0, Number(Number(input.printedFinalTotal || 0).toFixed(2)));
+    let multiTableSum = 0;
+    if (Array.isArray(input.tableTotals) && input.tableTotals.length > 0) {
+        multiTableSum = Number(input.tableTotals.reduce((acc, v) => acc + Math.max(0, Number(v || 0)), 0).toFixed(2));
+    }
+    const printedFinalTotal = Math.max(0, Number(Number(multiTableSum > 0 ? multiTableSum : input.printedFinalTotal || 0).toFixed(2)));
     let discountPercent = 0;
     if (typeof input.discountPercent === 'number') {
-        discountPercent = Math.max(0, input.discountPercent);
+        discountPercent = Math.max(0, Math.abs(input.discountPercent));
     }
     else if (typeof input.discountPercent === 'string') {
         const m = input.discountPercent.match(/(\d+(?:[.,]\d+)?)/);
         if (m)
-            discountPercent = parseFloat(m[1].replace(',', '.')) || 0;
+            discountPercent = Math.abs(parseFloat(m[1].replace(',', '.')) || 0);
     }
     let explicitDiscountAmount = 0;
     if (typeof input.discountAmount === 'number') {
-        explicitDiscountAmount = Math.max(0, Number(input.discountAmount.toFixed(2)));
+        explicitDiscountAmount = Math.max(0, Number(Math.abs(input.discountAmount).toFixed(2)));
     }
     else if (typeof input.discountAmount === 'string') {
         const str = input.discountAmount.trim();
         if (str.includes('%') && !discountPercent) {
             const m = str.match(/(\d+(?:[.,]\d+)?)\s*%/);
             if (m)
-                discountPercent = parseFloat(m[1].replace(',', '.')) || 0;
+                discountPercent = Math.abs(parseFloat(m[1].replace(',', '.')) || 0);
         }
         else {
-            explicitDiscountAmount = parseCurrencyAndAmount(str).amount;
+            explicitDiscountAmount = Math.abs(parseSmartAmount(str));
         }
     }
-    // 1. Determine rawTotal before discount
+    // STRICT DISCOUNT GUARD: If paper has NO explicit discount, NEVER invent a fake discount from row difference!
+    const hasExplicitDiscount = input.hasExplicitDiscount === false
+        ? false
+        : discountPercent > 0 || explicitDiscountAmount > 0;
+    if (!hasExplicitDiscount) {
+        const authoritativeTotal = printedFinalTotal > 0
+            ? printedFinalTotal
+            : subtotalBeforeDiscount > 0
+                ? subtotalBeforeDiscount
+                : itemsSum;
+        return {
+            rawTotal: authoritativeTotal,
+            discountPercent: 0,
+            discountAmount: 0,
+            finalTotal: authoritativeTotal,
+            alreadyDeductedOnPaper: false,
+        };
+    }
+    // 1. Determine rawTotal before discount when an explicit discount DOES exist
     let rawTotal = 0;
-    if (itemsSum > 0 && printedFinalTotal > 0 && printedFinalTotal < itemsSum) {
+    if (subtotalBeforeDiscount > 0 && printedFinalTotal > 0 && subtotalBeforeDiscount > printedFinalTotal) {
+        rawTotal = subtotalBeforeDiscount;
+    }
+    else if (itemsSum > 0 && printedFinalTotal > 0 && printedFinalTotal < itemsSum) {
         rawTotal = Math.max(subtotalBeforeDiscount, itemsSum);
     }
     else if (subtotalBeforeDiscount > 0) {
@@ -282,7 +346,30 @@ function reconcileInvoiceTotals(input) {
     }
     rawTotal = Number(rawTotal.toFixed(2));
     const tolerance = rawTotal >= 10_000 ? 100 : Math.min(1, Number((rawTotal * 0.005).toFixed(2)));
-    // 2. Double-Deduction Prevention when discountPercent > 0
+    // 2. When both explicitDiscountAmount > 0 and discountPercent > 0 (e.g. Nestle: 283,822 - 21% (-59,602.62) = 224,219.38)
+    if (explicitDiscountAmount > 0 && discountPercent > 0) {
+        const expectedFinal = Math.max(0, Number((rawTotal - explicitDiscountAmount).toFixed(2)));
+        if (printedFinalTotal > 0 &&
+            (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) {
+            const finalTotal = Math.abs(printedFinalTotal - expectedFinal) <= tolerance ? expectedFinal : printedFinalTotal;
+            const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
+            return {
+                rawTotal,
+                discountPercent,
+                discountAmount,
+                finalTotal,
+                alreadyDeductedOnPaper: true,
+            };
+        }
+        return {
+            rawTotal,
+            discountPercent,
+            discountAmount: Math.min(rawTotal, explicitDiscountAmount),
+            finalTotal: expectedFinal,
+            alreadyDeductedOnPaper: false,
+        };
+    }
+    // 3. Double-Deduction Prevention when discountPercent > 0
     if (discountPercent > 0) {
         const expectedDiscount = Number(((rawTotal * discountPercent) / 100).toFixed(2));
         const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
@@ -290,7 +377,6 @@ function reconcileInvoiceTotals(input) {
         if ((printedFinalTotal > 0 &&
             (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) ||
             aiPutFinalInSubtotal) {
-            // Discount was ALREADY subtracted on the paper receipt! Do NOT deduct 5% a second time.
             const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= tolerance
                 ? expectedFinal
                 : printedFinalTotal;
@@ -303,7 +389,6 @@ function reconcileInvoiceTotals(input) {
                 alreadyDeductedOnPaper: true,
             };
         }
-        // Printed final total equals rawTotal or is 0 -> deduct once
         return {
             rawTotal,
             discountPercent,
@@ -312,53 +397,32 @@ function reconcileInvoiceTotals(input) {
             alreadyDeductedOnPaper: false,
         };
     }
-    // 3. Double-Deduction Prevention when explicitDiscountAmount > 0
-    if (explicitDiscountAmount > 0) {
-        const expectedDiscount = Math.min(rawTotal, explicitDiscountAmount);
-        const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
-        const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= tolerance;
-        if ((printedFinalTotal > 0 &&
-            (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) ||
-            aiPutFinalInSubtotal) {
-            const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= tolerance
-                ? expectedFinal
-                : printedFinalTotal;
-            const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
-            const inferredPercent = rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
-            return {
-                rawTotal,
-                discountPercent: inferredPercent,
-                discountAmount,
-                finalTotal,
-                alreadyDeductedOnPaper: true,
-            };
-        }
-        const inferredPercent = rawTotal > 0 ? Number(((expectedDiscount / rawTotal) * 100).toFixed(2)) : 0;
-        return {
-            rawTotal,
-            discountPercent: inferredPercent,
-            discountAmount: expectedDiscount,
-            finalTotal: expectedFinal,
-            alreadyDeductedOnPaper: false,
-        };
-    }
-    // 4. If printedFinalTotal < rawTotal even without explicit discount field
-    if (printedFinalTotal > 0 && printedFinalTotal < rawTotal) {
-        const discountAmount = Number((rawTotal - printedFinalTotal).toFixed(2));
+    // 4. Double-Deduction Prevention when explicitDiscountAmount > 0
+    const expectedDiscount = Math.min(rawTotal, explicitDiscountAmount);
+    const expectedFinal = Math.max(0, Number((rawTotal - expectedDiscount).toFixed(2)));
+    const aiPutFinalInSubtotal = itemsSum > 0 && subtotalBeforeDiscount > 0 && Math.abs(subtotalBeforeDiscount - expectedFinal) <= tolerance;
+    if ((printedFinalTotal > 0 &&
+        (Math.abs(printedFinalTotal - expectedFinal) <= tolerance || printedFinalTotal < rawTotal)) ||
+        aiPutFinalInSubtotal) {
+        const finalTotal = aiPutFinalInSubtotal || Math.abs(printedFinalTotal - expectedFinal) <= tolerance
+            ? expectedFinal
+            : printedFinalTotal;
+        const discountAmount = Math.max(0, Number((rawTotal - finalTotal).toFixed(2)));
         const inferredPercent = rawTotal > 0 ? Number(((discountAmount / rawTotal) * 100).toFixed(2)) : 0;
         return {
             rawTotal,
             discountPercent: inferredPercent,
             discountAmount,
-            finalTotal: printedFinalTotal,
+            finalTotal,
             alreadyDeductedOnPaper: true,
         };
     }
+    const inferredPercent = rawTotal > 0 ? Number(((expectedDiscount / rawTotal) * 100).toFixed(2)) : 0;
     return {
         rawTotal,
-        discountPercent: 0,
-        discountAmount: 0,
-        finalTotal: rawTotal,
+        discountPercent: inferredPercent,
+        discountAmount: expectedDiscount,
+        finalTotal: expectedFinal,
         alreadyDeductedOnPaper: false,
     };
 }

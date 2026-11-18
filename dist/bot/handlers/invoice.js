@@ -55,12 +55,14 @@ function buildPendingPreviewMessage(invoiceData, editableText) {
         discountPercent: invoiceData.discountPercent,
         discountAmount: discount,
         printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+        tableTotals: invoiceData.tableTotals,
+        hasExplicitDiscount: invoiceData.hasExplicitDiscount,
     });
     const percentText = invoiceData.discountLabel ||
         (math.discountPercent && Number(math.discountPercent) > 0 ? `${math.discountPercent}%` : '');
     const title = invoiceData.isCashOverride
-        ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**'
-        : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
+        ? '🧾 **Naqd Xarid Tahlili (100% HD Kserokopiya)**'
+        : '📄 **Nakladnoy Tahlili (100% HD Kserokopiya)**';
     const safeCodeBlock = String(editableText || '')
         .replace(/```/g, "'''")
         .slice(0, 3200);
@@ -81,12 +83,33 @@ function buildPendingPreviewMessage(invoiceData, editableText) {
     text += `\n_💡 Skidka yoki ta'minotchi nomini to'g'rilash uchun pastdagi tugmalardan foydalaning yoki chatga yozing_\n\nMa'lumotlar to'g'rimi?`;
     return text;
 }
-async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, statusMsgId) {
+async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, statusMsgId, xeroxBuffer) {
     if (!ctx.from)
         return;
     const ownerId = String(ctx.from.id);
     if (invoiceData.supplierName) {
         invoiceData.supplierName = (0, transliterate_1.toLatinUz)(invoiceData.supplierName).trim();
+    }
+    // 5-MUAMMO: Send 1:1 Ultra-Bright HD Xerox image to user first if xeroxBuffer is provided,
+    // and capture its Telegram file_id as the authoritative photoFileId for "🖼 Asl rasmni ko'rish"
+    let effectivePhotoFileId = photoFileId;
+    if (xeroxBuffer && xeroxBuffer.byteLength > 0) {
+        try {
+            const xeroxSupplier = (0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(invoiceData.supplierName || "Noma'lum"));
+            const cur = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
+            const itogoText = (0, formatters_1.formatCurrency)(invoiceData.finalTotal ?? invoiceData.printedFinalTotal ?? 0, cur);
+            const sentPhoto = await ctx.replyWithPhoto(new grammy_1.InputFile(xeroxBuffer, 'kserokopiya.jpg'), {
+                caption: `🖨 *1:1 HD Kserokopiya Skaner*\n🏢 Ta'minotchi: *${xeroxSupplier}*\n💰 Itogo: *${itogoText}*`,
+                parse_mode: 'Markdown',
+            });
+            const sentPhotos = sentPhoto?.photo;
+            if (Array.isArray(sentPhotos) && sentPhotos.length > 0) {
+                effectivePhotoFileId = sentPhotos[sentPhotos.length - 1].file_id;
+            }
+        }
+        catch (photoErr) {
+            logger_1.logger.warn({ photoErr }, 'Could not send HD Xerox photo preview');
+        }
     }
     if (!invoiceData.exactSupplierId && invoiceData.supplierName && invoiceData.supplierName !== "Noma'lum") {
         const fuzzyCheck = await supplier_service_1.SupplierService.findOrSuggestSupplier(invoiceData.supplierName, ownerId);
@@ -103,7 +126,7 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
                         ownerId,
                         data: invoiceData,
                         imageUrl,
-                        photoFileId,
+                        photoFileId: effectivePhotoFileId,
                         userPhotoMsgId,
                         rawCaption,
                         suggestedSupplierId: fuzzyCheck.suggestedSupplier.id,
@@ -131,7 +154,15 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
                     data: {
                         userId: BigInt(ctx.from.id),
                         type: 'INVOICE_DISAMBIGUATION',
-                        data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
+                        data: {
+                            ownerId,
+                            data: invoiceData,
+                            imageUrl,
+                            photoFileId: effectivePhotoFileId,
+                            userPhotoMsgId,
+                            rawCaption,
+                            candidateIds,
+                        },
                     },
                 });
                 const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${(0, telegram_1.sanitizeMdV1)(invoiceData.supplierName)}" hisobiga yozilsin?`;
@@ -153,6 +184,8 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
         discountPercent: invoiceData.discountPercent,
         discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
         printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+        tableTotals: invoiceData.tableTotals,
+        hasExplicitDiscount: invoiceData.hasExplicitDiscount,
     });
     invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
     invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
@@ -178,7 +211,7 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
                 data: {
                     userId: BigInt(ctx.from.id),
                     type: 'INVOICE',
-                    data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+                    data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
                 },
             });
             const dupKb = (0, inline_1.getDuplicateInvoiceWarningKeyboard)(pendingAction.id);
@@ -194,7 +227,7 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
         data: {
             userId: BigInt(ctx.from.id),
             type: 'INVOICE',
-            data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+            data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
         },
     });
     const actionId = `i_${pendingAction.id}`;
@@ -225,7 +258,7 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
         return;
     const ownerId = String(ctx.from.id);
     await (0, telegram_1.withChatAction)(ctx, 'upload_photo', async () => {
-        const statusMsg = await ctx.reply('⚡️ Nakladnoy kserokopiya qilinmoqda...').catch(() => null);
+        const statusMsg = await ctx.reply('🖨 Nakladnoy 1:1 HD kserokopiya qilinmoqda...').catch(() => null);
         try {
             const file = await ctx.api.getFile(fileId);
             if (!file.file_path)
@@ -234,9 +267,9 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
                 (0, telegram_1.downloadTelegramFile)(file.file_path),
                 cache_service_1.cacheService.getSupplierNames(ownerId),
             ]);
-            // MODUL 4: High-contrast B&W scanner buffer (<60 KB in <150 ms)
-            const processedBuffer = await image_service_1.ImageService.optimizeForFastOCR(buffer);
-            const imageHash = image_service_1.ImageService.getImageHash(processedBuffer);
+            // 5-MUAMMO: Ultra-Bright HD Xerox Scanner (1800px lanczos3, high-contrast B&W, quality 92)
+            const xeroxBuffer = await (0, image_service_1.createUltraBrightXeroxImage)(buffer);
+            const imageHash = image_service_1.ImageService.getImageHash(xeroxBuffer);
             // MODUL 6: Stage 1 ImageHash check before calling AI (isolated by ownerId)
             const stage1Dup = await supplier_service_1.SupplierService.checkDuplicateInvoice({ ownerId, imageHash });
             if (stage1Dup.isDuplicate && stage1Dup.warningText && stage1Dup.existingInvoice) {
@@ -277,7 +310,7 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
                 return;
             }
             const caption = ctx.message?.caption?.trim() || '';
-            const invoiceData = await ai_service_1.AiService.parseInvoiceImage(processedBuffer, 'image/jpeg', caption);
+            const invoiceData = await ai_service_1.AiService.parseInvoiceImage(xeroxBuffer, 'image/jpeg', caption);
             invoiceData.imageHash = imageHash;
             if (caption) {
                 invoiceData.isCaptionOverride = true;
@@ -294,7 +327,7 @@ async function handleInvoiceImageUpload(ctx, fileId, _mimeType, errLabel) {
                     invoiceData.supplierName = cleanedCaptionName;
                 }
             }
-            await processParsedInvoice(ctx, invoiceData, file.file_path, fileId, ctx.message.message_id, caption, statusMsg?.message_id);
+            await processParsedInvoice(ctx, invoiceData, file.file_path, fileId, ctx.message.message_id, caption, statusMsg?.message_id, xeroxBuffer);
         }
         catch (error) {
             logger_1.logger.error({ error }, 'Error parsing invoice');
@@ -313,10 +346,12 @@ exports.invoiceHandler.on('message:photo', async (ctx) => {
     if (!ctx.user)
         return;
     (0, telegram_1.clearSession)(ctx);
+    // 2-MUAMMO: Har doim eng yuqori sifatli (oxirgi indeksdagi) rasmni ol!
     const photos = ctx.message.photo;
-    const photo = photos[Math.min(photos.length - 1, 2)];
-    if (photo)
-        await handleInvoiceImageUpload(ctx, photo.file_id, 'image/jpeg', 'Nakladnoyni');
+    const highestResPhoto = photos[photos.length - 1];
+    if (highestResPhoto) {
+        await handleInvoiceImageUpload(ctx, highestResPhoto.file_id, 'image/jpeg', 'Nakladnoyni');
+    }
 });
 exports.invoiceHandler.on('message:document', async (ctx, next) => {
     if (!ctx.user || !ctx.message.document.mime_type?.startsWith('image/'))
@@ -711,6 +746,8 @@ const extractPendingInvoice = async (ctx, pendingId) => {
         discountPercent: invoiceData.discountPercent,
         discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
         printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+        tableTotals: invoiceData.tableTotals,
+        hasExplicitDiscount: invoiceData.hasExplicitDiscount,
     });
     const currency = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
     return {

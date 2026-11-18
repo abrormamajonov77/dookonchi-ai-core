@@ -14,10 +14,40 @@ function getFastSignature(buf: Buffer): string {
   return `${len}:${buf.subarray(0, 32).toString('hex')}:${buf.subarray(mid, mid + 32).toString('hex')}:${buf.subarray(len - 32).toString('hex')}`;
 }
 
+/**
+ * 5-MUAMMO: Ultra-Bright HD Xerox Scanner (`createUltraBrightXeroxImage`).
+ * - Rasmni kichraytirib xiralashtirmaydi, aksincha 1800px HD o'lchamda (`lanczos3`) kattalashtiradi,
+ *   oq-qora kserokopiya kontrastini va yorug'ligini oshiradi (`brightness: 1.15`, `linear(1.85, -75)`),
+ *   harflarni o'tkirlashtiradi (`sharpen`) va `quality: 92` bilan tiniq HD kserokopiya tayyorlaydi.
+ */
+export async function createUltraBrightXeroxImage(rawBuffer: Buffer): Promise<Buffer> {
+  if (!rawBuffer || rawBuffer.byteLength === 0) {
+    throw new Error("Rasm fayli bo'sh");
+  }
+  const xeroxBuffer = await sharp(rawBuffer, { failOn: 'none' })
+    .rotate() // EXIF bo'yicha avtomatik to'g'rilash
+    .resize({ width: 1800, withoutEnlargement: false, kernel: 'lanczos3' }) // 2x HD kattalashtirish va tiniqlashtirish
+    .grayscale() // Haqiqiy oq-qora kserokopiya rejimi
+    .normalize() // Yorug'lik diapazonini 100% ga yoyish
+    .modulate({ brightness: 1.15 }) // Qorong'i joylarni va soyalarni oqartirish
+    .linear(1.85, -75) // Orqa fonni qordek oppoq, yozuvlarni qop-qora qilish
+    .sharpen({ sigma: 1.2, m1: 1.5, m2: 0.7 }) // Mayda raqamlar va qo'lyozma chiziqlarini o'tkirlashtirish
+    .jpeg({ quality: 92, mozjpeg: true }) // Yuqori sifatda saqlash (xiralashtirmasdan!)
+    .toBuffer();
+
+  return xeroxBuffer;
+}
+
 export class ImageService {
   /**
-   * MODUL 1.2: Ultra-Fast 2-3s Scanner Pipeline (sharp Turbo Scanner).
-   * Converts raw photo buffer to a high-contrast black-and-white scanner JPEG (30-45 KB, <= 45 KB) in <120ms.
+   * 5-MUAMMO: Ultra-Bright HD Xerox Scanner (1800px, quality 92).
+   */
+  static async createUltraBrightXeroxImage(rawBuffer: Buffer): Promise<Buffer> {
+    return createUltraBrightXeroxImage(rawBuffer);
+  }
+
+  /**
+   * Fast lightweight B&W scanner pipeline (kept for backward compatibility).
    */
   static async optimizeForFastOCR(rawBuffer: Buffer): Promise<Buffer> {
     if (!rawBuffer || rawBuffer.byteLength === 0) {

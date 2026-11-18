@@ -1,7 +1,7 @@
-import { Composer } from 'grammy';
+import { Composer, InputFile } from 'grammy';
 import { MyContext } from '../context';
 import { AiService, buildVerbatimTableText } from '../../services/ai.service';
-import { ImageService } from '../../services/image.service';
+import { ImageService, createUltraBrightXeroxImage } from '../../services/image.service';
 import {
   getInvoiceConfirmationKeyboard,
   getDiscountConfirmationKeyboard,
@@ -84,14 +84,16 @@ export function buildPendingPreviewMessage(invoiceData: any, editableText: strin
     discountPercent: invoiceData.discountPercent,
     discountAmount: discount,
     printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+    tableTotals: invoiceData.tableTotals,
+    hasExplicitDiscount: invoiceData.hasExplicitDiscount,
   });
   const percentText =
     invoiceData.discountLabel ||
     (math.discountPercent && Number(math.discountPercent) > 0 ? `${math.discountPercent}%` : '');
 
   const title = invoiceData.isCashOverride
-    ? '🧾 **Naqd Xarid Tahlili (100% Kserokopiya)**'
-    : '📄 **Nakladnoy Tahlili (100% Kserokopiya)**';
+    ? '🧾 **Naqd Xarid Tahlili (100% HD Kserokopiya)**'
+    : '📄 **Nakladnoy Tahlili (100% HD Kserokopiya)**';
   const safeCodeBlock = String(editableText || '')
     .replace(/```/g, "'''")
     .slice(0, 3200);
@@ -119,13 +121,35 @@ async function processParsedInvoice(
   photoFileId: string | null,
   userPhotoMsgId: number | null,
   rawCaption: string,
-  statusMsgId?: number | null
+  statusMsgId?: number | null,
+  xeroxBuffer?: Buffer | null
 ) {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
 
   if (invoiceData.supplierName) {
     invoiceData.supplierName = toLatinUz(invoiceData.supplierName).trim();
+  }
+
+  // 5-MUAMMO: Send 1:1 Ultra-Bright HD Xerox image to user first if xeroxBuffer is provided,
+  // and capture its Telegram file_id as the authoritative photoFileId for "🖼 Asl rasmni ko'rish"
+  let effectivePhotoFileId = photoFileId;
+  if (xeroxBuffer && xeroxBuffer.byteLength > 0) {
+    try {
+      const xeroxSupplier = sanitizeMdV1(toLatinUz(invoiceData.supplierName || "Noma'lum"));
+      const cur: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
+      const itogoText = formatCurrency(invoiceData.finalTotal ?? invoiceData.printedFinalTotal ?? 0, cur);
+      const sentPhoto = await ctx.replyWithPhoto(new InputFile(xeroxBuffer, 'kserokopiya.jpg'), {
+        caption: `🖨 *1:1 HD Kserokopiya Skaner*\n🏢 Ta'minotchi: *${xeroxSupplier}*\n💰 Itogo: *${itogoText}*`,
+        parse_mode: 'Markdown',
+      });
+      const sentPhotos = sentPhoto?.photo;
+      if (Array.isArray(sentPhotos) && sentPhotos.length > 0) {
+        effectivePhotoFileId = sentPhotos[sentPhotos.length - 1].file_id;
+      }
+    } catch (photoErr) {
+      logger.warn({ photoErr }, 'Could not send HD Xerox photo preview');
+    }
   }
 
   if (!invoiceData.exactSupplierId && invoiceData.supplierName && invoiceData.supplierName !== "Noma'lum") {
@@ -142,7 +166,7 @@ async function processParsedInvoice(
             ownerId,
             data: invoiceData,
             imageUrl,
-            photoFileId,
+            photoFileId: effectivePhotoFileId,
             userPhotoMsgId,
             rawCaption,
             suggestedSupplierId: fuzzyCheck.suggestedSupplier.id,
@@ -177,7 +201,15 @@ async function processParsedInvoice(
           data: {
             userId: BigInt(ctx.from.id),
             type: 'INVOICE_DISAMBIGUATION',
-            data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId, rawCaption, candidateIds },
+            data: {
+              ownerId,
+              data: invoiceData,
+              imageUrl,
+              photoFileId: effectivePhotoFileId,
+              userPhotoMsgId,
+              rawCaption,
+              candidateIds,
+            },
           },
         });
         const disText = `⚠️ *Bir nechta ta'minotchi topildi:*\nNakladnoy qaysi "${sanitizeMdV1(invoiceData.supplierName)}" hisobiga yozilsin?`;
@@ -200,6 +232,8 @@ async function processParsedInvoice(
     discountPercent: invoiceData.discountPercent,
     discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
     printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+    tableTotals: invoiceData.tableTotals,
+    hasExplicitDiscount: invoiceData.hasExplicitDiscount,
   });
   invoiceData.rawTotal = invoiceData.grossTotal = invoiceData.total_amount = math.rawTotal;
   invoiceData.discountAmount = invoiceData.discount = math.discountAmount;
@@ -227,7 +261,7 @@ async function processParsedInvoice(
         data: {
           userId: BigInt(ctx.from.id),
           type: 'INVOICE',
-          data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+          data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
         },
       });
       const dupKb = getDuplicateInvoiceWarningKeyboard(pendingAction.id);
@@ -244,7 +278,7 @@ async function processParsedInvoice(
     data: {
       userId: BigInt(ctx.from.id),
       type: 'INVOICE',
-      data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
+      data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
     },
   });
   const actionId = `i_${pendingAction.id}`;
@@ -278,7 +312,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
   const ownerId = String(ctx.from.id);
 
   await withChatAction(ctx, 'upload_photo', async () => {
-    const statusMsg = await ctx.reply('⚡️ Nakladnoy kserokopiya qilinmoqda...').catch(() => null);
+    const statusMsg = await ctx.reply('🖨 Nakladnoy 1:1 HD kserokopiya qilinmoqda...').catch(() => null);
     try {
       const file = await ctx.api.getFile(fileId);
       if (!file.file_path) throw new Error('Rasm fayli topilmadi');
@@ -288,9 +322,9 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
         cacheService.getSupplierNames(ownerId),
       ]);
 
-      // MODUL 4: High-contrast B&W scanner buffer (<60 KB in <150 ms)
-      const processedBuffer = await ImageService.optimizeForFastOCR(buffer);
-      const imageHash = ImageService.getImageHash(processedBuffer);
+      // 5-MUAMMO: Ultra-Bright HD Xerox Scanner (1800px lanczos3, high-contrast B&W, quality 92)
+      const xeroxBuffer = await createUltraBrightXeroxImage(buffer);
+      const imageHash = ImageService.getImageHash(xeroxBuffer);
 
       // MODUL 6: Stage 1 ImageHash check before calling AI (isolated by ownerId)
       const stage1Dup = await SupplierService.checkDuplicateInvoice({ ownerId, imageHash });
@@ -332,7 +366,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
       }
 
       const caption = ctx.message?.caption?.trim() || '';
-      const invoiceData = await AiService.parseInvoiceImage(processedBuffer, 'image/jpeg', caption);
+      const invoiceData = await AiService.parseInvoiceImage(xeroxBuffer, 'image/jpeg', caption);
       (invoiceData as any).imageHash = imageHash;
 
       if (caption) {
@@ -358,7 +392,8 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
         fileId,
         ctx.message!.message_id,
         caption,
-        statusMsg?.message_id
+        statusMsg?.message_id,
+        xeroxBuffer
       );
     } catch (error) {
       logger.error({ error }, 'Error parsing invoice');
@@ -376,9 +411,12 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
 invoiceHandler.on('message:photo', async (ctx) => {
   if (!ctx.user) return;
   clearSession(ctx);
+  // 2-MUAMMO: Har doim eng yuqori sifatli (oxirgi indeksdagi) rasmni ol!
   const photos = ctx.message.photo;
-  const photo = photos[Math.min(photos.length - 1, 2)];
-  if (photo) await handleInvoiceImageUpload(ctx, photo.file_id, 'image/jpeg', 'Nakladnoyni');
+  const highestResPhoto = photos[photos.length - 1];
+  if (highestResPhoto) {
+    await handleInvoiceImageUpload(ctx, highestResPhoto.file_id, 'image/jpeg', 'Nakladnoyni');
+  }
 });
 
 invoiceHandler.on('message:document', async (ctx, next) => {
@@ -860,6 +898,8 @@ const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
     discountPercent: invoiceData.discountPercent,
     discountAmount: invoiceData.discountAmount ?? invoiceData.discount ?? 0,
     printedFinalTotal: invoiceData.finalTotal ?? invoiceData.printedFinalTotal,
+    tableTotals: invoiceData.tableTotals,
+    hasExplicitDiscount: invoiceData.hasExplicitDiscount,
   });
   const currency: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
   return {
