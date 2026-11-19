@@ -19,6 +19,8 @@ export const DEFAULT_GENERATION_CONFIG = {
 } as const;
 
 export const OCR_TIMEOUT_MS = 30000;
+export const OCR_MAX_OUTPUT_TOKENS = 16384;
+export const INTENT_MAX_OUTPUT_TOKENS = 4096;
 
 export const InvoiceItemSchema = z
   .object({
@@ -161,23 +163,77 @@ function getCandidateModels(explicitModels?: string[]): string[] {
   return Array.from(new Set([...(envModel ? [envModel] : []), ...base]));
 }
 
-function extractCleanJson(rawText: string): any {
+function repairCommonJsonGlitches(input: string): string {
+  // 1. Escape unescaped inner quotes inside compact scanner row strings like: "1|Печенье "Рохат"|10|1000|10000"
+  let s = input
+    .split(/\r?\n/)
+    .map((line) => {
+      const m = line.match(/^(\s*")(.+)("(?:\s*\])?(?:,\s*|\s*))$/);
+      if (!m) return line;
+      const [, prefix, inner, suffix] = m;
+      if ((inner.includes('|') || inner.includes(' - ')) && /(?<!\\)"/.test(inner)) {
+        const fixedInner = inner.replace(/(?<!\\)"/g, '\\"');
+        return `${prefix}${fixedInner}${suffix}`;
+      }
+      return line;
+    })
+    .join('\n');
+
+  // 2. Remove trailing commas before ] or }
+  s = s.replace(/,\s*([\]}])/g, '$1');
+
+  return s;
+}
+
+export function extractCleanJson(rawText: string, finishReason?: string): any {
   const trimmed = (rawText || '').trim();
   if (!trimmed) throw new Error('Empty response from Gemini');
   const stripped = trimmed
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
+
+  // Attempt 1: Direct JSON.parse
   try {
     return JSON.parse(stripped);
-  } catch {
-    const start = stripped.indexOf('{');
-    const end = stripped.lastIndexOf('}');
-    if (start !== -1 && end > start) {
-      return JSON.parse(stripped.slice(start, end + 1));
+  } catch {}
+
+  // Attempt 2: Slice from first '{' to last '}'
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    const sliced = stripped.slice(start, end + 1);
+    try {
+      return JSON.parse(sliced);
+    } catch {
+      try {
+        return JSON.parse(repairCommonJsonGlitches(sliced));
+      } catch {}
     }
-    throw new Error('Invalid JSON response from Gemini');
   }
+
+  // Attempt 3: Sanitize full stripped text and auto-close if only final closing delimiters were cut off
+  if (start !== -1) {
+    const candidate = repairCommonJsonGlitches(stripped.slice(start));
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+
+    // If printedFinalTotal or subtotalBeforeDiscount is already present and only closing '}' / ']}' is missing
+    if (/printedFinalTotal|subtotalBeforeDiscount|"intent"\s*:/i.test(candidate)) {
+      for (const suffix of ['}', '"}', '"]}', ']}']) {
+        try {
+          return JSON.parse(candidate.replace(/,\s*$/, '') + suffix);
+        } catch {}
+      }
+    }
+  }
+
+  throw new Error(
+    finishReason === 'MAX_TOKENS'
+      ? 'Invalid JSON response from Gemini (truncated by MAX_TOKENS)'
+      : 'Invalid JSON response from Gemini'
+  );
 }
 
 /**
@@ -241,10 +297,12 @@ export async function generateContentWithFallback(
 
 const askJson = async (
   parts: any[],
-  maxOutputTokens = DEFAULT_GENERATION_CONFIG.maxOutputTokens,
+  maxOutputTokens = OCR_MAX_OUTPUT_TOKENS,
   models?: string[],
   timeoutMs: number = OCR_TIMEOUT_MS
 ) => {
+  // Ensure thinking models (e.g. gemini-3-flash-preview) always have enough budget for both thoughts + JSON output
+  const effectiveMaxOutputTokens = Math.max(Number(maxOutputTokens) || 0, INTENT_MAX_OUTPUT_TOKENS);
   return generateContentWithFallback(
     async (model) => {
       const res = await ai.models.generateContent({
@@ -253,11 +311,12 @@ const askJson = async (
         config: {
           responseMimeType: 'application/json',
           temperature: DEFAULT_GENERATION_CONFIG.temperature,
-          maxOutputTokens,
+          maxOutputTokens: effectiveMaxOutputTokens,
         },
       });
       if (!res.text) throw new Error('Empty response from Gemini');
-      return extractCleanJson(res.text);
+      const finishReason = res.candidates?.[0]?.finishReason;
+      return extractCleanJson(res.text, finishReason);
     },
     models,
     timeoutMs
@@ -584,6 +643,7 @@ export function normalizeVerbatimInvoice(raw: any, caption?: string): z.infer<ty
 export class AiService {
   static readonly DEFAULT_GENERATION_CONFIG = DEFAULT_GENERATION_CONFIG;
   static readonly OCR_TIMEOUT_MS = OCR_TIMEOUT_MS;
+  static readonly OCR_MAX_OUTPUT_TOKENS = OCR_MAX_OUTPUT_TOKENS;
 
   static async parseInvoiceImage(
     imageBuffer: Buffer,
@@ -604,7 +664,7 @@ export class AiService {
             { text: promptText },
             { inlineData: { mimeType: 'image/jpeg', data: imageBuffer.toString('base64') } },
           ],
-          DEFAULT_GENERATION_CONFIG.maxOutputTokens,
+          OCR_MAX_OUTPUT_TOKENS,
           undefined,
           OCR_TIMEOUT_MS
         );
@@ -623,7 +683,7 @@ export class AiService {
 
         const parsed = await askJson(
           [{ text: prompt }],
-          DEFAULT_GENERATION_CONFIG.maxOutputTokens
+          OCR_MAX_OUTPUT_TOKENS
         );
         return normalizeVerbatimInvoice(parsed);
       },

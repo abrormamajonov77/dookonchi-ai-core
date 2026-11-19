@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AiService = exports.COMPACT_SCANNER_PROMPT = exports.VoiceIntentSchema = exports.InvoiceSchema = exports.InvoiceItemSchema = exports.OCR_TIMEOUT_MS = exports.DEFAULT_GENERATION_CONFIG = void 0;
+exports.AiService = exports.COMPACT_SCANNER_PROMPT = exports.VoiceIntentSchema = exports.InvoiceSchema = exports.InvoiceItemSchema = exports.INTENT_MAX_OUTPUT_TOKENS = exports.OCR_MAX_OUTPUT_TOKENS = exports.OCR_TIMEOUT_MS = exports.DEFAULT_GENERATION_CONFIG = void 0;
+exports.extractCleanJson = extractCleanJson;
 exports.retryOnceOnTimeout = retryOnceOnTimeout;
 exports.generateContentWithFallback = generateContentWithFallback;
 exports.parseHandwrittenReceiptLine = parseHandwrittenReceiptLine;
@@ -21,6 +22,8 @@ exports.DEFAULT_GENERATION_CONFIG = {
     maxOutputTokens: 2048,
 };
 exports.OCR_TIMEOUT_MS = 30000;
+exports.OCR_MAX_OUTPUT_TOKENS = 16384;
+exports.INTENT_MAX_OUTPUT_TOKENS = 4096;
 exports.InvoiceItemSchema = zod_1.z
     .object({
     rawName: zod_1.z.string().optional(),
@@ -153,7 +156,27 @@ function getCandidateModels(explicitModels) {
         ];
     return Array.from(new Set([...(envModel ? [envModel] : []), ...base]));
 }
-function extractCleanJson(rawText) {
+function repairCommonJsonGlitches(input) {
+    // 1. Escape unescaped inner quotes inside compact scanner row strings like: "1|Печенье "Рохат"|10|1000|10000"
+    let s = input
+        .split(/\r?\n/)
+        .map((line) => {
+        const m = line.match(/^(\s*")(.+)("(?:\s*\])?(?:,\s*|\s*))$/);
+        if (!m)
+            return line;
+        const [, prefix, inner, suffix] = m;
+        if ((inner.includes('|') || inner.includes(' - ')) && /(?<!\\)"/.test(inner)) {
+            const fixedInner = inner.replace(/(?<!\\)"/g, '\\"');
+            return `${prefix}${fixedInner}${suffix}`;
+        }
+        return line;
+    })
+        .join('\n');
+    // 2. Remove trailing commas before ] or }
+    s = s.replace(/,\s*([\]}])/g, '$1');
+    return s;
+}
+function extractCleanJson(rawText, finishReason) {
     const trimmed = (rawText || '').trim();
     if (!trimmed)
         throw new Error('Empty response from Gemini');
@@ -161,17 +184,46 @@ function extractCleanJson(rawText) {
         .replace(/^```(?:json)?\s*/i, '')
         .replace(/\s*```$/i, '')
         .trim();
+    // Attempt 1: Direct JSON.parse
     try {
         return JSON.parse(stripped);
     }
-    catch {
-        const start = stripped.indexOf('{');
-        const end = stripped.lastIndexOf('}');
-        if (start !== -1 && end > start) {
-            return JSON.parse(stripped.slice(start, end + 1));
+    catch { }
+    // Attempt 2: Slice from first '{' to last '}'
+    const start = stripped.indexOf('{');
+    const end = stripped.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+        const sliced = stripped.slice(start, end + 1);
+        try {
+            return JSON.parse(sliced);
         }
-        throw new Error('Invalid JSON response from Gemini');
+        catch {
+            try {
+                return JSON.parse(repairCommonJsonGlitches(sliced));
+            }
+            catch { }
+        }
     }
+    // Attempt 3: Sanitize full stripped text and auto-close if only final closing delimiters were cut off
+    if (start !== -1) {
+        const candidate = repairCommonJsonGlitches(stripped.slice(start));
+        try {
+            return JSON.parse(candidate);
+        }
+        catch { }
+        // If printedFinalTotal or subtotalBeforeDiscount is already present and only closing '}' / ']}' is missing
+        if (/printedFinalTotal|subtotalBeforeDiscount|"intent"\s*:/i.test(candidate)) {
+            for (const suffix of ['}', '"}', '"]}', ']}']) {
+                try {
+                    return JSON.parse(candidate.replace(/,\s*$/, '') + suffix);
+                }
+                catch { }
+            }
+        }
+    }
+    throw new Error(finishReason === 'MAX_TOKENS'
+        ? 'Invalid JSON response from Gemini (truncated by MAX_TOKENS)'
+        : 'Invalid JSON response from Gemini');
 }
 /**
  * 1-MUAMMO: 30 Soniyalik Timeout (`OCR_TIMEOUT_MS = 30000`) va Avtomatik 1 marta Qayta Urinish (`retryOnceOnTimeout`).
@@ -220,7 +272,9 @@ async function generateContentWithFallback(aiCall, models, timeoutMs = exports.O
     }
     throw lastError;
 }
-const askJson = async (parts, maxOutputTokens = exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens, models, timeoutMs = exports.OCR_TIMEOUT_MS) => {
+const askJson = async (parts, maxOutputTokens = exports.OCR_MAX_OUTPUT_TOKENS, models, timeoutMs = exports.OCR_TIMEOUT_MS) => {
+    // Ensure thinking models (e.g. gemini-3-flash-preview) always have enough budget for both thoughts + JSON output
+    const effectiveMaxOutputTokens = Math.max(Number(maxOutputTokens) || 0, exports.INTENT_MAX_OUTPUT_TOKENS);
     return generateContentWithFallback(async (model) => {
         const res = await ai.models.generateContent({
             model,
@@ -228,12 +282,13 @@ const askJson = async (parts, maxOutputTokens = exports.DEFAULT_GENERATION_CONFI
             config: {
                 responseMimeType: 'application/json',
                 temperature: exports.DEFAULT_GENERATION_CONFIG.temperature,
-                maxOutputTokens,
+                maxOutputTokens: effectiveMaxOutputTokens,
             },
         });
         if (!res.text)
             throw new Error('Empty response from Gemini');
-        return extractCleanJson(res.text);
+        const finishReason = res.candidates?.[0]?.finishReason;
+        return extractCleanJson(res.text, finishReason);
     }, models, timeoutMs);
 };
 /**
@@ -510,6 +565,7 @@ function normalizeVerbatimInvoice(raw, caption) {
 class AiService {
     static DEFAULT_GENERATION_CONFIG = exports.DEFAULT_GENERATION_CONFIG;
     static OCR_TIMEOUT_MS = exports.OCR_TIMEOUT_MS;
+    static OCR_MAX_OUTPUT_TOKENS = exports.OCR_MAX_OUTPUT_TOKENS;
     static async parseInvoiceImage(imageBuffer, _mimeType = 'image/jpeg', caption) {
         if (!imageBuffer || imageBuffer.byteLength === 0) {
             throw new Error("Nakladnoy rasm fayli bo'sh");
@@ -522,14 +578,14 @@ class AiService {
             const parsed = await askJson([
                 { text: promptText },
                 { inlineData: { mimeType: 'image/jpeg', data: imageBuffer.toString('base64') } },
-            ], exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens, undefined, exports.OCR_TIMEOUT_MS);
+            ], exports.OCR_MAX_OUTPUT_TOKENS, undefined, exports.OCR_TIMEOUT_MS);
             return normalizeVerbatimInvoice(parsed, caption);
         }, 2, 800, 90000);
     }
     static async parseInvoiceText(invoiceText) {
         return (0, retry_1.withRetry)(async () => {
             const prompt = `${exports.COMPACT_SCANNER_PROMPT}\n\nFoydalanuvchi quyidagi nakladnoy matnini yubordi. Barcha qatorlarni rows massiviga va yakuniy raqamlarga ajrat:\nMatn: "${invoiceText}"`;
-            const parsed = await askJson([{ text: prompt }], exports.DEFAULT_GENERATION_CONFIG.maxOutputTokens);
+            const parsed = await askJson([{ text: prompt }], exports.OCR_MAX_OUTPUT_TOKENS);
             return normalizeVerbatimInvoice(parsed);
         }, 2, 800, 30000);
     }

@@ -20,7 +20,9 @@ import { prisma } from '../src/database/prisma';
 import { ImageService } from '../src/services/image.service';
 import { SupplierService } from '../src/services/supplier.service';
 import {
+  OCR_MAX_OUTPUT_TOKENS,
   OCR_TIMEOUT_MS,
+  extractCleanJson,
   parseCompactScannerRows,
   retryOnceOnTimeout,
 } from '../src/services/ai.service';
@@ -223,8 +225,16 @@ async function main() {
     // CHECK 4: Core Existing Features Intact (30s Timeout, toLatinUz, parseSmartAmount, Strict Discount Guard)
     // ====================================================================
     console.log('▶ CHECK 4: Core Features Regression Check...');
-    // 4.1: 30s OCR timeout + auto-retry
+    // 4.1: 30s OCR timeout + auto-retry + 16384 OCR token budget (prevents Gemini 3 thinking token truncation)
     assert.strictEqual(OCR_TIMEOUT_MS, 30000, 'OCR_TIMEOUT_MS must stay 30000 (30s)');
+    assert.strictEqual(OCR_MAX_OUTPUT_TOKENS, 16384, 'OCR_MAX_OUTPUT_TOKENS must be 16384 to cover Gemini 3 thinking + JSON');
+    const recoveredJson = extractCleanJson(
+      '{\n"supplierName": "Roxat",\n"rows": [\n"1|Печенье "Рохат" Классик|10 кор|45000|450000",\n],\n"printedFinalTotal": 450000\n}'
+    );
+    assert.strictEqual(recoveredJson.supplierName, 'Roxat');
+    assert.strictEqual(recoveredJson.rows.length, 1);
+    assert.strictEqual(recoveredJson.printedFinalTotal, 450000);
+
     let attempts = 0;
     const retryOut = await retryOnceOnTimeout(async () => {
       attempts++;
