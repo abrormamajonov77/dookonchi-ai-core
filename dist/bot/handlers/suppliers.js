@@ -234,8 +234,16 @@ exports.suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
         : `🧾 NAKLADNOY CHEK #${checkNo}\n🏢 Ta'minotchi: ${(0, transliterate_1.toLatinUz)(tx.supplier.name)}\n📅 Sana: ${(0, formatters_1.formatDate)(tx.date)}\n💰 Summa: ${(0, formatters_1.formatCurrency)(tx.amount, tx.currency)}\n${tx.description ? `\nIzoh: ${(0, transliterate_1.toLatinUz)(tx.description)}` : ''}`)
         .replace(/```/g, "'''")
         .slice(0, 3500);
-    const targetInvoiceId = tx.invoiceId || tx.receiptData?.invoiceId || tx.id;
-    const kb = (0, inline_1.getSavedInvoiceCardKeyboard)(targetInvoiceId, tx.supplierId, tx.photoFileId, tx.id);
+    const linkedInvoiceId = tx.invoiceId || tx.receiptData?.invoiceId || null;
+    const linkedInvoice = linkedInvoiceId
+        ? await prisma_1.prisma.invoice.findFirst({
+            where: { id: String(linkedInvoiceId), ownerId },
+            select: { imageFileId: true },
+        })
+        : null;
+    const targetInvoiceId = linkedInvoiceId || tx.id;
+    const originalPhotoFileId = linkedInvoice?.imageFileId || tx.photoFileId;
+    const kb = (0, inline_1.getSavedInvoiceCardKeyboard)(targetInvoiceId, tx.supplierId, originalPhotoFileId, tx.id);
     await (0, telegram_1.replyOrEdit)(ctx, `\`\`\`\n${receipt}\n\`\`\``, kb, true);
 });
 exports.suppliersHandler.callbackQuery('close_msg', (ctx) => ctx.deleteMessage().catch(() => { }));
@@ -243,16 +251,29 @@ exports.suppliersHandler.callbackQuery(/^sup:photo:(.+)$/, async (ctx) => {
     if (!ctx.from)
         return;
     const ownerId = String(ctx.from.id);
+    const refId = ctx.match[1];
     const tx = await prisma_1.prisma.supplierTransaction.findFirst({
-        where: { id: ctx.match[1], ownerId },
-        select: { photoFileId: true },
+        where: { id: refId, ownerId },
+        select: { photoFileId: true, invoiceId: true, receiptData: true },
     });
-    if (!tx?.photoFileId)
+    const linkedInvoiceId = tx?.invoiceId || tx?.receiptData?.invoiceId || refId;
+    const invoice = await prisma_1.prisma.invoice.findFirst({
+        where: { id: String(linkedInvoiceId), ownerId },
+        select: { imageFileId: true },
+    });
+    const originalFileId = invoice?.imageFileId || tx?.photoFileId;
+    if (!originalFileId)
         return ctx.answerCallbackQuery("Asl rasm topilmadi yoki o'chirilgan.");
-    await ctx.replyWithPhoto(tx.photoFileId, {
+    const closeKb = new grammy_1.InlineKeyboard().text('🗑 Yopish', 'close_msg');
+    await ctx
+        .replyWithPhoto(originalFileId, {
         caption: '🖼 Asl nakladnoy rasmi',
-        reply_markup: new grammy_1.InlineKeyboard().text('🗑 Yopish', 'close_msg'),
-    });
+        reply_markup: closeKb,
+    })
+        .catch(() => ctx.replyWithDocument(originalFileId, {
+        caption: '🖼 Asl nakladnoy rasmi',
+        reply_markup: closeKb,
+    }));
 });
 exports.suppliersHandler.callbackQuery('sup:add', async (ctx) => {
     ctx.session.step = 'SUPPLIER_ADD';

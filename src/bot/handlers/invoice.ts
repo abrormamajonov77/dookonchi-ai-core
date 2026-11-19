@@ -1,7 +1,7 @@
-import { Composer, InputFile } from 'grammy';
+import { Composer } from 'grammy';
 import { MyContext } from '../context';
 import { AiService, buildVerbatimTableText } from '../../services/ai.service';
-import { ImageService, createUltraBrightXeroxImage } from '../../services/image.service';
+import { ImageService } from '../../services/image.service';
 import {
   getInvoiceConfirmationKeyboard,
   getDiscountConfirmationKeyboard,
@@ -95,8 +95,8 @@ export function buildPendingPreviewMessage(invoiceData: any, editableText: strin
     (math.discountPercent && Number(math.discountPercent) > 0 ? `${math.discountPercent}%` : '');
 
   const title = invoiceData.isCashOverride
-    ? '🧾 **Naqd Xarid Tahlili (100% HD Kserokopiya)**'
-    : '📄 **Nakladnoy Tahlili (100% HD Kserokopiya)**';
+    ? '🧾 **Naqd Xarid Tahlili**'
+    : '📄 **Nakladnoy Tahlili**';
   const safeCodeBlock = String(editableText || '')
     .replace(/```/g, "'''")
     .slice(0, 3200);
@@ -124,35 +124,13 @@ async function processParsedInvoice(
   photoFileId: string | null,
   userPhotoMsgId: number | null,
   rawCaption: string,
-  statusMsgId?: number | null,
-  xeroxBuffer?: Buffer | null
+  statusMsgId?: number | null
 ) {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
 
   if (invoiceData.supplierName) {
     invoiceData.supplierName = toLatinUz(invoiceData.supplierName).trim();
-  }
-
-  // 5-MUAMMO: Send 1:1 Ultra-Bright HD Xerox image to user first if xeroxBuffer is provided,
-  // and capture its Telegram file_id as the authoritative photoFileId for "🖼 Asl rasmni ko'rish"
-  let effectivePhotoFileId = photoFileId;
-  if (xeroxBuffer && xeroxBuffer.byteLength > 0) {
-    try {
-      const xeroxSupplier = sanitizeMdV1(toLatinUz(invoiceData.supplierName || "Noma'lum"));
-      const cur: 'UZS' | 'USD' = invoiceData.currency === 'USD' ? 'USD' : 'UZS';
-      const itogoText = formatCurrency(invoiceData.finalTotal ?? invoiceData.printedFinalTotal ?? 0, cur);
-      const sentPhoto = await ctx.replyWithPhoto(new InputFile(xeroxBuffer, 'kserokopiya.jpg'), {
-        caption: `🖨 *1:1 HD Kserokopiya Skaner*\n🏢 Ta'minotchi: *${xeroxSupplier}*\n💰 Itogo: *${itogoText}*`,
-        parse_mode: 'Markdown',
-      });
-      const sentPhotos = sentPhoto?.photo;
-      if (Array.isArray(sentPhotos) && sentPhotos.length > 0) {
-        effectivePhotoFileId = sentPhotos[sentPhotos.length - 1].file_id;
-      }
-    } catch (photoErr) {
-      logger.warn({ photoErr }, 'Could not send HD Xerox photo preview');
-    }
   }
 
   if (!invoiceData.exactSupplierId && invoiceData.supplierName && invoiceData.supplierName !== "Noma'lum") {
@@ -169,7 +147,7 @@ async function processParsedInvoice(
             ownerId,
             data: invoiceData,
             imageUrl,
-            photoFileId: effectivePhotoFileId,
+            photoFileId,
             userPhotoMsgId,
             rawCaption,
             suggestedSupplierId: fuzzyCheck.suggestedSupplier.id,
@@ -208,7 +186,7 @@ async function processParsedInvoice(
               ownerId,
               data: invoiceData,
               imageUrl,
-              photoFileId: effectivePhotoFileId,
+              photoFileId,
               userPhotoMsgId,
               rawCaption,
               candidateIds,
@@ -264,7 +242,7 @@ async function processParsedInvoice(
         data: {
           userId: BigInt(ctx.from.id),
           type: 'INVOICE',
-          data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
+          data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
         },
       });
       const dupKb = getDuplicateInvoiceWarningKeyboard(pendingAction.id);
@@ -281,7 +259,7 @@ async function processParsedInvoice(
     data: {
       userId: BigInt(ctx.from.id),
       type: 'INVOICE',
-      data: { ownerId, data: invoiceData, imageUrl, photoFileId: effectivePhotoFileId, userPhotoMsgId },
+      data: { ownerId, data: invoiceData, imageUrl, photoFileId, userPhotoMsgId },
     },
   });
   const actionId = `i_${pendingAction.id}`;
@@ -315,7 +293,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
   const ownerId = String(ctx.from.id);
 
   await withChatAction(ctx, 'upload_photo', async () => {
-    const statusMsg = await ctx.reply('🖨 Nakladnoy 1:1 HD kserokopiya qilinmoqda...').catch(() => null);
+    const statusMsg = await ctx.reply('⚡️ Nakladnoy tahlil qilinmoqda...').catch(() => null);
     try {
       const file = await ctx.api.getFile(fileId);
       if (!file.file_path) throw new Error('Rasm fayli topilmadi');
@@ -325,9 +303,9 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
         cacheService.getSupplierNames(ownerId),
       ]);
 
-      // 5-MUAMMO: Ultra-Bright HD Xerox Scanner (1800px lanczos3, high-contrast B&W, quality 92)
-      const xeroxBuffer = await createUltraBrightXeroxImage(buffer);
-      const imageHash = ImageService.getImageHash(xeroxBuffer);
+      // Lightweight natural color optimization for Gemini Vision OCR (no B&W / contrast burn)
+      const ocrBuffer = await ImageService.optimizeForFastOCR(buffer);
+      const imageHash = ImageService.getImageHash(buffer);
 
       // MODUL 6: Stage 1 ImageHash check before calling AI (isolated by ownerId)
       const stage1Dup = await SupplierService.checkDuplicateInvoice({ ownerId, imageHash });
@@ -369,7 +347,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
       }
 
       const caption = ctx.message?.caption?.trim() || '';
-      const invoiceData = await AiService.parseInvoiceImage(xeroxBuffer, 'image/jpeg', caption);
+      const invoiceData = await AiService.parseInvoiceImage(ocrBuffer, 'image/jpeg', caption);
       (invoiceData as any).imageHash = imageHash;
 
       if (caption) {
@@ -395,8 +373,7 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
         fileId,
         ctx.message!.message_id,
         caption,
-        statusMsg?.message_id,
-        xeroxBuffer
+        statusMsg?.message_id
       );
     } catch (error) {
       logger.error({ error }, 'Error parsing invoice');
@@ -414,11 +391,11 @@ async function handleInvoiceImageUpload(ctx: MyContext, fileId: string, _mimeTyp
 invoiceHandler.on('message:photo', async (ctx) => {
   if (!ctx.user) return;
   clearSession(ctx);
-  // 2-MUAMMO: Har doim eng yuqori sifatli (oxirgi indeksdagi) rasmni ol!
+  // Har doim foydalanuvchi yuborgan eng yuqori sifatli original rangli rasm file_id sini olamiz
   const photos = ctx.message.photo;
-  const highestResPhoto = photos[photos.length - 1];
-  if (highestResPhoto) {
-    await handleInvoiceImageUpload(ctx, highestResPhoto.file_id, 'image/jpeg', 'Nakladnoyni');
+  const originalFileId = photos[photos.length - 1]?.file_id;
+  if (originalFileId) {
+    await handleInvoiceImageUpload(ctx, originalFileId, 'image/jpeg', 'Nakladnoyni');
   }
 });
 
@@ -435,7 +412,7 @@ invoiceHandler.on('message:document', async (ctx, next) => {
 
 invoiceHandler.hears('➕ Nakladnoy', (ctx) => {
   clearSession(ctx);
-  return ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni 100% kserokopiya shaklida tahlil qiladi.');
+  return ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni aniq tahlil qiladi.');
 });
 
 invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.+)$/, async (ctx) => {
@@ -555,7 +532,12 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
           `📊 Ta'minotchi joriy qarzi (${cur}): **${formatCurrency(newDebt, cur)}**`,
         {
           parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
+          reply_markup: getSavedInvoiceCardKeyboard(
+            updated.invoice.id,
+            updated.supplier.id,
+            updated.photoFileId,
+            updated.supTxId
+          ),
         }
       ).catch(() => {});
     }
@@ -613,7 +595,12 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
           `💵 Qarz balansi (USD): **${formatCurrency(updated.supplier.debtUsd, 'USD')}**`,
         {
           parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
+          reply_markup: getSavedInvoiceCardKeyboard(
+            updated.invoice.id,
+            updated.supplier.id,
+            updated.photoFileId,
+            updated.supTxId
+          ),
         }
       ).catch(() => {});
     }
@@ -670,7 +657,12 @@ invoiceHandler.on('message:text', async (ctx, next) => {
           `📊 Ta'minotchi yangilangan qarzi (${cur}): **${formatCurrency(newDebt, cur)}**`,
         {
           parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
+          reply_markup: getSavedInvoiceCardKeyboard(
+            updated.invoice.id,
+            updated.supplier.id,
+            updated.photoFileId,
+            updated.supTxId
+          ),
         }
       );
     } catch (err: any) {
@@ -701,7 +693,12 @@ invoiceHandler.on('message:text', async (ctx, next) => {
           `📊 Ta'minotchi yangilangan qarzi (${cur}): **${formatCurrency(newDebt, cur)}**`,
         {
           parse_mode: 'Markdown',
-          reply_markup: getSavedInvoiceCardKeyboard(updated.invoice.id, updated.supplier.id),
+          reply_markup: getSavedInvoiceCardKeyboard(
+            updated.invoice.id,
+            updated.supplier.id,
+            updated.photoFileId,
+            updated.supTxId
+          ),
         }
       );
     } catch (err: any) {
@@ -975,6 +972,7 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
       forceOverrideDuplicate: !!invoiceData.forceOverrideDuplicate,
       items: Array.isArray(invoiceData.items) ? invoiceData.items : [],
       verbatimText: invoiceData.verbatimText || invoiceData.table_text || '',
+      imageFileId: pData.photoFileId || null,
       photoFileId: pData.photoFileId || null,
       rawImageUrl: pData.imageUrl || null,
     });
@@ -1046,6 +1044,7 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
       forceOverrideDuplicate: !!invoiceData.forceOverrideDuplicate,
       items: Array.isArray(invoiceData.items) ? invoiceData.items : [],
       verbatimText: invoiceData.verbatimText || invoiceData.table_text || '',
+      imageFileId: pData.photoFileId || null,
       photoFileId: pData.photoFileId || null,
       rawImageUrl: pData.imageUrl || null,
     });

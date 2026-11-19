@@ -146,6 +146,7 @@ model Invoice {
   imageHash          String?  @db.VarChar(64)
   contentFingerprint String?  @db.VarChar(128)
   verbatimText       String?
+  imageFileId        String?
   rawImageUrl        String?
   createdAt          DateTime @default(now())
 

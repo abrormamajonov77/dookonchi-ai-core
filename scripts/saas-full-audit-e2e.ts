@@ -6,7 +6,7 @@
  *  - TEST 3: Concurrent Load / Stress Test (10 parallel users + concurrent atomic balance updates, 0 drift)
  *  - TEST 4: Instant Local Text Parser (<5ms) & Makiz 500.000 / $50.17 Payment Accuracy
  *  - TEST 5: Fuzzy Match Supplier Guard ("Dinar" vs "Diner")
- *  - TEST 6: OCR 30s Timeout, No thinkingConfig, HD Xerox 1800px & Background Latin + Bi-Alphabet Search
+ *  - TEST 6: OCR 30s Timeout, No thinkingConfig, Natural Color OCR JPEG & Background Latin + Bi-Alphabet Search
  *  - TEST 7: Zero-Hallucination, Strict Discount Guard (No fake 1.6%), Double-Discount Guard (-5%, -21%) & 2-Table A4
  *  - TEST 8: Handwritten Receipt ("GAZVADA - 5.000") & 2-Stage Anti-Duplicate Guard (ImageHash + ContentFingerprint)
  *  - TEST 9: 5-Column Daily Z-Report (10,000,000 so'm) & Yesterday Safe Cash Guard (PREVIOUS_SAFE excluded)
@@ -26,7 +26,7 @@ import {
   parseCompactScannerRows,
   retryOnceOnTimeout,
 } from '../src/services/ai.service';
-import { createUltraBrightXeroxImage } from '../src/services/image.service';
+import { ImageService } from '../src/services/image.service';
 import { SupplierService } from '../src/services/supplier.service';
 import { SubscriptionService } from '../src/services/subscription.service';
 import { SearchService } from '../src/services/search.service';
@@ -448,12 +448,13 @@ async function main() {
     assert.strictEqual(retried, 'RECOVERED');
     assert.strictEqual(retryAttempts, 2);
 
-    // Ultra-Bright HD Xerox 1800px
+    // Natural Color OCR JPEG (no B&W / contrast burn)
     const samplePhoto = await createSampleReceiptBuffer();
-    const xeroxBuf = await createUltraBrightXeroxImage(samplePhoto);
-    const xeroxMeta = await sharp(xeroxBuf).metadata();
-    assert.strictEqual(xeroxMeta.format, 'jpeg');
-    assert.strictEqual(xeroxMeta.width, 1800);
+    const ocrBuf = await ImageService.optimizeForFastOCR(samplePhoto);
+    const ocrMeta = await sharp(ocrBuf).metadata();
+    assert.strictEqual(ocrMeta.format, 'jpeg');
+    assert.strictEqual(ocrMeta.channels, 3);
+    assert.strictEqual(ocrMeta.space, 'srgb');
 
     // Background Latin (<5ms) + Bi-Alphabet Product Search
     toLatinUz('Ярко Кетчуп 500гр'); // warm-up
@@ -487,7 +488,7 @@ async function main() {
     assert.ok(foundByCyrillic.length >= 1, 'Must find product by Cyrillic query');
     assert.ok(foundByLatin.length >= 1, 'Must find product by Latin query');
     console.log(
-      `  ✅ PASS: 30s timeout, 1x retry, HD Xerox ${xeroxMeta.width}x${xeroxMeta.height}, toLatinUz ${latMs.toFixed(3)} ms, Cyrillic/Latin search OK!\n`
+      `  ✅ PASS: 30s timeout, 1x retry, Natural Color OCR ${ocrMeta.width}x${ocrMeta.height} sRGB, toLatinUz ${latMs.toFixed(3)} ms, Cyrillic/Latin search OK!\n`
     );
 
     // ====================================================================
@@ -568,7 +569,7 @@ async function main() {
       50000
     );
 
-    const dupHash = SupplierService.computeImageHash(xeroxBuf);
+    const dupHash = SupplierService.computeImageHash(samplePhoto);
     const firstSave = await SupplierService.createInvoiceWithItems({
       ownerId: TENANT_X,
       supplierName: 'HandwrittenShop',

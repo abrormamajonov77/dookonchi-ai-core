@@ -5,7 +5,7 @@
  * - TEST 2 (No Hallucination & Strict Discount Guard): No fake 1.6% (-35,076.80) discount when paper has no discount, while preserving real Nestle -21% (-59,602.62 -> 224,219.38) without double deduction.
  * - TEST 3 (Makiz 500.000 Payment Fix): `parseSmartAmount("500.000") === 500000`, `parseSmartAmount("50.17$") === 50.17`, and "Makiz" 500.000 UZS payment recorded & deducted in Postgres.
  * - TEST 4 (Handwritten Receipt "GAZVADA - 5.000"): Handwritten list items ("GAZVADA - 5.000", "choy chupli kichik - 3.000", "Кола 2л - 18.000", "Flavis 1.5 - 12.000", "+18 - 12.000", "~Pepsi 1.5 - 15.000~") parsed accurately.
- * - TEST 5 (Ultra-Bright HD Xerox Image & Code Deduplication): `createUltraBrightXeroxImage` outputs 1800px high-contrast grayscale JPEG, highest-res photo index is used, and zero duplicate callback handlers exist.
+ * - TEST 5 (Natural Color OCR Image & Code Deduplication): `ImageService.optimizeForFastOCR` outputs natural color sRGB JPEG, highest-res photo index is used, and zero duplicate callback handlers exist.
  */
 
 import assert from 'assert';
@@ -22,7 +22,7 @@ import {
   parseHandwrittenReceiptLine,
   retryOnceOnTimeout,
 } from '../src/services/ai.service';
-import { createUltraBrightXeroxImage } from '../src/services/image.service';
+import { ImageService } from '../src/services/image.service';
 import { SupplierService } from '../src/services/supplier.service';
 import { parseCurrencyAndAmount, parseSmartAmount, reconcileInvoiceTotals } from '../src/utils/formatters';
 import { toLatinUz } from '../src/utils/transliterate';
@@ -243,18 +243,19 @@ async function main() {
     );
 
     // ====================================================================
-    // TEST 5: Ultra-Bright HD Xerox Image & Code Deduplication Check
+    // TEST 5: Natural Color OCR Image & Code Deduplication Check
     // ====================================================================
-    console.log('▶ TEST 5 (Ultra-Bright HD Xerox Image & Code Deduplication)...');
+    console.log('▶ TEST 5 (Natural Color OCR Image & Code Deduplication)...');
     const sampleBuf = await createSamplePhotoBuffer();
-    const xeroxBuf = await createUltraBrightXeroxImage(sampleBuf);
-    assert.ok(xeroxBuf && xeroxBuf.byteLength > 1000, 'Xerox buffer must not be empty');
+    const ocrBuf = await ImageService.optimizeForFastOCR(sampleBuf);
+    assert.ok(ocrBuf && ocrBuf.byteLength > 1000, 'OCR buffer must not be empty');
 
-    const meta = await sharp(xeroxBuf).metadata();
+    const meta = await sharp(ocrBuf).metadata();
     assert.strictEqual(meta.format, 'jpeg');
-    assert.strictEqual(meta.width, 1800, 'HD Xerox width must be upscaled/resized to 1800px');
+    assert.strictEqual(meta.channels, 3, 'OCR image must remain 3-channel color sRGB');
+    assert.strictEqual(meta.space, 'srgb');
 
-    // Verify invoice.ts uses highest-res photo index `photos[photos.length - 1]` and `createUltraBrightXeroxImage`
+    // Verify invoice.ts uses highest-res photo index `photos[photos.length - 1]` and does NOT re-send B&W xerox
     const invoiceHandlerSrc = fs.readFileSync(
       path.join(__dirname, '../src/bot/handlers/invoice.ts'),
       'utf8'
@@ -264,12 +265,9 @@ async function main() {
       'invoice.ts must take the highest-resolution photo (photos[photos.length - 1])'
     );
     assert.ok(
-      invoiceHandlerSrc.includes('createUltraBrightXeroxImage'),
-      'invoice.ts must pass photo through createUltraBrightXeroxImage'
-    );
-    assert.ok(
-      invoiceHandlerSrc.includes("new InputFile(xeroxBuffer, 'kserokopiya.jpg')"),
-      'invoice.ts must replyWithPhoto using InputFile(xeroxBuffer, "kserokopiya.jpg")'
+      !invoiceHandlerSrc.includes('createUltraBrightXeroxImage') &&
+        !invoiceHandlerSrc.includes('kserokopiya.jpg'),
+      'invoice.ts must NOT use HD Xerox filter or re-send B&W kserokopiya'
     );
 
     // Verify no duplicate callbackQuery patterns across handler files
@@ -290,7 +288,7 @@ async function main() {
       }
     }
     console.log(
-      `  ✅ PASS: HD Xerox image (${meta.width}x${meta.height} JPEG, ${(xeroxBuf.byteLength / 1024).toFixed(1)} KB) & 0 duplicate handlers across ${handlerFiles.length} files\n`
+      `  ✅ PASS: Natural color OCR image (${meta.width}x${meta.height} sRGB JPEG, ${(ocrBuf.byteLength / 1024).toFixed(1)} KB) & 0 duplicate handlers across ${handlerFiles.length} files\n`
     );
 
     console.log('====================================================================');

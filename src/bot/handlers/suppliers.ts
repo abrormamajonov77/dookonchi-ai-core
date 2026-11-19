@@ -316,8 +316,16 @@ suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
     .replace(/```/g, "'''")
     .slice(0, 3500);
 
-  const targetInvoiceId = tx.invoiceId || (tx.receiptData as any)?.invoiceId || tx.id;
-  const kb = getSavedInvoiceCardKeyboard(targetInvoiceId, tx.supplierId, tx.photoFileId, tx.id);
+  const linkedInvoiceId = tx.invoiceId || (tx.receiptData as any)?.invoiceId || null;
+  const linkedInvoice = linkedInvoiceId
+    ? await prisma.invoice.findFirst({
+        where: { id: String(linkedInvoiceId), ownerId },
+        select: { imageFileId: true },
+      })
+    : null;
+  const targetInvoiceId = linkedInvoiceId || tx.id;
+  const originalPhotoFileId = linkedInvoice?.imageFileId || tx.photoFileId;
+  const kb = getSavedInvoiceCardKeyboard(targetInvoiceId, tx.supplierId, originalPhotoFileId, tx.id);
   await replyOrEdit(ctx, `\`\`\`\n${receipt}\n\`\`\``, kb, true);
 });
 
@@ -326,15 +334,31 @@ suppliersHandler.callbackQuery('close_msg', (ctx) => ctx.deleteMessage().catch((
 suppliersHandler.callbackQuery(/^sup:photo:(.+)$/, async (ctx) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
+  const refId = ctx.match[1];
   const tx = await prisma.supplierTransaction.findFirst({
-    where: { id: ctx.match[1], ownerId },
-    select: { photoFileId: true },
+    where: { id: refId, ownerId },
+    select: { photoFileId: true, invoiceId: true, receiptData: true },
   });
-  if (!tx?.photoFileId) return ctx.answerCallbackQuery("Asl rasm topilmadi yoki o'chirilgan.");
-  await ctx.replyWithPhoto(tx.photoFileId, {
-    caption: '🖼 Asl nakladnoy rasmi',
-    reply_markup: new InlineKeyboard().text('🗑 Yopish', 'close_msg'),
+  const linkedInvoiceId = tx?.invoiceId || (tx?.receiptData as any)?.invoiceId || refId;
+  const invoice = await prisma.invoice.findFirst({
+    where: { id: String(linkedInvoiceId), ownerId },
+    select: { imageFileId: true },
   });
+  const originalFileId = invoice?.imageFileId || tx?.photoFileId;
+  if (!originalFileId) return ctx.answerCallbackQuery("Asl rasm topilmadi yoki o'chirilgan.");
+
+  const closeKb = new InlineKeyboard().text('🗑 Yopish', 'close_msg');
+  await ctx
+    .replyWithPhoto(originalFileId, {
+      caption: '🖼 Asl nakladnoy rasmi',
+      reply_markup: closeKb,
+    })
+    .catch(() =>
+      ctx.replyWithDocument(originalFileId, {
+        caption: '🖼 Asl nakladnoy rasmi',
+        reply_markup: closeKb,
+      })
+    );
 });
 
 suppliersHandler.callbackQuery('sup:add', async (ctx) => {

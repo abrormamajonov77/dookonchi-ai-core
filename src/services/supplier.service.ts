@@ -509,11 +509,13 @@ export class SupplierService {
       }
     >;
     verbatimText?: string;
+    imageFileId?: string | null;
     photoFileId?: string | null;
     rawImageUrl?: string | null;
     createdAt?: Date;
   }) {
     const ownerId = String(params.ownerId || env.OWNER_TELEGRAM_ID).trim();
+    const originalFileId = params.imageFileId || params.photoFileId || null;
     const currency: 'UZS' | 'USD' = params.currency || 'UZS';
     const paymentSource: 'TODAY_CASH' | 'PREVIOUS_SAFE' = params.paymentSource || 'TODAY_CASH';
     const createdAt = params.createdAt || new Date();
@@ -672,6 +674,7 @@ export class SupplierService {
             imageHash,
             contentFingerprint,
             verbatimText: verbatimText || null,
+            imageFileId: originalFileId,
             rawImageUrl: params.rawImageUrl || null,
             createdAt,
           },
@@ -790,7 +793,7 @@ export class SupplierService {
             discountAmount: math.discountAmount,
             currency,
             date: createdAt,
-            photoFileId: params.photoFileId || null,
+            photoFileId: originalFileId,
             formattedReceipt,
             description: `Nakladnoy ${params.invoiceNo || ''} (${paymentType})`.trim(),
             receiptData: {
@@ -1041,6 +1044,8 @@ export class SupplierService {
           discountAmount: math.discountAmount,
           finalTotal: math.finalTotal,
           currency,
+          photoFileId: updatedInvoice.imageFileId || supTx?.photoFileId || null,
+          supTxId: supTx?.id || updatedInvoice.id,
         };
       },
       { maxWait: 15000, timeout: 30000 }
@@ -1129,6 +1134,8 @@ export class SupplierService {
           discountAmount,
           finalTotal,
           currency,
+          photoFileId: updatedInvoice.imageFileId || supTx?.photoFileId || null,
+          supTxId: supTx?.id || updatedInvoice.id,
         };
       },
       { maxWait: 15000, timeout: 30000 }
@@ -1193,6 +1200,8 @@ export class SupplierService {
           discountAmount,
           finalTotal,
           currency: newCurrency,
+          photoFileId: updatedInvoice.imageFileId || supTx?.photoFileId || null,
+          supTxId: supTx?.id || updatedInvoice.id,
         };
       },
       { maxWait: 15000, timeout: 30000 }
