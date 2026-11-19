@@ -1,21 +1,6 @@
-import http from 'node:http';
-import https from 'node:https';
 import { env } from '../config/env';
+import { prisma } from '../database/prisma';
 import { MyContext } from '../bot/context';
-
-export const httpKeepAliveAgent = new http.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
-  maxSockets: 50,
-  maxFreeSockets: 10,
-});
-
-export const httpsKeepAliveAgent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
-  maxSockets: 50,
-  maxFreeSockets: 10,
-});
 
 export async function withChatAction<T>(ctx: any, action: string, task: () => Promise<T>): Promise<T> {
   await ctx.replyWithChatAction(action).catch(() => {});
@@ -27,12 +12,20 @@ export async function withChatAction<T>(ctx: any, action: string, task: () => Pr
   }
 }
 
-export async function handleInlineAction<T>(ctx: any, task: () => Promise<T>): Promise<T> {
-  try {
-    return await task();
-  } finally {
-    await ctx.answerCallbackQuery().catch(() => {});
-  }
+export async function findOwnedPendingAction(id: string, userId: number | string | bigint) {
+  return prisma.pendingAction
+    .findFirst({
+      where: { id, userId: BigInt(userId) },
+    })
+    .catch(() => null);
+}
+
+export async function deleteOwnedPendingAction(id: string, userId: number | string | bigint) {
+  return prisma.pendingAction
+    .deleteMany({
+      where: { id, userId: BigInt(userId) },
+    })
+    .catch(() => {});
 }
 
 export async function downloadTelegramFile(filePath: string): Promise<Buffer> {

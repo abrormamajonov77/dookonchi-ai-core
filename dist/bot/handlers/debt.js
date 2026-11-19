@@ -158,14 +158,19 @@ exports.debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
     });
     const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
     ctx.session.step = 'DEBT_PAYMENT';
-    ctx.session.tempData = { customerName: firstDebt.customerName, firstId, totalRem };
+    ctx.session.tempData = {
+        customerName: firstDebt.customerName,
+        firstId,
+        totalRem,
+        currency: firstDebt.currency,
+    };
     const kb = totalRem > 0
         ? new grammy_1.InlineKeyboard()
             .text(`💯 To'liq yopish (${(0, formatters_1.formatCurrency)(totalRem, firstDebt.currency)})`, `debt:qpay:${firstId}:${totalRem}`)
             .row()
             .text(`🌓 Yarmini yopish (${(0, formatters_1.formatCurrency)(Number((totalRem / 2).toFixed(2)), firstDebt.currency)})`, `debt:qpay:${firstId}:${Number((totalRem / 2).toFixed(2))}`)
         : undefined;
-    await (0, telegram_1.safeReply)(ctx, `💸 **${(0, telegram_1.sanitizeMdV1)(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`, { parse_mode: 'Markdown', reply_markup: kb });
+    await (0, telegram_1.safeReply)(ctx, `💸 **${(0, telegram_1.sanitizeMdV1)(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 500.000, 50 ming yoki $25.50)`, { parse_mode: 'Markdown', reply_markup: kb });
 });
 exports.debtHandler.callbackQuery(/^debt:qpay:(.+):([\d.]+)$/, async (ctx) => {
     if (!ctx.from)
@@ -212,9 +217,15 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
             (0, telegram_1.clearSession)(ctx);
             return next();
         }
-        const { amount: payAmount, currency } = (0, formatters_1.parseCurrencyAndAmount)(rawText);
+        const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawText);
+        const payAmount = (0, formatters_1.parseSmartAmount)(rawText) || parsed.amount;
+        const currency = parsed.currency === 'USD'
+            ? 'USD'
+            : ctx.session.tempData?.currency === 'USD'
+                ? 'USD'
+                : 'UZS';
         if (!payAmount || payAmount <= 0 || isNaN(payAmount)) {
-            return ctx.reply("❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 50 ming yoki $25.50). To'xtatish uchun /start.");
+            return ctx.reply("❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 500.000, 50 ming yoki $25.50). To'xtatish uchun /start.");
         }
         const remainingTotal = await applyCustomerPaymentFIFO(ownerId, customerName, payAmount, currency);
         (0, telegram_1.clearSession)(ctx);
@@ -235,18 +246,20 @@ exports.debtHandler.on('message:text', async (ctx, next) => {
     }
     const customerName = text.match(/Mijoz:\s*([^\n]+)/i)?.[1]?.trim() || '';
     const rawSummaLine = text.match(/Summa:\s*([^\n]+)/i)?.[1] || '';
-    const { amount, currency } = (0, formatters_1.parseCurrencyAndAmount)(rawSummaLine);
+    const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawSummaLine);
+    const amount = (0, formatters_1.parseSmartAmount)(rawSummaLine) || parsed.amount;
+    const currency = parsed.currency;
     const phone = text.match(/Telefon:\s*([^\n]+)/i)?.[1]?.trim() || '';
     const note = text.match(/Izoh:\s*([\s\S]+)/i)?.[1]?.trim() || '';
     if (!customerName)
         return ctx.reply("❌ Mijoz ismini aniqlab bo'lmadi.");
-    if (!amount)
+    if (!amount || amount <= 0)
         return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
     const actionId = `debt_conf_${Date.now()}`;
     ctx.session.tempData = { type: 'DEBT_TEMPLATE', data: { amount, currency, customerName, phone, note } };
     ctx.session.step = actionId;
-    const confirmText = `🧾 *Nasiya Tahlili:*\n▫️ *Operatsiya:* Nasiya savdo\n▫️ *Mijoz:* ${customerName}\n▫️ *Summa:* ${(0, formatters_1.formatCurrency)(amount, currency)}\n${phone ? `▫️ *Telefon:* ${phone}\n` : ''}${note ? `▫️ *Izoh:* ${note}\n` : ''}\nMa'lumotlar to'g'rimi?`;
-    await ctx.reply(confirmText, {
+    const confirmText = `🧾 *Nasiya Tahlili:*\n▫️ *Operatsiya:* Nasiya savdo\n▫️ *Mijoz:* ${(0, telegram_1.sanitizeMdV1)(customerName)}\n▫️ *Summa:* ${(0, formatters_1.formatCurrency)(amount, currency)}\n${phone ? `▫️ *Telefon:* ${(0, telegram_1.sanitizeMdV1)(phone)}\n` : ''}${note ? `▫️ *Izoh:* ${(0, telegram_1.sanitizeMdV1)(note)}\n` : ''}\nMa'lumotlar to'g'rimi?`;
+    await (0, telegram_1.safeReply)(ctx, confirmText, {
         parse_mode: 'Markdown',
         reply_markup: (0, inline_1.getTemplateConfirmKeyboard)('debt:edit', actionId),
     });

@@ -3,7 +3,8 @@ import { Bot } from 'grammy';
 import { prisma } from '../database/prisma';
 import { MyContext } from '../bot/context';
 import { logger } from '../config/logger';
-import { formatMoney, getToday } from '../utils/formatters';
+import { formatMoney, getTashkentDayRange } from '../utils/formatters';
+import { sanitizeMdV1 } from '../utils/telegram';
 import { ReportService } from './report.service';
 import { SubscriptionService } from './subscription.service';
 import { getReportKeyboard } from '../bot/handlers/report';
@@ -18,15 +19,22 @@ export function startCronJobs(bot: Bot<MyContext>) {
     });
   };
 
-  // Har 6 soatda (va soat 10:00 da) — Obuna muddati <= 3 kun qolganlar va tugaganlarni avtomatik tekshirish
+  // Har 6 soatda — Obuna muddati <= 3 kun qolganlar, tugaganlarni tekshirish + 24 soatdan eski PendingAction larni tozalash
   cron.schedule(
     '0 */6 * * *',
     async () => {
-      logger.info('Running cron: Subscription Expiry & 3-Day Reminder Check');
+      logger.info('Running cron: Subscription Expiry, 3-Day Reminder & Stale PendingAction Cleanup');
       try {
-        await SubscriptionService.checkExpiringAndExpiredSubscriptions((targetId, text, replyMarkup) =>
-          bot.api.sendMessage(targetId, text, replyMarkup ? { reply_markup: replyMarkup } : undefined)
-        );
+        await Promise.all([
+          SubscriptionService.checkExpiringAndExpiredSubscriptions((targetId, text, replyMarkup) =>
+            bot.api.sendMessage(targetId, text, replyMarkup ? { reply_markup: replyMarkup } : undefined)
+          ),
+          prisma.pendingAction
+            .deleteMany({
+              where: { createdAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+            })
+            .catch(() => {}),
+        ]);
       } catch (error) {
         logger.error({ error }, 'Failed to run subscription check cron');
       }
@@ -98,7 +106,8 @@ export function startCronJobs(bot: Bot<MyContext>) {
           });
           if (oldDebts.length) {
             const lines = oldDebts.map(
-              (d) => `- ${d.customerName}: ${formatMoney(Number(d.amount) - Number(d.paidAmount), d.currency)}`
+              (d) =>
+                `- ${sanitizeMdV1(d.customerName)}: ${formatMoney(Number(d.amount) - Number(d.paidAmount), d.currency)}`
             );
             await bot.api
               .sendMessage(u.telegramId, `⚠️ **Eski Nasiyalar (7 kundan oshgan)**\n\n${lines.join('\n')}`, {
@@ -114,17 +123,17 @@ export function startCronJobs(bot: Bot<MyContext>) {
     opts
   );
 
-  // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma
+  // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma (Toshkent UTC+5 dateKey)
   cron.schedule(
     '0 20 * * *',
     async () => {
       logger.info('Running cron: 20:00 Z-Report Reminder');
       try {
         const users = await getActiveStoreUsers();
-        const today = getToday();
+        const { dateKey } = getTashkentDayRange();
         for (const u of users) {
           const register = await prisma.dailyRegister.findUnique({
-            where: { ownerId_date: { ownerId: u.telegramId, date: today } },
+            where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
           });
           if (!register?.isClosed) {
             await bot.api
@@ -142,18 +151,18 @@ export function startCronJobs(bot: Bot<MyContext>) {
     opts
   );
 
-  // Har kuni soat 21:00 da — Kunlik yakuniy hisobot (har bir foydalanuvchi uchun alohida)
+  // Har kuni soat 21:00 da — Kunlik yakuniy hisobot (Toshkent UTC+5 dateKey, har bir foydalanuvchi uchun alohida)
   cron.schedule(
     '0 21 * * *',
     async () => {
       logger.info('Running cron: 21:00 Daily Summary');
       try {
         const users = await getActiveStoreUsers();
-        const today = getToday();
+        const { dateKey } = getTashkentDayRange();
         for (const u of users) {
           const [r, supAgg] = await Promise.all([
             prisma.dailyRegister.findUnique({
-              where: { ownerId_date: { ownerId: u.telegramId, date: today } },
+              where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
             }),
             prisma.supplier.aggregate({
               where: { ownerId: u.telegramId, isActive: true },

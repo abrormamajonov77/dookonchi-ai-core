@@ -364,11 +364,15 @@ exports.invoiceHandler.hears('➕ Nakladnoy', (ctx) => {
     return ctx.reply('📷 Iltimos, nakladnoy chekining rasmini (yoki hujjat shaklida) yuboring. AI uni 100% kserokopiya shaklida tahlil qiladi.');
 });
 exports.invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
     const rawId = ctx.match[1];
-    const isPending = rawId.startsWith('p_') || !(await prisma_1.prisma.invoice.findUnique({ where: { id: rawId } }).catch(() => null));
+    const isPending = rawId.startsWith('p_') ||
+        !(await prisma_1.prisma.invoice.findFirst({ where: { id: rawId, ownerId }, select: { id: true } }).catch(() => null));
     const cleanId = rawId.replace(/^p_/, '');
     if (isPending) {
-        const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null);
+        const pendingAction = await (0, telegram_1.findOwnedPendingAction)(cleanId, ctx.from.id);
         if (pendingAction && pendingAction.type === 'INVOICE') {
             const botMessageId = ctx.callbackQuery.message?.message_id;
             await prisma_1.prisma.pendingAction.update({
@@ -385,11 +389,11 @@ exports.invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?
     await ctx.reply('🏷 **Saqlangan nakladnoy uchun chegirma (skidka) miqdorini kiriting:**\n• Foizda: masalan, `5%` yoki `10%`\n• Summada: masalan, `15000` yoki `$12.50`', { parse_mode: 'Markdown' });
 });
 exports.invoiceHandler.callbackQuery(/^edit_invoice_total:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const rawId = ctx.match[1];
     const cleanId = rawId.replace(/^p_/, '');
-    const pendingAction = rawId.startsWith('p_')
-        ? await prisma_1.prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-        : null;
+    const pendingAction = rawId.startsWith('p_') ? await (0, telegram_1.findOwnedPendingAction)(cleanId, ctx.from.id) : null;
     if (pendingAction && pendingAction.type === 'INVOICE') {
         const botMessageId = ctx.callbackQuery.message?.message_id;
         await prisma_1.prisma.pendingAction.update({
@@ -414,9 +418,7 @@ exports.invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx
     const ownerId = String(ctx.from.id);
     const rawId = ctx.match[1];
     const cleanId = rawId.replace(/^p_/, '');
-    const pendingAction = rawId.startsWith('p_')
-        ? await prisma_1.prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-        : null;
+    const pendingAction = rawId.startsWith('p_') ? await (0, telegram_1.findOwnedPendingAction)(cleanId, ctx.from.id) : null;
     if (pendingAction && pendingAction.type === 'INVOICE') {
         const pData = pendingAction.data;
         const invoiceData = pData.data;
@@ -467,9 +469,7 @@ exports.invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ct
     const ownerId = String(ctx.from.id);
     const rawId = ctx.match[1];
     const cleanId = rawId.replace(/^p_/, '');
-    const pendingAction = rawId.startsWith('p_')
-        ? await prisma_1.prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-        : null;
+    const pendingAction = rawId.startsWith('p_') ? await (0, telegram_1.findOwnedPendingAction)(cleanId, ctx.from.id) : null;
     if (pendingAction && pendingAction.type === 'INVOICE') {
         const pData = pendingAction.data;
         const invoiceData = pData.data;
@@ -513,20 +513,23 @@ exports.invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ct
     }
 });
 function parseTwoOrOneAmounts(rawText) {
-    const parts = rawText
-        .trim()
+    const trimmed = rawText.trim();
+    // Single space-separated thousands number like "500 000" or "1 250 000"
+    if (/^\$?\d{1,3}(?:\s+\d{3})+(?:\s*(?:so['`’]?m|uzs|usd|usdt|\$))?$/i.test(trimmed)) {
+        return { first: (0, formatters_1.parseSmartAmount)(trimmed) };
+    }
+    const parts = trimmed
         .split(/[\s/;|-]+/)
         .map((p) => p.trim())
         .filter((p) => /\d/.test(p));
     if (parts.length >= 2) {
-        const first = (0, formatters_1.parseCurrencyAndAmount)(parts[0]).amount;
-        const second = (0, formatters_1.parseCurrencyAndAmount)(parts[1]).amount;
+        const first = (0, formatters_1.parseSmartAmount)(parts[0]);
+        const second = (0, formatters_1.parseSmartAmount)(parts[1]);
         if (first > 0 && second >= 0) {
             return { first, second };
         }
     }
-    const single = (0, formatters_1.parseCurrencyAndAmount)(rawText).amount;
-    return { first: single };
+    return { first: (0, formatters_1.parseSmartAmount)(trimmed) };
 }
 exports.invoiceHandler.on('message:text', async (ctx, next) => {
     if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/'))
@@ -730,7 +733,9 @@ exports.invoiceHandler.on('message:text', async (ctx, next) => {
     return next();
 });
 const extractPendingInvoice = async (ctx, pendingId) => {
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
+    if (!ctx.from)
+        return null;
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction || pendingAction.type !== 'INVOICE') {
         await ctx
             .editMessageText("⚠️ Ushbu operatsiya muddati tugagan yoki allaqachon tasdiqlangan. Iltimos, xabarni qaytadan yuboring.", { reply_markup: undefined })
@@ -763,8 +768,10 @@ const extractPendingInvoice = async (ctx, pendingId) => {
     };
 };
 exports.invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const pendingId = ctx.match[1];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction)
         return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
     const pData = pendingAction.data;
@@ -788,6 +795,8 @@ exports.invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery({ text: "✅ Qayta kiritishga ruxsat berildi. To'lov turini tanlang." });
 });
 exports.invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
     if (!extracted)
         return;
@@ -814,7 +823,7 @@ exports.invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => 
             photoFileId: pData.photoFileId || null,
             rawImageUrl: pData.imageUrl || null,
         });
-        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+        await (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id);
         (0, telegram_1.clearSession)(ctx);
         if (result.isDuplicate && result.warningText) {
             await ctx.editMessageText(result.warningText, { reply_markup: undefined });
@@ -844,6 +853,8 @@ exports.invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => 
     }
 });
 exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
     if (!extracted)
         return;
@@ -870,7 +881,7 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
             photoFileId: pData.photoFileId || null,
             rawImageUrl: pData.imageUrl || null,
         });
-        await prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { });
+        await (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id);
         (0, telegram_1.clearSession)(ctx);
         if (result.isDuplicate && result.warningText) {
             await ctx.editMessageText(result.warningText, { reply_markup: undefined });
@@ -899,12 +910,14 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
     }
 });
 exports.invoiceHandler.callbackQuery(/^cancel_(?:i|idis)_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const pendingId = ctx.match[1];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (pendingAction) {
         await Promise.all([
             (0, telegram_1.safeDelete)(ctx, ctx.chat?.id, pendingAction.data?.userPhotoMsgId),
-            prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { }),
+            (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id),
         ]);
     }
     (0, telegram_1.clearSession)(ctx);
@@ -915,7 +928,7 @@ exports.invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
         return;
     const ownerId = String(ctx.from.id);
     const [, pendingId, rawIdx] = ctx.match;
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction || pendingAction.type !== 'INVOICE_DISAMBIGUATION')
         return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
     const pData = pendingAction.data;
@@ -928,14 +941,16 @@ exports.invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
     pData.data.exactSupplierId = supplier.id;
     pData.data.supplierName = supplier.name;
     await Promise.all([
-        prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }),
+        (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id),
         ctx.deleteMessage().catch(() => { }),
     ]);
     await processParsedInvoice(ctx, pData.data, pData.imageUrl, pData.photoFileId, pData.userPhotoMsgId, pData.rawCaption);
 });
 exports.invoiceHandler.callbackQuery(/^inew_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const pendingId = ctx.match[1];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } });
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction || pendingAction.type !== 'INVOICE_DISAMBIGUATION')
         return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
     await prisma_1.prisma.pendingAction.update({
@@ -951,7 +966,7 @@ exports.invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):
         return;
     const ownerId = String(ctx.from.id);
     const pendingId = ctx.match[1] || ctx.match[3];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction)
         return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
     const pData = pendingAction.data;
@@ -964,32 +979,36 @@ exports.invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):
     pData.data.exactSupplierId = supplier.id;
     pData.data.supplierName = supplier.name;
     await Promise.all([
-        prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }),
+        (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id),
         ctx.deleteMessage().catch(() => { }),
     ]);
     await processParsedInvoice(ctx, pData.data, pData.imageUrl, pData.photoFileId, pData.userPhotoMsgId, pData.rawCaption);
 });
 exports.invoiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):inv_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const pendingId = ctx.match[1];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (!pendingAction)
         return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
     const pData = pendingAction.data;
     pData.data.exactSupplierId = 'CREATE_NEW';
     pData.data.supplierName = (0, transliterate_1.toLatinUz)(pData.data.supplierName || "Noma'lum");
     await Promise.all([
-        prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }),
+        (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id),
         ctx.deleteMessage().catch(() => { }),
     ]);
     await processParsedInvoice(ctx, pData.data, pData.imageUrl, pData.photoFileId, pData.userPhotoMsgId, pData.rawCaption);
 });
 exports.invoiceHandler.callbackQuery(/^(?:sf_no|sup_fuzzy_cancel):inv_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
     const pendingId = ctx.match[1];
-    const pendingAction = await prisma_1.prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
     if (pendingAction) {
         await Promise.all([
             (0, telegram_1.safeDelete)(ctx, ctx.chat?.id, pendingAction.data?.userPhotoMsgId),
-            prisma_1.prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => { }),
+            (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id),
         ]);
     }
     (0, telegram_1.clearSession)(ctx);

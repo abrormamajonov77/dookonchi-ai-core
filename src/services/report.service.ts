@@ -1,6 +1,7 @@
 import { prisma } from '../database/prisma';
 import { env } from '../config/env';
 import { formatMoney, formatDateShort, formatSom, getTashkentDayRange } from '../utils/formatters';
+import { sanitizeMdV1 } from '../utils/telegram';
 
 export type ReportPeriod = 'current_week' | 'last_week' | 'current_month' | 'last_month';
 
@@ -159,9 +160,6 @@ export interface AggregatedReportMetrics {
   prevCreditPercent?: number | null;
 }
 
-const sanitizeMd = (str: string): string =>
-  (str || '').replace(/[*_`\[\]]/g, '');
-
 const formatDualCurrency = (uzs: number, usd: number): string => {
   const uzsPart = formatMoney(uzs, 'UZS');
   return usd !== 0 ? `${uzsPart} (+ ${formatMoney(usd, 'USD')})` : uzsPart;
@@ -254,24 +252,17 @@ export class ReportService {
   }
 
   /**
-   * MODUL 5 & 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
-   * isolated by `ownerId` for the current Tashkent day (`UTC+5`).
-   * Only `paymentSource === "TODAY_CASH"` supplier payments and cash purchases are added to today's sales!
-   * `paymentSource === "PREVIOUS_SAFE"` (from yesterday's Z-Report / safe) are excluded from today's sales and shown as info.
+   * Single source of truth for today's automatic Z-Report columns (used by both closing preview and save).
+   * Strictly isolated by `ownerId` and `paymentSource` ("TODAY_CASH" vs "PREVIOUS_SAFE").
    */
-  static async generateAndSaveZReport(input: ZReportInput): Promise<ZReportResult> {
-    const ownerId = String(input.ownerId || env.OWNER_TELEGRAM_ID).trim();
-    const now = input.now || new Date();
+  static async getTodayZReportAutoMetrics(ownerId: string, now: Date = new Date()) {
+    const cleanOwnerId = String(ownerId || env.OWNER_TELEGRAM_ID).trim();
     const { startOfDay, endOfDay, dateKey } = getTashkentDayRange(now);
-
-    const terminalAmount = Math.max(0, Number(Number(input.terminalAmount || 0).toFixed(2)));
-    const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
-    const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
 
     const [cashInvoices, todaySupplierPayments, prevSafeSupplierPayments] = await Promise.all([
       prisma.invoice.findMany({
         where: {
-          ownerId,
+          ownerId: cleanOwnerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paidCashAmount: { gt: 0 },
@@ -281,7 +272,7 @@ export class ReportService {
       }),
       prisma.supplierPayment.findMany({
         where: {
-          ownerId,
+          ownerId: cleanOwnerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paymentSource: 'TODAY_CASH',
@@ -290,7 +281,7 @@ export class ReportService {
       }),
       prisma.supplierPayment.findMany({
         where: {
-          ownerId,
+          ownerId: cleanOwnerId,
           createdAt: { gte: startOfDay, lte: endOfDay },
           currency: 'UZS',
           paymentSource: 'PREVIOUS_SAFE',
@@ -299,20 +290,45 @@ export class ReportService {
       }),
     ]);
 
-    const dailyCashPurchasesUzs = Number(
-      cashInvoices.reduce((acc, inv) => acc + Number(inv.paidCashAmount || 0), 0).toFixed(2)
-    );
-    const dailyCashPurchasesCount = cashInvoices.length;
+    return {
+      ownerId: cleanOwnerId,
+      dateKey,
+      dailyCashPurchasesUzs: Number(
+        cashInvoices.reduce((acc, inv) => acc + Number(inv.paidCashAmount || 0), 0).toFixed(2)
+      ),
+      dailyCashPurchasesCount: cashInvoices.length,
+      dailySupplierPaymentsUzs: Number(
+        todaySupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
+      ),
+      dailySupplierPaymentsCount: todaySupplierPayments.length,
+      previousSafePaymentsUzs: Number(
+        prevSafeSupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
+      ),
+      previousSafePaymentsCount: prevSafeSupplierPayments.length,
+    };
+  }
 
-    const dailySupplierPaymentsUzs = Number(
-      todaySupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
-    );
-    const dailySupplierPaymentsCount = todaySupplierPayments.length;
+  /**
+   * MODUL 5 & 7.3: Calculate and persist the 5-column Daily Z-Report (`ZReport` + `DailyRegister`)
+   * isolated by `ownerId` for the current Tashkent day (`UTC+5`).
+   */
+  static async generateAndSaveZReport(input: ZReportInput): Promise<ZReportResult> {
+    const ownerId = String(input.ownerId || env.OWNER_TELEGRAM_ID).trim();
+    const now = input.now || new Date();
 
-    const previousSafePaymentsUzs = Number(
-      prevSafeSupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)
-    );
-    const previousSafePaymentsCount = prevSafeSupplierPayments.length;
+    const terminalAmount = Math.max(0, Number(Number(input.terminalAmount || 0).toFixed(2)));
+    const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
+    const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
+
+    const {
+      dateKey,
+      dailyCashPurchasesUzs,
+      dailyCashPurchasesCount,
+      dailySupplierPaymentsUzs,
+      dailySupplierPaymentsCount,
+      previousSafePaymentsUzs,
+      previousSafePaymentsCount,
+    } = await this.getTodayZReportAutoMetrics(ownerId, now);
 
     const totalDailySalesUzs = Number(
       (
@@ -655,7 +671,7 @@ export class ReportService {
     if (m.topPaidSuppliers.length > 0) {
       lines.push(`│   🏆 **Top-${m.topPaidSuppliers.length} to'lov qilingan hamkorlar:**`);
       for (const sup of m.topPaidSuppliers) {
-        lines.push(`│   ▫️ ${sanitizeMd(sup.name)}: ${formatDualCurrency(sup.paidUzs, sup.paidUsd)}`);
+        lines.push(`│   ▫️ ${sanitizeMdV1(sup.name)}: ${formatDualCurrency(sup.paidUzs, sup.paidUsd)}`);
       }
     }
 
@@ -694,7 +710,7 @@ export class ReportService {
 
     if (m.expensesByCategory.length > 0) {
       for (const cat of m.expensesByCategory) {
-        lines.push(`    ▫️ ${sanitizeMd(cat.category)}: ${formatDualCurrency(cat.amountUzs, cat.amountUsd)}`);
+        lines.push(`    ▫️ ${sanitizeMdV1(cat.category)}: ${formatDualCurrency(cat.amountUzs, cat.amountUsd)}`);
       }
     }
 
@@ -805,11 +821,11 @@ export class ReportService {
       }),
     ]);
 
-    const cashInvoiceIds = new Set(
-      invoicesInPeriod.filter((inv) => inv.paymentType === 'CASH').map((inv) => inv.id)
-    );
+    // Exclude invoice-linked INCOMING_GOODS from raw supplierTransactions so CASH/CREDIT/PARTIAL
+    // invoices are accounted with exact paidCashAmount vs creditAmount (zero double-counting!)
+    const allInvoiceIds = new Set(invoicesInPeriod.map((inv) => inv.id));
     const filteredSupplierTransactions = supplierTransactions.filter(
-      (tx) => !(tx.type === 'INCOMING_GOODS' && tx.invoiceId && cashInvoiceIds.has(tx.invoiceId))
+      (tx) => !(tx.type === 'INCOMING_GOODS' && tx.invoiceId && allInvoiceIds.has(tx.invoiceId))
     );
 
     const metrics = this.aggregateReportData(
@@ -833,6 +849,10 @@ export class ReportService {
     const invoiceCreditSumUzs = invoicesInPeriod
       .filter((i) => i.currency === 'UZS')
       .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
+    const invoiceCreditSumUsd = invoicesInPeriod
+      .filter((i) => i.currency === 'USD')
+      .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
+    const invoiceCreditCount = invoicesInPeriod.filter((i) => Number(i.creditAmount || 0) > 0).length;
 
     if (invoiceCashSumUzs > metrics.cashPurchasesUzs) {
       metrics.cashPurchasesUzs = invoiceCashSumUzs;
@@ -841,13 +861,12 @@ export class ReportService {
         invoicesInPeriod.filter((i) => Number(i.paidCashAmount || 0) > 0).length
       );
     }
-    if (invoiceCreditSumUzs > metrics.incomingGoodsUzs) {
-      metrics.incomingGoodsUzs = invoiceCreditSumUzs;
-      metrics.incomingGoodsCount = Math.max(
-        metrics.incomingGoodsCount,
-        invoicesInPeriod.filter((i) => Number(i.creditAmount || 0) > 0).length
-      );
-    }
+
+    metrics.incomingGoodsUzs = Number((metrics.incomingGoodsUzs + invoiceCreditSumUzs).toFixed(2));
+    metrics.incomingGoodsUsd = Number((metrics.incomingGoodsUsd + invoiceCreditSumUsd).toFixed(2));
+    metrics.incomingGoodsCount += invoiceCreditCount;
+    metrics.netSupplierDebtChangeUzs = Number((metrics.incomingGoodsUzs - metrics.supplierPaidUzs).toFixed(2));
+    metrics.netSupplierDebtChangeUsd = Number((metrics.incomingGoodsUsd - metrics.supplierPaidUsd).toFixed(2));
 
     const prevCashSum = prevInvoicesInPeriod
       .filter((i) => i.currency === 'UZS')

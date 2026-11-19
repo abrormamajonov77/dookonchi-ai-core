@@ -7,7 +7,6 @@ const telegram_1 = require("../../utils/telegram");
 const subscription_service_1 = require("../../services/subscription.service");
 const env_1 = require("../../config/env");
 const formatters_1 = require("../../utils/formatters");
-const menu_2 = require("../keyboards/menu");
 exports.startHandler = new grammy_1.Composer();
 exports.startHandler.command('start', async (ctx) => {
     if (!ctx.from)
@@ -159,7 +158,7 @@ exports.startHandler.on('message:text', async (ctx, next) => {
     if (ctx.session.step !== 'USER_REPLY_TO_ADMIN')
         return next();
     const text = ctx.message.text.trim();
-    if (text.startsWith('/') || (0, menu_2.isMenuButton)(text)) {
+    if (text.startsWith('/') || (0, menu_1.isMenuButton)(text)) {
         (0, telegram_1.clearSession)(ctx);
         return next();
     }

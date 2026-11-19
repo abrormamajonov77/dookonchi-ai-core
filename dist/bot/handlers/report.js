@@ -82,10 +82,12 @@ exports.reportHandler.hears('📥 Bazani yuklab olish (Excel / PDF)', async (ctx
     await sendOwnerDatabaseExports(ctx, 'all');
 });
 exports.reportHandler.command(['report', 'hisobot'], async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     const defaultPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
     await sendPeriodReport(ctx, defaultPeriod, false);
 });
 exports.reportHandler.command('export', async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
     await sendOwnerDatabaseExports(ctx, 'all');
 });
 exports.reportHandler.callbackQuery(/^rep:p:(.+)$/, async (ctx) => {

@@ -3,8 +3,8 @@ import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
 import { env } from '../../config/env';
 import { SubscriptionService, parseSubscriptionDuration } from '../../services/subscription.service';
-import { formatDate, formatDateShort, formatSom, parseCurrencyAndAmount } from '../../utils/formatters';
-import { clearSession, replyOrEdit, sanitizeMdV1 } from '../../utils/telegram';
+import { formatDate, formatDateShort, formatSom, parseSmartAmount } from '../../utils/formatters';
+import { clearSession, replyOrEdit, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { addPaginationRow } from '../keyboards/inline';
 import { isMenuButton } from '../keyboards/menu';
 
@@ -24,7 +24,7 @@ function getStatusBadge(status: string): string {
     case 'EXPIRED':
       return '⌛️ Tugagan';
     case 'PAUSED':
-      return '⏸ To\'xtatilgan';
+      return "⏸ To'xtatilgan";
     case 'BLOCKED':
       return '⛔️ Bloklangan';
     default:
@@ -43,15 +43,15 @@ function getRemainingDaysText(expiresAt?: Date | null): string {
 
 export function getAdminMainPanelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('👥 Obunachilar ro\'yxati va Boshqaruv', 'adm:users:1')
+    .text("👥 Obunachilar ro'yxati va Boshqaruv", 'adm:users:1')
     .row()
-    .text('⏳ Yangi so\'rovlar va To\'lov cheklari', 'adm:pending')
+    .text("⏳ Yangi so'rovlar va To'lov cheklari", 'adm:pending')
     .row()
     .text('💳 Karta va Obuna narxini sozlash', 'adm:settings')
     .row()
     .text('💬 Mijozga shaxsiy xabar yozish', 'adm:dm_list:1')
     .row()
-    .text('📢 Umumiy E\'lon yuborish (Rassilka)', 'adm:broadcast')
+    .text("📢 Umumiy E'lon yuborish (Rassilka)", 'adm:broadcast')
     .row()
     .text('📊 SaaS Daromad va Statistika', 'adm:stats')
     .row()
@@ -167,14 +167,14 @@ export async function showSubscriberDetail(ctx: MyContext, telegramId: string, i
     .text("✏️ O'zim Oy/Kun va Bonus yozaman", `adm_custom:${telegramId}`)
     .row()
     .text(
-      user.status === 'PAUSED' ? '▶️ Faoliyatini qayta yoqish' : '⏸ Vaqtincha to\'xtatish',
+      user.status === 'PAUSED' ? '▶️ Faoliyatini qayta yoqish' : "⏸ Vaqtincha to'xtatish",
       user.status === 'PAUSED' ? `adm_unpause:${telegramId}` : `adm_pause:${telegramId}`
     )
     .text('⛔️ Bloklash', `adm_block:${telegramId}`)
     .row()
     .text('💬 Shaxsiy xabar yozish', `adm_msg:${telegramId}`)
     .row()
-    .text('🔙 Obunachilar ro\'yxatiga', 'adm:users:1');
+    .text("🔙 Obunachilar ro'yxatiga", 'adm:users:1');
 
   await replyOrEdit(ctx, text, kb, isEdit);
 }
@@ -207,8 +207,8 @@ adminHandler.callbackQuery(/^adm_grant:([^:]+):(\d+):(\d+):(.+)$/, async (ctx) =
 
   const confirmText =
     `✅ **Mijozga ruxsat berildi va avtomatik Bot-SMS yuborildi!**\n\n` +
-    `👤 Mijoz: **${result.user.fullName || result.user.name || telegramId}** (\`${telegramId}\`)\n` +
-    `📦 Tarif: **${planName}**${bonusDays > 0 ? ` + 🎁 **${bonusDays} kun BONUS**` : ''}\n` +
+    `👤 Mijoz: **${sanitizeMdV1(result.user.fullName || result.user.name || telegramId)}** (\`${telegramId}\`)\n` +
+    `📦 Tarif: **${sanitizeMdV1(planName)}**${bonusDays > 0 ? ` + 🎁 **${bonusDays} kun BONUS**` : ''}\n` +
     `📅 Faol muddat: **${formatDateShort(result.expiresAt)}** gacha (Jami ${result.totalDays} kun)`;
 
   const kb = new InlineKeyboard()
@@ -262,7 +262,7 @@ adminHandler.callbackQuery(/^adm_block:(.+)$/, async (ctx) => {
   const telegramId = ctx.match[1];
   await SubscriptionService.setUserStatus(telegramId, 'BLOCKED');
   await ctx.api
-    .sendMessage(telegramId, '⛔️ Kechirasiz, sizning so\'rovingiz rad etildi / hisobingiz bloklandi.')
+    .sendMessage(telegramId, "⛔️ Kechirasiz, sizning so'rovingiz rad etildi / hisobingiz bloklandi.")
     .catch(() => {});
   await ctx.answerCallbackQuery({ text: '⛔️ Mijoz bloklandi.' });
   await showSubscriberDetail(ctx, telegramId, true);
@@ -302,8 +302,8 @@ adminHandler.callbackQuery('adm:pending', async (ctx) => {
 
   for (const u of pendingUsers) {
     const name = u.fullName || u.name || "Noma'lum";
-    lines.push(`👤 **${name}** (\`${u.telegramId}\`) — Tel: ${u.phone || "Yo'q"}`);
-    kb.text(`👤 So'rov: ${name}`, `adm:user:${u.telegramId}`).row();
+    lines.push(`👤 **${sanitizeMdV1(name)}** (\`${u.telegramId}\`) — Tel: ${sanitizeMdV1(u.phone || "Yo'q")}`);
+    kb.text(`👤 So'rov: ${name.slice(0, 20)}`, `adm:user:${u.telegramId}`).row();
   }
 
   for (const p of pendingPayments) {
@@ -355,10 +355,11 @@ adminHandler.callbackQuery(/^adm_pay:([^:]+):(\d+):(\d+):([^:]+):(\d+)$/, async 
     });
 
     await ctx.answerCallbackQuery({ text: "✅ To'lov tasdiqlandi va mijoz boti yoqildi!" });
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `✅ **To'lov cheki tasdiqlandi!**\n` +
         `👤 Mijoz: \`${result.user.telegramId}\`\n` +
-        `📦 Tarif: **${planName}**${bonusDays > 0 ? ` + 🎁 **${bonusDays} kun BONUS**` : ''}\n` +
+        `📦 Tarif: **${sanitizeMdV1(planName)}**${bonusDays > 0 ? ` + 🎁 **${bonusDays} kun BONUS**` : ''}\n` +
         `💰 SaaS daromadga qo'shildi: **${formatSom(result.payment.amountUzs)}**\n` +
         `📅 Yangi muddat: **${formatDateShort(result.expiresAt)}** gacha`,
       { parse_mode: 'Markdown', reply_markup: new InlineKeyboard().text('👑 Admin Panel', 'adm:panel') }
@@ -401,10 +402,10 @@ async function showSystemSettingsPanel(ctx: MyContext, isEdit = true) {
   const text =
     `💳 **KARTA VA OBUNA NARXINI SOZLASH**\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `💳 **Karta raqami:** \`${settings.paymentCardNumber}\`\n` +
-    `👤 **Karta egasi:** **${settings.paymentCardHolder}**\n` +
+    `💳 **Karta raqami:** \`${sanitizeMdV1(settings.paymentCardNumber)}\`\n` +
+    `👤 **Karta egasi:** **${sanitizeMdV1(settings.paymentCardHolder)}**\n` +
     `💰 **1 Oylik obuna narxi:** **${formatSom(settings.monthlyPriceUzs)}**\n` +
-    `📝 **Tarif izohi:** ${settings.tariffInfoText || 'Standart'}\n` +
+    `📝 **Tarif izohi:** ${sanitizeMdV1(settings.tariffInfoText || 'Standart')}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `O'zgartirmoqchi bo'lgan bo'limni tanlang:`;
 
@@ -445,7 +446,7 @@ adminHandler.callbackQuery('adm:set_holder', async (ctx) => {
 adminHandler.callbackQuery('adm:set_price', async (ctx) => {
   if (!ensureSuperAdmin(ctx)) return;
   ctx.session.step = 'ADM_SET_PRICE';
-  await ctx.reply("💰 1 oylik obuna narxini so'mda kiriting (masalan: `150000` yoki `150 ming`):", {
+  await ctx.reply("💰 1 oylik obuna narxini so'mda kiriting (masalan: `150000`, `150.000` yoki `150 ming`):", {
     parse_mode: 'Markdown',
   });
 });
@@ -475,7 +476,7 @@ adminHandler.callbackQuery(/^adm:dm_list:(\d+)$/, async (ctx) => {
   const kb = new InlineKeyboard();
   for (const u of slice) {
     const name = u.fullName || u.name || u.telegramId;
-    kb.text(`💬 ${name} (${u.telegramId})`, `adm_msg:${u.telegramId}`).row();
+    kb.text(`💬 ${name.slice(0, 22)} (${u.telegramId})`, `adm_msg:${u.telegramId}`).row();
   }
   addPaginationRow(kb, currentPage, totalPages, 'adm:dm_list:');
   kb.text('🔙 Admin Panelga qaytish', 'adm:panel');
@@ -579,10 +580,11 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
         ctx.api.sendMessage(targetId, smsText, { reply_markup: replyMarkup }).catch(() => {}),
     });
 
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `✅ **Erkin tarif va bonus muvaffaqiyatli berildi!**\n\n` +
         `👤 Mijoz ID: \`${targetTelegramId}\`\n` +
-        `📦 Kiritilgan muddat: **${text}** (Asosiy: ${result.baseDays} kun + Bonus: ${result.bonusDays} kun = Jami ${result.totalDays} kun)\n` +
+        `📦 Kiritilgan muddat: **${sanitizeMdV1(text)}** (Asosiy: ${result.baseDays} kun + Bonus: ${result.bonusDays} kun = Jami ${result.totalDays} kun)\n` +
         `📅 Tugash sanasi: **${formatDateShort(result.expiresAt)}**\n` +
         `📩 Mijozga avtomatik Bot-SMS yuborildi!`,
       {
@@ -613,8 +615,9 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
         ctx.api.sendMessage(targetId, smsText, { reply_markup: replyMarkup }).catch(() => {}),
     });
 
-    await ctx.reply(
-      `✅ **To'lov cheki tasdiqlandi (${text})!**\n` +
+    await safeReply(
+      ctx,
+      `✅ **To'lov cheki tasdiqlandi (${sanitizeMdV1(text)})!**\n` +
         `👤 Mijoz ID: \`${result.user.telegramId}\`\n` +
         `📅 Yangi muddat: **${formatDateShort(result.expiresAt)}** gacha (Jami ${result.totalDays} kun)\n` +
         `📩 Mijozga avtomatik Bot-SMS yuborildi!`,
@@ -630,25 +633,25 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
   if (step === 'ADM_SET_CARD' && text) {
     clearSession(ctx);
     await SubscriptionService.updateSystemSettings({ paymentCardNumber: text });
-    await ctx.reply(`✅ Plastik karta raqami yangilandi: \`${text}\``, { parse_mode: 'Markdown' });
+    await safeReply(ctx, `✅ Plastik karta raqami yangilandi: \`${sanitizeMdV1(text)}\``, { parse_mode: 'Markdown' });
     return showSystemSettingsPanel(ctx, false);
   }
 
   if (step === 'ADM_SET_HOLDER' && text) {
     clearSession(ctx);
     await SubscriptionService.updateSystemSettings({ paymentCardHolder: text });
-    await ctx.reply(`✅ Karta egasi ismi yangilandi: **${text}**`, { parse_mode: 'Markdown' });
+    await safeReply(ctx, `✅ Karta egasi ismi yangilandi: **${sanitizeMdV1(text)}**`, { parse_mode: 'Markdown' });
     return showSystemSettingsPanel(ctx, false);
   }
 
   if (step === 'ADM_SET_PRICE' && text) {
-    const { amount } = parseCurrencyAndAmount(text);
+    const amount = parseSmartAmount(text);
     if (!amount || amount <= 0) {
-      return ctx.reply("❌ Iltimos, to'g'ri narx kiriting (masalan: 100000).");
+      return ctx.reply("❌ Iltimos, to'g'ri narx kiriting (masalan: 100000 yoki 100.000).");
     }
     clearSession(ctx);
     await SubscriptionService.updateSystemSettings({ monthlyPriceUzs: amount });
-    await ctx.reply(`✅ Oylik obuna narxi yangilandi: **${formatSom(amount)}**`, {
+    await safeReply(ctx, `✅ Oylik obuna narxi yangilandi: **${formatSom(amount)}**`, {
       parse_mode: 'Markdown',
     });
     return showSystemSettingsPanel(ctx, false);
@@ -671,12 +674,12 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
     await ctx.api
       .sendMessage(
         targetTelegramId,
-        `📩 **Admindan sizga shaxsiy xabar:**\n\n${text}`,
-        { parse_mode: 'Markdown', reply_markup: replyKb }
+        `📩 Admindan sizga shaxsiy xabar:\n\n${text}`,
+        { reply_markup: replyKb }
       )
       .catch(() => {});
 
-    await ctx.reply(`✅ Xabar mijozga (\`${targetTelegramId}\`) muvaffaqiyatli yuborildi!`, {
+    await safeReply(ctx, `✅ Xabar mijozga (\`${targetTelegramId}\`) muvaffaqiyatli yuborildi!`, {
       parse_mode: 'Markdown',
       reply_markup: new InlineKeyboard().text('👑 Admin Panel', 'adm:panel'),
     });
@@ -713,9 +716,7 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
             caption: caption ? `📢 ${caption}` : undefined,
           });
         } else if (text) {
-          await ctx.api.sendMessage(r.telegramId, `📢 **E'LON:**\n\n${text}`, {
-            parse_mode: 'Markdown',
-          });
+          await ctx.api.sendMessage(r.telegramId, `📢 E'LON:\n\n${text}`);
         }
         sentCount++;
       } catch {
@@ -723,7 +724,8 @@ adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, 
       }
     }
 
-    await ctx.reply(
+    await safeReply(
+      ctx,
       `✅ **Rassilka yakunlandi!**\n📊 Jami **${recipients.length}** ta mijozdan **${sentCount}** tasiga yetkazildi.`,
       {
         parse_mode: 'Markdown',

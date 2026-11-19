@@ -36,8 +36,7 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
         (0, telegram_1.clearSession)(ctx);
         return next();
     }
-    const parsed = (0, formatters_1.parseCurrencyAndAmount)(rawText);
-    const amount = rawText === '0' ? 0 : parsed.amount;
+    const amount = rawText === '0' ? 0 : (0, formatters_1.parseSmartAmount)(rawText);
     if (isNaN(amount) || amount < 0)
         return ctx.reply('❌ Iltimos, faqat musbat raqam (yoki 0) kiriting!');
     if (ctx.session.step === 'Z_REPORT_TERMINAL') {
@@ -57,45 +56,12 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
     if (ctx.session.step === 'Z_REPORT_CASH') {
         const d = ctx.session.tempData || {};
         d.cashRemainingInDrawer = amount;
-        const { startOfDay, endOfDay } = (0, formatters_1.getTashkentDayRange)();
-        const [cashInvoices, todaySupplierPayments, prevSafePayments] = await Promise.all([
-            prisma_1.prisma.invoice.findMany({
-                where: {
-                    ownerId,
-                    createdAt: { gte: startOfDay, lte: endOfDay },
-                    currency: 'UZS',
-                    paidCashAmount: { gt: 0 },
-                    paymentSource: 'TODAY_CASH',
-                },
-                select: { paidCashAmount: true },
-            }),
-            prisma_1.prisma.supplierPayment.findMany({
-                where: {
-                    ownerId,
-                    createdAt: { gte: startOfDay, lte: endOfDay },
-                    currency: 'UZS',
-                    paymentSource: 'TODAY_CASH',
-                },
-                select: { amount: true },
-            }),
-            prisma_1.prisma.supplierPayment.findMany({
-                where: {
-                    ownerId,
-                    createdAt: { gte: startOfDay, lte: endOfDay },
-                    currency: 'UZS',
-                    paymentSource: 'PREVIOUS_SAFE',
-                },
-                select: { amount: true },
-            }),
-        ]);
-        const dailyCashPurchasesUzs = cashInvoices.reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
-        const dailySupplierPaymentsUzs = todaySupplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
-        const previousSafePaymentsUzs = prevSafePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+        const auto = await report_service_1.ReportService.getTodayZReportAutoMetrics(ownerId);
         const totalDailySalesUzs = Number(d.terminalAmount || 0) +
             Number(d.clickAmount || 0) +
             Number(d.cashRemainingInDrawer || 0) +
-            dailyCashPurchasesUzs +
-            dailySupplierPaymentsUzs;
+            auto.dailyCashPurchasesUzs +
+            auto.dailySupplierPaymentsUzs;
         const actionId = `zrep_${Date.now()}`;
         ctx.session.step = actionId;
         const lines = [
@@ -104,13 +70,13 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
             `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(d.terminalAmount)}`,
             `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(d.clickAmount)}`,
             `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(d.cashRemainingInDrawer)}`,
-            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-            `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)} (${todaySupplierPayments.length} ta to'lov)`,
+            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta nakladnoy)`,
+            `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(auto.dailySupplierPaymentsUzs)} (${auto.dailySupplierPaymentsCount} ta to'lov)`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💰 **KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}**`,
         ];
-        if (previousSafePaymentsUzs > 0) {
-            lines.push(`_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`);
+        if (auto.previousSafePaymentsUzs > 0) {
+            lines.push(`_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(auto.previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`);
         }
         lines.push(``, `Kassani yopaymi?`);
         await ctx.reply(lines.join('\n'), {

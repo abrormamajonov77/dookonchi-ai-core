@@ -13,9 +13,10 @@ const transliterate_1 = require("../utils/transliterate");
 const fuzzy_1 = require("../utils/fuzzy");
 const formatters_1 = require("../utils/formatters");
 const ai_service_1 = require("./ai.service");
+const image_service_1 = require("./image.service");
 class SupplierService {
     static computeImageHash(buffer) {
-        return crypto_1.default.createHash('sha256').update(buffer).digest('hex');
+        return image_service_1.ImageService.getImageHash(buffer);
     }
     static computeContentFingerprint(params) {
         const ownerPrefix = params.ownerId ? `${String(params.ownerId).trim()}|` : '';
@@ -256,34 +257,51 @@ class SupplierService {
             orderBy: { debtUzs: 'desc' },
         });
         if (!existing.length) {
-            return tx.supplier.create({
-                data: { ownerId: cleanOwnerId, name: latinRawName, debtUzs: 0, debtUsd: 0 },
+            return tx.supplier.upsert({
+                where: { ownerId_name: { ownerId: cleanOwnerId, name: latinRawName } },
+                create: { ownerId: cleanOwnerId, name: latinRawName, debtUzs: 0, debtUsd: 0, isActive: true },
+                update: { isActive: true },
             });
         }
         const primary = existing[0];
         for (const dup of existing.slice(1)) {
-            await tx.invoice.updateMany({ where: { supplierId: dup.id }, data: { supplierId: primary.id } });
-            await tx.invoiceItem.updateMany({ where: { supplierId: dup.id }, data: { supplierId: primary.id } }).catch(() => { });
-            await tx.supplierTransaction.updateMany({ where: { supplierId: dup.id }, data: { supplierId: primary.id } });
-            await tx.supplierPayment.updateMany({ where: { supplierId: dup.id }, data: { supplierId: primary.id } }).catch(() => { });
+            await tx.invoice.updateMany({
+                where: { ownerId: cleanOwnerId, supplierId: dup.id },
+                data: { supplierId: primary.id },
+            });
+            await tx.invoiceItem
+                .updateMany({ where: { ownerId: cleanOwnerId, supplierId: dup.id }, data: { supplierId: primary.id } })
+                .catch(() => { });
+            await tx.supplierTransaction.updateMany({
+                where: { ownerId: cleanOwnerId, supplierId: dup.id },
+                data: { supplierId: primary.id },
+            });
+            await tx.supplierPayment
+                .updateMany({ where: { ownerId: cleanOwnerId, supplierId: dup.id }, data: { supplierId: primary.id } })
+                .catch(() => { });
             await tx.supplier.update({
                 where: { id: primary.id },
                 data: { debtUzs: { increment: dup.debtUzs }, debtUsd: { increment: dup.debtUsd } },
             });
             await tx.supplier.delete({ where: { id: dup.id } });
         }
-        return existing.length > 1 ? (await tx.supplier.findUnique({ where: { id: primary.id } })) || primary : primary;
+        return existing.length > 1
+            ? (await tx.supplier.findFirst({ where: { id: primary.id, ownerId: cleanOwnerId } })) || primary
+            : primary;
     }
     static async checkOrRenameSupplier(supplierId, rawNewName, ownerId) {
         const newName = (0, transliterate_1.toLatinUz)(rawNewName).trim();
         if (!newName || newName.length < 2) {
             throw new Error("Ta'minotchi nomi kamida 2 ta harfdan iborat bo'lishi kerak.");
         }
-        const sourceSupplier = await prisma_1.prisma.supplier.findUnique({ where: { id: supplierId } });
+        const cleanOwnerId = ownerId ? String(ownerId).trim() : undefined;
+        const sourceSupplier = cleanOwnerId
+            ? await prisma_1.prisma.supplier.findFirst({ where: { id: supplierId, ownerId: cleanOwnerId } })
+            : await prisma_1.prisma.supplier.findUnique({ where: { id: supplierId } });
         if (!sourceSupplier) {
-            throw new Error("Ta'minotchi topilmadi.");
+            throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
         }
-        const effectiveOwnerId = String(ownerId || sourceSupplier.ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
+        const effectiveOwnerId = String(cleanOwnerId || sourceSupplier.ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
         const existingTarget = await prisma_1.prisma.supplier.findFirst({
             where: {
                 ownerId: effectiveOwnerId,
@@ -309,10 +327,13 @@ class SupplierService {
         };
     }
     static async mergeSuppliers(sourceSupplierId, targetSupplierId, ownerId) {
+        const cleanOwnerId = ownerId ? String(ownerId).trim() : undefined;
         if (sourceSupplierId === targetSupplierId) {
-            const same = await prisma_1.prisma.supplier.findUnique({ where: { id: targetSupplierId } });
+            const same = cleanOwnerId
+                ? await prisma_1.prisma.supplier.findFirst({ where: { id: targetSupplierId, ownerId: cleanOwnerId } })
+                : await prisma_1.prisma.supplier.findUnique({ where: { id: targetSupplierId } });
             if (!same)
-                throw new Error("Ta'minotchi topilmadi.");
+                throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
             return same;
         }
         const merged = await prisma_1.prisma.$transaction(async (tx) => {
@@ -323,36 +344,38 @@ class SupplierService {
             if (!source || !target) {
                 throw new Error("Birlashtiriladigan ta'minotchi topilmadi.");
             }
-            if (ownerId && (source.ownerId !== ownerId || target.ownerId !== ownerId)) {
+            if (cleanOwnerId && (source.ownerId !== cleanOwnerId || target.ownerId !== cleanOwnerId)) {
                 throw new Error("Boshqa foydalanuvchi ta'minotchisini birlashtirish mumkin emas.");
             }
+            if (source.ownerId !== target.ownerId) {
+                throw new Error("Boshqa foydalanuvchi ta'minotchisini birlashtirish mumkin emas.");
+            }
+            const scopedOwnerId = source.ownerId;
             await Promise.all([
                 tx.invoice.updateMany({
-                    where: { supplierId: source.id },
+                    where: { ownerId: scopedOwnerId, supplierId: source.id },
                     data: { supplierId: target.id },
                 }),
                 tx.invoiceItem.updateMany({
-                    where: { supplierId: source.id },
+                    where: { ownerId: scopedOwnerId, supplierId: source.id },
                     data: { supplierId: target.id },
                 }),
                 tx.supplierTransaction.updateMany({
-                    where: { supplierId: source.id },
+                    where: { ownerId: scopedOwnerId, supplierId: source.id },
                     data: { supplierId: target.id },
                 }),
                 tx.supplierPayment.updateMany({
-                    where: { supplierId: source.id },
+                    where: { ownerId: scopedOwnerId, supplierId: source.id },
                     data: { supplierId: target.id },
                 }),
             ]);
-            const newDebtUzs = Number((Number(target.debtUzs) + Number(source.debtUzs)).toFixed(2));
-            const newDebtUsd = Number((Number(target.debtUsd) + Number(source.debtUsd)).toFixed(2));
             const [updatedTarget] = await Promise.all([
                 tx.supplier.update({
                     where: { id: target.id },
                     data: {
                         name: (0, transliterate_1.toLatinUz)(target.name),
-                        debtUzs: newDebtUzs,
-                        debtUsd: newDebtUsd,
+                        debtUzs: { increment: source.debtUzs },
+                        debtUsd: { increment: source.debtUsd },
                         phone: target.phone || source.phone,
                         isActive: true,
                     },
@@ -440,25 +463,35 @@ class SupplierService {
                         data: currency === 'USD'
                             ? {
                                 name: (0, transliterate_1.toLatinUz)(found.name),
-                                debtUsd: Number((Number(found.debtUsd) + creditAmount).toFixed(2)),
+                                ...(creditAmount !== 0 ? { debtUsd: { increment: creditAmount } } : {}),
                                 isActive: true,
                             }
                             : {
                                 name: (0, transliterate_1.toLatinUz)(found.name),
-                                debtUzs: Number((Number(found.debtUzs) + creditAmount).toFixed(2)),
+                                ...(creditAmount !== 0 ? { debtUzs: { increment: creditAmount } } : {}),
                                 isActive: true,
                             },
                     });
                 }
                 else {
-                    supplier = await tx.supplier.create({
-                        data: {
+                    supplier = await tx.supplier.upsert({
+                        where: { ownerId_name: { ownerId, name: latinSupplierName } },
+                        create: {
                             ownerId,
                             name: latinSupplierName,
                             debtUzs: currency === 'UZS' ? creditAmount : 0,
                             debtUsd: currency === 'USD' ? creditAmount : 0,
                             isActive: true,
                         },
+                        update: currency === 'USD'
+                            ? {
+                                ...(creditAmount !== 0 ? { debtUsd: { increment: creditAmount } } : {}),
+                                isActive: true,
+                            }
+                            : {
+                                ...(creditAmount !== 0 ? { debtUzs: { increment: creditAmount } } : {}),
+                                isActive: true,
+                            },
                     });
                 }
             }
@@ -468,12 +501,12 @@ class SupplierService {
                     data: currency === 'USD'
                         ? {
                             name: (0, transliterate_1.toLatinUz)(supplier.name),
-                            debtUsd: Number((Number(supplier.debtUsd) + creditAmount).toFixed(2)),
+                            ...(creditAmount !== 0 ? { debtUsd: { increment: creditAmount } } : {}),
                             isActive: true,
                         }
                         : {
                             name: (0, transliterate_1.toLatinUz)(supplier.name),
-                            debtUzs: Number((Number(supplier.debtUzs) + creditAmount).toFixed(2)),
+                            ...(creditAmount !== 0 ? { debtUzs: { increment: creditAmount } } : {}),
                             isActive: true,
                         },
                 });
@@ -637,7 +670,7 @@ class SupplierService {
     }
     /**
      * MODUL 5: Record supplier payment with explicit `paymentSource` ("TODAY_CASH" vs "PREVIOUS_SAFE").
-     * Both deduct from `Supplier.debtUzs`/`debtUsd`, while only `TODAY_CASH` is added to today's Z-Report sales!
+     * Uses atomic DB decrement so concurrent payments never lose updates.
      */
     static async recordSupplierPayment(params) {
         const ownerId = String(params.ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
@@ -650,8 +683,6 @@ class SupplierService {
         const commentText = (0, transliterate_1.toLatinUz)(params.comment || params.note || sourceLabel);
         return prisma_1.prisma.$transaction(async (tx) => {
             const supplier = await this.getOrMergeSupplier(tx, (0, transliterate_1.toLatinUz)(params.supplierName), params.supplierId, ownerId);
-            const newDebtUzs = Number((Number(supplier.debtUzs) - (isUsd ? 0 : amount)).toFixed(2));
-            const newDebtUsd = Number((Number(supplier.debtUsd) - (isUsd ? amount : 0)).toFixed(2));
             const [payment, transaction, updatedSupplier] = await Promise.all([
                 tx.supplierPayment.create({
                     data: {
@@ -679,7 +710,7 @@ class SupplierService {
                 }),
                 tx.supplier.update({
                     where: { id: supplier.id },
-                    data: { debtUzs: newDebtUzs, debtUsd: newDebtUsd },
+                    data: isUsd ? { debtUsd: { decrement: amount } } : { debtUzs: { decrement: amount } },
                 }),
             ]);
             cache_service_1.cacheService.invalidateSupplierNames(ownerId);
@@ -709,16 +740,18 @@ class SupplierService {
         return text;
     }
     static async resolveInvoiceAndTx(tx, idOrTxId, ownerId) {
+        const cleanOwnerId = ownerId ? String(ownerId).trim() : undefined;
         let invoice = await tx.invoice.findUnique({
             where: { id: idOrTxId },
             include: { supplier: true },
         });
-        if (invoice && ownerId && invoice.ownerId !== ownerId) {
+        if (invoice && cleanOwnerId && invoice.ownerId !== cleanOwnerId) {
             throw new Error("Ruxsat yo'q.");
         }
         let supTx = invoice
             ? await tx.supplierTransaction.findFirst({
                 where: {
+                    ownerId: invoice.ownerId,
                     OR: [{ invoiceId: invoice.id }, { supplierId: invoice.supplierId, type: 'INCOMING_GOODS' }],
                 },
                 orderBy: { date: 'desc' },
@@ -726,7 +759,7 @@ class SupplierService {
             : null;
         if (!invoice) {
             supTx = await tx.supplierTransaction.findUnique({ where: { id: idOrTxId } });
-            if (supTx && ownerId && supTx.ownerId !== ownerId) {
+            if (supTx && cleanOwnerId && supTx.ownerId !== cleanOwnerId) {
                 throw new Error("Ruxsat yo'q.");
             }
             const linkedInvoiceId = supTx?.invoiceId || supTx?.receiptData?.invoiceId;
@@ -735,6 +768,9 @@ class SupplierService {
                     where: { id: String(linkedInvoiceId) },
                     include: { supplier: true },
                 });
+                if (invoice && cleanOwnerId && invoice.ownerId !== cleanOwnerId) {
+                    throw new Error("Ruxsat yo'q.");
+                }
             }
         }
         if (!invoice) {
@@ -754,8 +790,8 @@ class SupplierService {
                 tx.supplier.update({
                     where: { id: invoice.supplierId },
                     data: currency === 'USD'
-                        ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
-                        : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
+                        ? { debtUsd: { increment: delta } }
+                        : { debtUzs: { increment: delta } },
                 }),
                 tx.invoice.update({
                     where: { id: invoice.id },
@@ -826,8 +862,8 @@ class SupplierService {
                 tx.supplier.update({
                     where: { id: invoice.supplierId },
                     data: currency === 'USD'
-                        ? { debtUsd: Number((Number(invoice.supplier.debtUsd) + delta).toFixed(2)) }
-                        : { debtUzs: Number((Number(invoice.supplier.debtUzs) + delta).toFixed(2)) },
+                        ? { debtUsd: { increment: delta } }
+                        : { debtUzs: { increment: delta } },
                 }),
                 tx.invoice.update({
                     where: { id: invoice.id },
@@ -879,23 +915,19 @@ class SupplierService {
             const finalTotal = Number(invoice.totalAmount);
             const rawTotal = Number(invoice.originalAmount ?? invoice.totalAmount);
             const discountAmount = Number(invoice.discountAmount ?? 0);
-            const newDebtUzs = oldCurrency === 'UZS'
-                ? Number((Number(invoice.supplier.debtUzs) - finalTotal).toFixed(2))
-                : Number((Number(invoice.supplier.debtUzs) + finalTotal).toFixed(2));
-            const newDebtUsd = oldCurrency === 'USD'
-                ? Number((Number(invoice.supplier.debtUsd) - finalTotal).toFixed(2))
-                : Number((Number(invoice.supplier.debtUsd) + finalTotal).toFixed(2));
             const [updatedSupplier, updatedInvoice] = await Promise.all([
                 tx.supplier.update({
                     where: { id: invoice.supplierId },
-                    data: { debtUzs: newDebtUzs, debtUsd: newDebtUsd },
+                    data: oldCurrency === 'UZS'
+                        ? { debtUzs: { decrement: finalTotal }, debtUsd: { increment: finalTotal } }
+                        : { debtUzs: { increment: finalTotal }, debtUsd: { decrement: finalTotal } },
                 }),
                 tx.invoice.update({
                     where: { id: invoice.id },
                     data: { currency: newCurrency },
                 }),
                 tx.invoiceItem.updateMany({
-                    where: { invoiceId: invoice.id },
+                    where: { ownerId: invoice.ownerId, invoiceId: invoice.id },
                     data: { currency: newCurrency },
                 }),
             ]);

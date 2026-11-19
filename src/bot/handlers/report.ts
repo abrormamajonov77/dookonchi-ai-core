@@ -90,11 +90,13 @@ reportHandler.hears('📥 Bazani yuklab olish (Excel / PDF)', async (ctx) => {
 });
 
 reportHandler.command(['report', 'hisobot'], async (ctx) => {
+  clearSession(ctx);
   const defaultPeriod: ReportPeriod = new Date().getDay() === 1 ? 'last_week' : 'current_week';
   await sendPeriodReport(ctx, defaultPeriod, false);
 });
 
 reportHandler.command('export', async (ctx) => {
+  clearSession(ctx);
   await sendOwnerDatabaseExports(ctx, 'all');
 });
 

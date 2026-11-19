@@ -1,9 +1,9 @@
 import { Composer } from 'grammy';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
-import { formatSom, getTashkentDayRange, parseCurrencyAndAmount } from '../../utils/formatters';
+import { formatSom, getTashkentDayRange, parseSmartAmount } from '../../utils/formatters';
 import { getConfirmationKeyboard } from '../keyboards/inline';
-import { clearSession, safeEditMessageText, safeReply } from '../../utils/telegram';
+import { clearSession } from '../../utils/telegram';
 import { isMenuButton } from '../keyboards/menu';
 import { ReportService } from '../../services/report.service';
 
@@ -39,8 +39,7 @@ closingHandler.on('message:text', async (ctx, next) => {
     return next();
   }
 
-  const parsed = parseCurrencyAndAmount(rawText);
-  const amount = rawText === '0' ? 0 : parsed.amount;
+  const amount = rawText === '0' ? 0 : parseSmartAmount(rawText);
   if (isNaN(amount) || amount < 0) return ctx.reply('❌ Iltimos, faqat musbat raqam (yoki 0) kiriting!');
 
   if (ctx.session.step === 'Z_REPORT_TERMINAL') {
@@ -63,47 +62,13 @@ closingHandler.on('message:text', async (ctx, next) => {
     const d = ctx.session.tempData || {};
     d.cashRemainingInDrawer = amount;
 
-    const { startOfDay, endOfDay } = getTashkentDayRange();
-    const [cashInvoices, todaySupplierPayments, prevSafePayments] = await Promise.all([
-      prisma.invoice.findMany({
-        where: {
-          ownerId,
-          createdAt: { gte: startOfDay, lte: endOfDay },
-          currency: 'UZS',
-          paidCashAmount: { gt: 0 },
-          paymentSource: 'TODAY_CASH',
-        },
-        select: { paidCashAmount: true },
-      }),
-      prisma.supplierPayment.findMany({
-        where: {
-          ownerId,
-          createdAt: { gte: startOfDay, lte: endOfDay },
-          currency: 'UZS',
-          paymentSource: 'TODAY_CASH',
-        },
-        select: { amount: true },
-      }),
-      prisma.supplierPayment.findMany({
-        where: {
-          ownerId,
-          createdAt: { gte: startOfDay, lte: endOfDay },
-          currency: 'UZS',
-          paymentSource: 'PREVIOUS_SAFE',
-        },
-        select: { amount: true },
-      }),
-    ]);
-
-    const dailyCashPurchasesUzs = cashInvoices.reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
-    const dailySupplierPaymentsUzs = todaySupplierPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
-    const previousSafePaymentsUzs = prevSafePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const auto = await ReportService.getTodayZReportAutoMetrics(ownerId);
     const totalDailySalesUzs =
       Number(d.terminalAmount || 0) +
       Number(d.clickAmount || 0) +
       Number(d.cashRemainingInDrawer || 0) +
-      dailyCashPurchasesUzs +
-      dailySupplierPaymentsUzs;
+      auto.dailyCashPurchasesUzs +
+      auto.dailySupplierPaymentsUzs;
 
     const actionId = `zrep_${Date.now()}`;
     ctx.session.step = actionId;
@@ -114,15 +79,15 @@ closingHandler.on('message:text', async (ctx, next) => {
       `💳 Terminalda savdo: ${formatSom(d.terminalAmount)}`,
       `📱 Click / Karta savdo: ${formatSom(d.clickAmount)}`,
       `💵 Kassada qolgan naqd pul: ${formatSom(d.cashRemainingInDrawer)}`,
-      `📦 Bugungi kassadan naqdga olingan tovarlar: ${formatSom(dailyCashPurchasesUzs)} (${cashInvoices.length} ta nakladnoy)`,
-      `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${formatSom(dailySupplierPaymentsUzs)} (${todaySupplierPayments.length} ta to'lov)`,
+      `📦 Bugungi kassadan naqdga olingan tovarlar: ${formatSom(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta nakladnoy)`,
+      `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${formatSom(auto.dailySupplierPaymentsUzs)} (${auto.dailySupplierPaymentsCount} ta to'lov)`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💰 **KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}**`,
     ];
 
-    if (previousSafePaymentsUzs > 0) {
+    if (auto.previousSafePaymentsUzs > 0) {
       lines.push(
-        `_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${formatSom(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`
+        `_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${formatSom(auto.previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`
       );
     }
 

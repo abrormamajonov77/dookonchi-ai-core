@@ -1,7 +1,7 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
-import { formatMoney, formatDate, getToday } from '../../utils/formatters';
+import { formatCurrency, formatMoney, formatDate, getToday, parseCurrencyAndAmount, parseSmartAmount } from '../../utils/formatters';
 import { getTemplateConfirmKeyboard } from '../keyboards/inline';
 import { clearSession, registerTemplateActions, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 
@@ -29,7 +29,7 @@ cashHandler.hears('💵 Naqd', async (ctx) => {
       recentTx
         .map(
           (tx) =>
-            `🔹 ${formatDate(tx.createdAt)} | **${sanitizeMdV1(tx.partyName)}** - ${formatMoney(tx.amount)}${tx.items ? `\n   ✏️ ${sanitizeMdV1(tx.items).slice(0, 80)}` : ''}`
+            `🔹 ${formatDate(tx.createdAt)} | **${sanitizeMdV1(tx.partyName)}** - ${formatCurrency(tx.amount, tx.currency)}${tx.items ? `\n   ✏️ ${sanitizeMdV1(tx.items).slice(0, 80)}` : ''}`
         )
         .join('\n')
     : "Amaliyotlar yo'q.";
@@ -64,16 +64,19 @@ cashHandler.on('message:text', async (ctx, next) => {
   }
 
   const partyName = text.match(/Kimdan\/Brend:\s*([^\n]+)/i)?.[1]?.trim() || '';
-  const amount = Number((text.match(/Summa:\s*([^\n]+)/i)?.[1] || '').replace(/\D/g, ''));
+  const rawSummaLine = text.match(/Summa:\s*([^\n]+)/i)?.[1] || '';
+  const parsedMoney = parseCurrencyAndAmount(rawSummaLine);
+  const amount = parseSmartAmount(rawSummaLine) || parsedMoney.amount;
+  const currency = parsedMoney.currency;
   const items = text.match(/Tovar\/Izoh:\s*([\s\S]+)/i)?.[1]?.trim() || '';
-  if (!amount) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
+  if (!amount || amount <= 0) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
 
   const actionId = `cash_conf_${Date.now()}`;
-  ctx.session.tempData = { type: 'CASH_TEMPLATE', data: { amount, partyName, items } };
+  ctx.session.tempData = { type: 'CASH_TEMPLATE', data: { amount, currency, partyName, items } };
   ctx.session.step = actionId;
 
-  const confirmText = `🧾 *Naqd Xarid Tahlili:*\n▫️ *Operatsiya:* Naqd\n▫️ *Kimdan:* ${partyName || "Noma'lum"}\n▫️ *Summa:* ${formatMoney(amount)}\n${items ? `▫️ *Tovar/Izoh:* ${items}\n` : ''}\n*(Bu operatsiya qarzlar balansiga ta'sir qilmaydi)*\nMa'lumotlar to'g'rimi?`;
-  await ctx.reply(confirmText, {
+  const confirmText = `🧾 *Naqd Xarid Tahlili:*\n▫️ *Operatsiya:* Naqd\n▫️ *Kimdan:* ${sanitizeMdV1(partyName || "Noma'lum")}\n▫️ *Summa:* ${formatCurrency(amount, currency)}\n${items ? `▫️ *Tovar/Izoh:* ${sanitizeMdV1(items)}\n` : ''}\n*(Bu operatsiya qarzlar balansiga ta'sir qilmaydi)*\nMa'lumotlar to'g'rimi?`;
+  await safeReply(ctx, confirmText, {
     parse_mode: 'Markdown',
     reply_markup: getTemplateConfirmKeyboard('cash:edit', actionId),
   });
@@ -84,11 +87,11 @@ registerTemplateActions(
   'cash',
   'ADD_CASH_TEMPLATE',
   'CASH_TEMPLATE',
-  async (ctx, { amount, partyName, items }) => {
+  async (ctx, { amount, currency = 'UZS', partyName, items }) => {
     const ownerId = String(ctx.from?.id || '');
     await prisma.cashTransaction.create({
-      data: { ownerId, partyName: partyName || "Noma'lum", amount, items: items || null, createdBy: ownerId },
+      data: { ownerId, partyName: partyName || "Noma'lum", amount, currency, items: items || null, createdBy: ownerId },
     });
-    return `✅ Naqd xarid saqlandi:\nKimdan: ${partyName || "Noma'lum"}\nSumma: ${formatMoney(amount)}${items ? `\nIzoh: ${items}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`;
+    return `✅ Naqd xarid saqlandi:\nKimdan: ${partyName || "Noma'lum"}\nSumma: ${formatCurrency(amount, currency)}${items ? `\nIzoh: ${items}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`;
   }
 );

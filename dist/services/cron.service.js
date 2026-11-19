@@ -8,6 +8,7 @@ const node_cron_1 = __importDefault(require("node-cron"));
 const prisma_1 = require("../database/prisma");
 const logger_1 = require("../config/logger");
 const formatters_1 = require("../utils/formatters");
+const telegram_1 = require("../utils/telegram");
 const report_service_1 = require("./report.service");
 const subscription_service_1 = require("./subscription.service");
 const report_1 = require("../bot/handlers/report");
@@ -19,11 +20,18 @@ function startCronJobs(bot) {
             select: { telegramId: true },
         });
     };
-    // Har 6 soatda (va soat 10:00 da) — Obuna muddati <= 3 kun qolganlar va tugaganlarni avtomatik tekshirish
+    // Har 6 soatda — Obuna muddati <= 3 kun qolganlar, tugaganlarni tekshirish + 24 soatdan eski PendingAction larni tozalash
     node_cron_1.default.schedule('0 */6 * * *', async () => {
-        logger_1.logger.info('Running cron: Subscription Expiry & 3-Day Reminder Check');
+        logger_1.logger.info('Running cron: Subscription Expiry, 3-Day Reminder & Stale PendingAction Cleanup');
         try {
-            await subscription_service_1.SubscriptionService.checkExpiringAndExpiredSubscriptions((targetId, text, replyMarkup) => bot.api.sendMessage(targetId, text, replyMarkup ? { reply_markup: replyMarkup } : undefined));
+            await Promise.all([
+                subscription_service_1.SubscriptionService.checkExpiringAndExpiredSubscriptions((targetId, text, replyMarkup) => bot.api.sendMessage(targetId, text, replyMarkup ? { reply_markup: replyMarkup } : undefined)),
+                prisma_1.prisma.pendingAction
+                    .deleteMany({
+                    where: { createdAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+                })
+                    .catch(() => { }),
+            ]);
         }
         catch (error) {
             logger_1.logger.error({ error }, 'Failed to run subscription check cron');
@@ -82,7 +90,7 @@ function startCronJobs(bot) {
                     },
                 });
                 if (oldDebts.length) {
-                    const lines = oldDebts.map((d) => `- ${d.customerName}: ${(0, formatters_1.formatMoney)(Number(d.amount) - Number(d.paidAmount), d.currency)}`);
+                    const lines = oldDebts.map((d) => `- ${(0, telegram_1.sanitizeMdV1)(d.customerName)}: ${(0, formatters_1.formatMoney)(Number(d.amount) - Number(d.paidAmount), d.currency)}`);
                     await bot.api
                         .sendMessage(u.telegramId, `⚠️ **Eski Nasiyalar (7 kundan oshgan)**\n\n${lines.join('\n')}`, {
                         parse_mode: 'Markdown',
@@ -95,15 +103,15 @@ function startCronJobs(bot) {
             logger_1.logger.error({ error }, 'Failed to send pending debts cron');
         }
     }, opts);
-    // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma
+    // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma (Toshkent UTC+5 dateKey)
     node_cron_1.default.schedule('0 20 * * *', async () => {
         logger_1.logger.info('Running cron: 20:00 Z-Report Reminder');
         try {
             const users = await getActiveStoreUsers();
-            const today = (0, formatters_1.getToday)();
+            const { dateKey } = (0, formatters_1.getTashkentDayRange)();
             for (const u of users) {
                 const register = await prisma_1.prisma.dailyRegister.findUnique({
-                    where: { ownerId_date: { ownerId: u.telegramId, date: today } },
+                    where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
                 });
                 if (!register?.isClosed) {
                     await bot.api
@@ -116,16 +124,16 @@ function startCronJobs(bot) {
             logger_1.logger.error({ error }, 'Failed to send Z-Report reminder');
         }
     }, opts);
-    // Har kuni soat 21:00 da — Kunlik yakuniy hisobot (har bir foydalanuvchi uchun alohida)
+    // Har kuni soat 21:00 da — Kunlik yakuniy hisobot (Toshkent UTC+5 dateKey, har bir foydalanuvchi uchun alohida)
     node_cron_1.default.schedule('0 21 * * *', async () => {
         logger_1.logger.info('Running cron: 21:00 Daily Summary');
         try {
             const users = await getActiveStoreUsers();
-            const today = (0, formatters_1.getToday)();
+            const { dateKey } = (0, formatters_1.getTashkentDayRange)();
             for (const u of users) {
                 const [r, supAgg] = await Promise.all([
                     prisma_1.prisma.dailyRegister.findUnique({
-                        where: { ownerId_date: { ownerId: u.telegramId, date: today } },
+                        where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
                     }),
                     prisma_1.prisma.supplier.aggregate({
                         where: { ownerId: u.telegramId, isActive: true },

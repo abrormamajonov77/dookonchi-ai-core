@@ -1,11 +1,10 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
-import { getMainMenu, getPendingRegistrationKeyboard } from '../keyboards/menu';
+import { getMainMenu, getPendingRegistrationKeyboard, isMenuButton } from '../keyboards/menu';
 import { clearSession, safeDelete, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { SubscriptionService } from '../../services/subscription.service';
 import { env } from '../../config/env';
 import { formatDateShort, formatSom } from '../../utils/formatters';
-import { isMenuButton } from '../keyboards/menu';
 
 export const startHandler = new Composer<MyContext>();
 

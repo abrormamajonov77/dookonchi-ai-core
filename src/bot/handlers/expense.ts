@@ -1,7 +1,7 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
-import { formatMoney } from '../../utils/formatters';
+import { formatCurrency, formatMoney, parseCurrencyAndAmount, parseSmartAmount } from '../../utils/formatters';
 import { AiService } from '../../services/ai.service';
 import { getTemplateConfirmKeyboard } from '../keyboards/inline';
 import { clearSession, registerTemplateActions, safeReply, sanitizeMdV1 } from '../../utils/telegram';
@@ -56,10 +56,13 @@ expenseHandler.on('message:text', async (ctx, next) => {
     return next();
   }
 
-  const amount = Number((text.match(/Summa:\s*(.+)/i)?.[1] || '').replace(/\D/g, ''));
+  const rawSummaLine = text.match(/Summa:\s*(.+)/i)?.[1] || '';
+  const parsedMoney = parseCurrencyAndAmount(rawSummaLine);
+  const amount = parseSmartAmount(rawSummaLine) || parsedMoney.amount;
+  const currency = parsedMoney.currency;
   let category = text.match(/Kategoriya:\s*(.+)/i)?.[1]?.trim() || '';
   let note = text.match(/Izoh:\s*(.+)/i)?.[1]?.trim() || '';
-  if (!amount) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
+  if (!amount || amount <= 0) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
   if (!category)
     category =
       (await AiService.parseTextIntent(`Operatsiya: Xarajat. Summa: ${amount}. Izoh: ${note}`)).category ||
@@ -67,11 +70,11 @@ expenseHandler.on('message:text', async (ctx, next) => {
   if (!note || note.toLowerCase() === "yo'q" || note === '-') note = 'Kiritilmagan';
 
   const actionId = `exp_conf_${Date.now()}`;
-  ctx.session.tempData = { type: 'EXPENSE_TEMPLATE', data: { amount, category, note } };
+  ctx.session.tempData = { type: 'EXPENSE_TEMPLATE', data: { amount, currency, category, note } };
   ctx.session.step = actionId;
 
-  const confirmText = `🧾 *Xarajat Tahlili:*\n▫️ *Operatsiya:* Xarajat\n▫️ *Summa:* ${formatMoney(amount)}\n▫️ *Kategoriya:* ${category}\n▫️ *Izoh:* ${note}\n\nMa'lumotlar to'g'rimi?`;
-  await ctx.reply(confirmText, {
+  const confirmText = `🧾 *Xarajat Tahlili:*\n▫️ *Operatsiya:* Xarajat\n▫️ *Summa:* ${formatCurrency(amount, currency)}\n▫️ *Kategoriya:* ${sanitizeMdV1(category)}\n▫️ *Izoh:* ${sanitizeMdV1(note)}\n\nMa'lumotlar to'g'rimi?`;
+  await safeReply(ctx, confirmText, {
     parse_mode: 'Markdown',
     reply_markup: getTemplateConfirmKeyboard('exp:edit', actionId),
   });
@@ -82,11 +85,11 @@ registerTemplateActions(
   'exp',
   'ADD_EXPENSE_TEMPLATE',
   'EXPENSE_TEMPLATE',
-  async (ctx, { amount, category, note }) => {
+  async (ctx, { amount, currency = 'UZS', category, note }) => {
     const ownerId = String(ctx.from?.id || '');
     await prisma.expense.create({
-      data: { ownerId, amount, category, note, createdBy: ctx.user?.id || ownerId },
+      data: { ownerId, amount, currency, category, note, createdBy: ctx.user?.id || ownerId },
     });
-    return `✅ Xarajat saqlandi:\nSumma: ${formatMoney(amount)}\nKategoriya: ${category}\nIzoh: ${note}`;
+    return `✅ Xarajat saqlandi:\nSumma: ${formatCurrency(amount, currency)}\nKategoriya: ${category}\nIzoh: ${note}`;
   }
 );

@@ -1,11 +1,9 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearSession = exports.safeDelete = exports.httpsKeepAliveAgent = exports.httpKeepAliveAgent = void 0;
+exports.clearSession = exports.safeDelete = void 0;
 exports.withChatAction = withChatAction;
-exports.handleInlineAction = handleInlineAction;
+exports.findOwnedPendingAction = findOwnedPendingAction;
+exports.deleteOwnedPendingAction = deleteOwnedPendingAction;
 exports.downloadTelegramFile = downloadTelegramFile;
 exports.sanitizeMdV1 = sanitizeMdV1;
 exports.truncateForTelegram = truncateForTelegram;
@@ -14,21 +12,8 @@ exports.safeEditMessageText = safeEditMessageText;
 exports.replyOrEdit = replyOrEdit;
 exports.formatFriendlyError = formatFriendlyError;
 exports.registerTemplateActions = registerTemplateActions;
-const node_http_1 = __importDefault(require("node:http"));
-const node_https_1 = __importDefault(require("node:https"));
 const env_1 = require("../config/env");
-exports.httpKeepAliveAgent = new node_http_1.default.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 30000,
-    maxSockets: 50,
-    maxFreeSockets: 10,
-});
-exports.httpsKeepAliveAgent = new node_https_1.default.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 30000,
-    maxSockets: 50,
-    maxFreeSockets: 10,
-});
+const prisma_1 = require("../database/prisma");
 async function withChatAction(ctx, action, task) {
     await ctx.replyWithChatAction(action).catch(() => { });
     const timer = setInterval(() => ctx.replyWithChatAction(action).catch(() => { }), 4000);
@@ -39,13 +24,19 @@ async function withChatAction(ctx, action, task) {
         clearInterval(timer);
     }
 }
-async function handleInlineAction(ctx, task) {
-    try {
-        return await task();
-    }
-    finally {
-        await ctx.answerCallbackQuery().catch(() => { });
-    }
+async function findOwnedPendingAction(id, userId) {
+    return prisma_1.prisma.pendingAction
+        .findFirst({
+        where: { id, userId: BigInt(userId) },
+    })
+        .catch(() => null);
+}
+async function deleteOwnedPendingAction(id, userId) {
+    return prisma_1.prisma.pendingAction
+        .deleteMany({
+        where: { id, userId: BigInt(userId) },
+    })
+        .catch(() => { });
 }
 async function downloadTelegramFile(filePath) {
     const url = `https://api.telegram.org/file/bot${env_1.env.BOT_TOKEN}/${filePath}`;

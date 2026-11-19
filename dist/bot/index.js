@@ -25,29 +25,31 @@ const report_1 = require("./handlers/report");
 const suppliers_1 = require("./handlers/suppliers");
 const cash_1 = require("./handlers/cash");
 const cron_service_1 = require("../services/cron.service");
+const cache_1 = require("../utils/cache");
 const baseStorage = new storage_prisma_1.PrismaAdapter(prisma_1.prisma.session);
-const sessionMem = new Map();
 const cachedStorage = {
     async read(key) {
-        if (sessionMem.has(key))
-            return sessionMem.get(key);
+        const cached = cache_1.sessionCache.get(key);
+        if (cached)
+            return cached;
         const val = await baseStorage.read(key);
         if (val)
-            sessionMem.set(key, val);
+            cache_1.sessionCache.set(key, val);
         return val;
     },
     async write(key, value) {
-        sessionMem.set(key, value);
+        cache_1.sessionCache.set(key, value);
         await baseStorage.write(key, value);
     },
     async delete(key) {
-        sessionMem.delete(key);
+        cache_1.sessionCache.delete(key);
         await baseStorage.delete(key);
-    }
+    },
 };
 const bot = new grammy_1.Bot(env_1.env.BOT_TOKEN);
-bot.use((0, grammy_1.session)({ initial: () => ({}), storage: cachedStorage }), queue_middleware_1.queueMiddleware, auth_middleware_1.authMiddleware);
 bot.catch(error_middleware_1.errorMiddleware);
+// Strict Middleware Order: session -> queue -> callback-answer safety -> subscriptionGuard (authMiddleware) -> handlers
+bot.use((0, grammy_1.session)({ initial: () => ({}), storage: cachedStorage }), queue_middleware_1.queueMiddleware);
 bot.use(async (ctx, next) => {
     if (ctx.message && 'text' in ctx.message)
         ctx.replyWithChatAction('typing').catch(() => { });
@@ -59,6 +61,7 @@ bot.use(async (ctx, next) => {
             await ctx.answerCallbackQuery().catch(() => { });
     }
 });
+bot.use(auth_middleware_1.authMiddleware);
 bot.use(start_1.startHandler, admin_1.adminHandler, invoice_1.invoiceHandler, debt_1.debtHandler, suppliers_1.suppliersHandler, cash_1.cashHandler, expense_1.expenseHandler, search_1.searchHandler, closing_1.closingHandler, report_1.reportHandler, voice_1.voiceHandler);
 bot.on('message', (ctx) => ctx.reply("🤔 Tushunmadim. Pastdagi menyudan kerakli bo'limni tanlang yoki shunchaki ovozli xabar / nakladnoy rasmini yuboring."));
 const PORT = Number(process.env.PORT) || 3000;

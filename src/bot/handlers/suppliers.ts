@@ -19,7 +19,15 @@ import {
   getSavedInvoiceCardKeyboard,
   getPaymentSourceConfirmationKeyboard,
 } from '../keyboards/inline';
-import { replyOrEdit, clearSession, safeEditMessageText, safeReply, sanitizeMdV1 } from '../../utils/telegram';
+import {
+  replyOrEdit,
+  clearSession,
+  safeEditMessageText,
+  safeReply,
+  sanitizeMdV1,
+  findOwnedPendingAction,
+  deleteOwnedPendingAction,
+} from '../../utils/telegram';
 import { isMenuButton } from '../keyboards/menu';
 import { toLatinUz } from '../../utils/transliterate';
 
@@ -204,24 +212,25 @@ suppliersHandler.callbackQuery(/^sup_merge:(.+)$/, async (ctx) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
   const pendingId = ctx.match[1];
-  const pending = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pending = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pending || pending.type !== 'SUPPLIER_MERGE') {
     return ctx.editMessageText("⚠️ Ushbu so'rov muddati tugagan.", { reply_markup: undefined });
   }
   const { sourceId, targetId } = (pending.data as any) || {};
   try {
     await executeSupplierMerge(ctx, sourceId, targetId, ownerId);
-    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    await deleteOwnedPendingAction(pendingId, ctx.from.id);
   } catch (err: any) {
     await ctx.answerCallbackQuery({ text: err?.message || 'Xatolik yuz berdi.', show_alert: true });
   }
 });
 
 suppliersHandler.callbackQuery(/^cancel_merge:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pending = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pending = await findOwnedPendingAction(pendingId, ctx.from.id);
   const sourceId = (pending?.data as any)?.sourceId;
-  await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+  await deleteOwnedPendingAction(pendingId, ctx.from.id);
   clearSession(ctx);
   await ctx.editMessageText('❌ Birlashtirish bekor qilindi.');
   if (sourceId) await sendSupplierDetails(ctx, sourceId, 'all', false);
@@ -483,14 +492,14 @@ suppliersHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE)|ps:(T|
     ctx.match[1] === 'PREVIOUS_SAFE' || ctx.match[2] === 'S' ? 'PREVIOUS_SAFE' : 'TODAY_CASH';
   const pendingId = ctx.match[3];
 
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction) {
     return ctx.editMessageText("⚠️ Ushbu so'rov muddati tugagan.", { reply_markup: undefined });
   }
 
   const { supplierId, supplierName, amount, currency } = pendingAction.data as any;
   try {
-    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    await deleteOwnedPendingAction(pendingId, ctx.from.id);
     await handleSupplierPayment({
       ctx,
       ownerId,
@@ -507,7 +516,8 @@ suppliersHandler.callbackQuery(/^(?:pay_source:(TODAY_CASH|PREVIOUS_SAFE)|ps:(T|
 });
 
 suppliersHandler.callbackQuery(/^cancel_spay_(.+)$/, async (ctx) => {
-  await prisma.pendingAction.delete({ where: { id: ctx.match[1] } }).catch(() => {});
+  if (!ctx.from) return;
+  await deleteOwnedPendingAction(ctx.match[1], ctx.from.id);
   clearSession(ctx);
   await ctx.editMessageText("❌ To'lov bekor qilindi.", { reply_markup: undefined });
 });

@@ -21,35 +21,42 @@ import { reportHandler } from './handlers/report';
 import { suppliersHandler } from './handlers/suppliers';
 import { cashHandler } from './handlers/cash';
 import { startCronJobs } from '../services/cron.service';
+import { sessionCache } from '../utils/cache';
 
 const baseStorage = new PrismaAdapter<SessionData>(prisma.session as any);
-const sessionMem = new Map<string, SessionData>();
 
 const cachedStorage: StorageAdapter<SessionData> = {
   async read(key) {
-    if (sessionMem.has(key)) return sessionMem.get(key);
+    const cached = sessionCache.get(key);
+    if (cached) return cached;
     const val = await baseStorage.read(key);
-    if (val) sessionMem.set(key, val);
+    if (val) sessionCache.set(key, val);
     return val;
   },
   async write(key, value) {
-    sessionMem.set(key, value);
+    sessionCache.set(key, value);
     await baseStorage.write(key, value);
   },
   async delete(key) {
-    sessionMem.delete(key);
+    sessionCache.delete(key);
     await baseStorage.delete(key);
-  }
+  },
 };
 
 const bot = new Bot<MyContext>(env.BOT_TOKEN);
-bot.use(session({ initial: () => ({}), storage: cachedStorage }), queueMiddleware, authMiddleware);
 bot.catch(errorMiddleware);
 
+// Strict Middleware Order: session -> queue -> callback-answer safety -> subscriptionGuard (authMiddleware) -> handlers
+bot.use(session({ initial: () => ({}), storage: cachedStorage }), queueMiddleware);
 bot.use(async (ctx, next) => {
-  if (ctx.message && 'text' in ctx.message) ctx.replyWithChatAction('typing').catch(() => { });
-  try { await next(); } finally { if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => { }); }
+  if (ctx.message && 'text' in ctx.message) ctx.replyWithChatAction('typing').catch(() => {});
+  try {
+    await next();
+  } finally {
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+  }
 });
+bot.use(authMiddleware);
 
 bot.use(
   startHandler,

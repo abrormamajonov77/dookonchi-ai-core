@@ -7,6 +7,7 @@ import {
   formatSupplierDebtLine,
   formatTotalDebtBlock,
   parseCurrencyAndAmount,
+  parseSmartAmount,
 } from '../../utils/formatters';
 import { addPaginationRow, addTwoColButtons, getTemplateConfirmKeyboard } from '../keyboards/inline';
 import { isMenuButton } from '../keyboards/menu';
@@ -191,7 +192,12 @@ debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
   const totalRem = Number((Number(agg._sum.amount || 0) - Number(agg._sum.paidAmount || 0)).toFixed(2));
 
   ctx.session.step = 'DEBT_PAYMENT';
-  ctx.session.tempData = { customerName: firstDebt.customerName, firstId, totalRem };
+  ctx.session.tempData = {
+    customerName: firstDebt.customerName,
+    firstId,
+    totalRem,
+    currency: firstDebt.currency,
+  };
 
   const kb =
     totalRem > 0
@@ -209,7 +215,7 @@ debtHandler.callbackQuery(/^debt:pay:(.+)$/, async (ctx) => {
 
   await safeReply(
     ctx,
-    `💸 **${sanitizeMdV1(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 50 ming yoki $25.50)`,
+    `💸 **${sanitizeMdV1(firstDebt.customerName)}** tomonidan to'langan summani raqamda kiriting:\n(Masalan: 50000, 500.000, 50 ming yoki $25.50)`,
     { parse_mode: 'Markdown', reply_markup: kb }
   );
 });
@@ -274,10 +280,17 @@ debtHandler.on('message:text', async (ctx, next) => {
       clearSession(ctx);
       return next();
     }
-    const { amount: payAmount, currency } = parseCurrencyAndAmount(rawText);
+    const parsed = parseCurrencyAndAmount(rawText);
+    const payAmount = parseSmartAmount(rawText) || parsed.amount;
+    const currency: 'UZS' | 'USD' =
+      parsed.currency === 'USD'
+        ? 'USD'
+        : ctx.session.tempData?.currency === 'USD'
+        ? 'USD'
+        : 'UZS';
     if (!payAmount || payAmount <= 0 || isNaN(payAmount)) {
       return ctx.reply(
-        "❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 50 ming yoki $25.50). To'xtatish uchun /start."
+        "❌ To'g'ri to'lov summasini kiriting (masalan: 50000, 500.000, 50 ming yoki $25.50). To'xtatish uchun /start."
       );
     }
 
@@ -306,19 +319,21 @@ debtHandler.on('message:text', async (ctx, next) => {
 
   const customerName = text.match(/Mijoz:\s*([^\n]+)/i)?.[1]?.trim() || '';
   const rawSummaLine = text.match(/Summa:\s*([^\n]+)/i)?.[1] || '';
-  const { amount, currency } = parseCurrencyAndAmount(rawSummaLine);
+  const parsed = parseCurrencyAndAmount(rawSummaLine);
+  const amount = parseSmartAmount(rawSummaLine) || parsed.amount;
+  const currency = parsed.currency;
   const phone = text.match(/Telefon:\s*([^\n]+)/i)?.[1]?.trim() || '';
   const note = text.match(/Izoh:\s*([\s\S]+)/i)?.[1]?.trim() || '';
 
   if (!customerName) return ctx.reply("❌ Mijoz ismini aniqlab bo'lmadi.");
-  if (!amount) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
+  if (!amount || amount <= 0) return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
 
   const actionId = `debt_conf_${Date.now()}`;
   ctx.session.tempData = { type: 'DEBT_TEMPLATE', data: { amount, currency, customerName, phone, note } };
   ctx.session.step = actionId;
 
-  const confirmText = `🧾 *Nasiya Tahlili:*\n▫️ *Operatsiya:* Nasiya savdo\n▫️ *Mijoz:* ${customerName}\n▫️ *Summa:* ${formatCurrency(amount, currency)}\n${phone ? `▫️ *Telefon:* ${phone}\n` : ''}${note ? `▫️ *Izoh:* ${note}\n` : ''}\nMa'lumotlar to'g'rimi?`;
-  await ctx.reply(confirmText, {
+  const confirmText = `🧾 *Nasiya Tahlili:*\n▫️ *Operatsiya:* Nasiya savdo\n▫️ *Mijoz:* ${sanitizeMdV1(customerName)}\n▫️ *Summa:* ${formatCurrency(amount, currency)}\n${phone ? `▫️ *Telefon:* ${sanitizeMdV1(phone)}\n` : ''}${note ? `▫️ *Izoh:* ${sanitizeMdV1(note)}\n` : ''}\nMa'lumotlar to'g'rimi?`;
+  await safeReply(ctx, confirmText, {
     parse_mode: 'Markdown',
     reply_markup: getTemplateConfirmKeyboard('debt:edit', actionId),
   });

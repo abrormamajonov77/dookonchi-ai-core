@@ -27,7 +27,7 @@ exports.cashHandler.hears('💵 Naqd', async (ctx) => {
     const txLines = recentTx.length
         ? `📝 **Oxirgi 10 ta amaliyot:**\n` +
             recentTx
-                .map((tx) => `🔹 ${(0, formatters_1.formatDate)(tx.createdAt)} | **${(0, telegram_1.sanitizeMdV1)(tx.partyName)}** - ${(0, formatters_1.formatMoney)(tx.amount)}${tx.items ? `\n   ✏️ ${(0, telegram_1.sanitizeMdV1)(tx.items).slice(0, 80)}` : ''}`)
+                .map((tx) => `🔹 ${(0, formatters_1.formatDate)(tx.createdAt)} | **${(0, telegram_1.sanitizeMdV1)(tx.partyName)}** - ${(0, formatters_1.formatCurrency)(tx.amount, tx.currency)}${tx.items ? `\n   ✏️ ${(0, telegram_1.sanitizeMdV1)(tx.items).slice(0, 80)}` : ''}`)
                 .join('\n')
         : "Amaliyotlar yo'q.";
     await (0, telegram_1.safeReply)(ctx, `💵 **Naqd Savdo va Xaridlar Arxiv:**\n\n📊 **Bugungi aylanma:** ${(0, formatters_1.formatMoney)(dayStats._sum.amount || 0)}\n📊 **Shu oydagi aylanma:** ${(0, formatters_1.formatMoney)(monthStats._sum.amount || 0)}\n\n${txLines}`, { parse_mode: 'Markdown', reply_markup: new grammy_1.InlineKeyboard().text('➕ Yangi naqd xarid', 'cash:new') });
@@ -48,23 +48,26 @@ exports.cashHandler.on('message:text', async (ctx, next) => {
         return next();
     }
     const partyName = text.match(/Kimdan\/Brend:\s*([^\n]+)/i)?.[1]?.trim() || '';
-    const amount = Number((text.match(/Summa:\s*([^\n]+)/i)?.[1] || '').replace(/\D/g, ''));
+    const rawSummaLine = text.match(/Summa:\s*([^\n]+)/i)?.[1] || '';
+    const parsedMoney = (0, formatters_1.parseCurrencyAndAmount)(rawSummaLine);
+    const amount = (0, formatters_1.parseSmartAmount)(rawSummaLine) || parsedMoney.amount;
+    const currency = parsedMoney.currency;
     const items = text.match(/Tovar\/Izoh:\s*([\s\S]+)/i)?.[1]?.trim() || '';
-    if (!amount)
+    if (!amount || amount <= 0)
         return ctx.reply("❌ Summani aniqlab bo'lmadi. Iltimos, raqamlarda kiriting.");
     const actionId = `cash_conf_${Date.now()}`;
-    ctx.session.tempData = { type: 'CASH_TEMPLATE', data: { amount, partyName, items } };
+    ctx.session.tempData = { type: 'CASH_TEMPLATE', data: { amount, currency, partyName, items } };
     ctx.session.step = actionId;
-    const confirmText = `🧾 *Naqd Xarid Tahlili:*\n▫️ *Operatsiya:* Naqd\n▫️ *Kimdan:* ${partyName || "Noma'lum"}\n▫️ *Summa:* ${(0, formatters_1.formatMoney)(amount)}\n${items ? `▫️ *Tovar/Izoh:* ${items}\n` : ''}\n*(Bu operatsiya qarzlar balansiga ta'sir qilmaydi)*\nMa'lumotlar to'g'rimi?`;
-    await ctx.reply(confirmText, {
+    const confirmText = `🧾 *Naqd Xarid Tahlili:*\n▫️ *Operatsiya:* Naqd\n▫️ *Kimdan:* ${(0, telegram_1.sanitizeMdV1)(partyName || "Noma'lum")}\n▫️ *Summa:* ${(0, formatters_1.formatCurrency)(amount, currency)}\n${items ? `▫️ *Tovar/Izoh:* ${(0, telegram_1.sanitizeMdV1)(items)}\n` : ''}\n*(Bu operatsiya qarzlar balansiga ta'sir qilmaydi)*\nMa'lumotlar to'g'rimi?`;
+    await (0, telegram_1.safeReply)(ctx, confirmText, {
         parse_mode: 'Markdown',
         reply_markup: (0, inline_1.getTemplateConfirmKeyboard)('cash:edit', actionId),
     });
 });
-(0, telegram_1.registerTemplateActions)(exports.cashHandler, 'cash', 'ADD_CASH_TEMPLATE', 'CASH_TEMPLATE', async (ctx, { amount, partyName, items }) => {
+(0, telegram_1.registerTemplateActions)(exports.cashHandler, 'cash', 'ADD_CASH_TEMPLATE', 'CASH_TEMPLATE', async (ctx, { amount, currency = 'UZS', partyName, items }) => {
     const ownerId = String(ctx.from?.id || '');
     await prisma_1.prisma.cashTransaction.create({
-        data: { ownerId, partyName: partyName || "Noma'lum", amount, items: items || null, createdBy: ownerId },
+        data: { ownerId, partyName: partyName || "Noma'lum", amount, currency, items: items || null, createdBy: ownerId },
     });
-    return `✅ Naqd xarid saqlandi:\nKimdan: ${partyName || "Noma'lum"}\nSumma: ${(0, formatters_1.formatMoney)(amount)}${items ? `\nIzoh: ${items}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`;
+    return `✅ Naqd xarid saqlandi:\nKimdan: ${partyName || "Noma'lum"}\nSumma: ${(0, formatters_1.formatCurrency)(amount, currency)}${items ? `\nIzoh: ${items}` : ''}\n*(Ushbu summa qarzga ta'sir qilmadi)*`;
 });

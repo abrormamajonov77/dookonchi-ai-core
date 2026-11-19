@@ -16,6 +16,7 @@ import {
   calculateDiscountedTotal,
   formatCurrency,
   parseCurrencyAndAmount,
+  parseSmartAmount,
   reconcileInvoiceTotals,
 } from '../../utils/formatters';
 import { prisma } from '../../database/prisma';
@@ -29,6 +30,8 @@ import {
   safeReply,
   safeEditMessageText,
   sanitizeMdV1,
+  findOwnedPendingAction,
+  deleteOwnedPendingAction,
 } from '../../utils/telegram';
 import { SupplierService } from '../../services/supplier.service';
 import { toLatinUz } from '../../utils/transliterate';
@@ -436,12 +439,16 @@ invoiceHandler.hears('➕ Nakladnoy', (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
   const rawId = ctx.match[1];
-  const isPending = rawId.startsWith('p_') || !(await prisma.invoice.findUnique({ where: { id: rawId } }).catch(() => null));
+  const isPending =
+    rawId.startsWith('p_') ||
+    !(await prisma.invoice.findFirst({ where: { id: rawId, ownerId }, select: { id: true } }).catch(() => null));
   const cleanId = rawId.replace(/^p_/, '');
 
   if (isPending) {
-    const pendingAction = await prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null);
+    const pendingAction = await findOwnedPendingAction(cleanId, ctx.from.id);
     if (pendingAction && pendingAction.type === 'INVOICE') {
       const botMessageId = ctx.callbackQuery.message?.message_id;
       await prisma.pendingAction.update({
@@ -466,11 +473,10 @@ invoiceHandler.callbackQuery(/^(?:edit_invoice_discount:|add_discount_(?:i_)?)(.
 });
 
 invoiceHandler.callbackQuery(/^edit_invoice_total:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const rawId = ctx.match[1];
   const cleanId = rawId.replace(/^p_/, '');
-  const pendingAction = rawId.startsWith('p_')
-    ? await prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-    : null;
+  const pendingAction = rawId.startsWith('p_') ? await findOwnedPendingAction(cleanId, ctx.from.id) : null;
 
   if (pendingAction && pendingAction.type === 'INVOICE') {
     const botMessageId = ctx.callbackQuery.message?.message_id;
@@ -503,9 +509,7 @@ invoiceHandler.callbackQuery(/^clear_invoice_discount:(.+)$/, async (ctx) => {
   const ownerId = String(ctx.from.id);
   const rawId = ctx.match[1];
   const cleanId = rawId.replace(/^p_/, '');
-  const pendingAction = rawId.startsWith('p_')
-    ? await prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-    : null;
+  const pendingAction = rawId.startsWith('p_') ? await findOwnedPendingAction(cleanId, ctx.from.id) : null;
 
   if (pendingAction && pendingAction.type === 'INVOICE') {
     const pData = pendingAction.data as any;
@@ -565,9 +569,7 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
   const ownerId = String(ctx.from.id);
   const rawId = ctx.match[1];
   const cleanId = rawId.replace(/^p_/, '');
-  const pendingAction = rawId.startsWith('p_')
-    ? await prisma.pendingAction.findUnique({ where: { id: cleanId } }).catch(() => null)
-    : null;
+  const pendingAction = rawId.startsWith('p_') ? await findOwnedPendingAction(cleanId, ctx.from.id) : null;
 
   if (pendingAction && pendingAction.type === 'INVOICE') {
     const pData = pendingAction.data as any;
@@ -621,20 +623,23 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
 });
 
 function parseTwoOrOneAmounts(rawText: string): { first: number; second?: number } {
-  const parts = rawText
-    .trim()
+  const trimmed = rawText.trim();
+  // Single space-separated thousands number like "500 000" or "1 250 000"
+  if (/^\$?\d{1,3}(?:\s+\d{3})+(?:\s*(?:so['`’]?m|uzs|usd|usdt|\$))?$/i.test(trimmed)) {
+    return { first: parseSmartAmount(trimmed) };
+  }
+  const parts = trimmed
     .split(/[\s/;|-]+/)
     .map((p) => p.trim())
     .filter((p) => /\d/.test(p));
   if (parts.length >= 2) {
-    const first = parseCurrencyAndAmount(parts[0]).amount;
-    const second = parseCurrencyAndAmount(parts[1]).amount;
+    const first = parseSmartAmount(parts[0]);
+    const second = parseSmartAmount(parts[1]);
     if (first > 0 && second >= 0) {
       return { first, second };
     }
   }
-  const single = parseCurrencyAndAmount(rawText).amount;
-  return { first: single };
+  return { first: parseSmartAmount(trimmed) };
 }
 
 invoiceHandler.on('message:text', async (ctx, next) => {
@@ -879,7 +884,8 @@ invoiceHandler.on('message:text', async (ctx, next) => {
 });
 
 const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } });
+  if (!ctx.from) return null;
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction || pendingAction.type !== 'INVOICE') {
     await ctx
       .editMessageText(
@@ -916,8 +922,9 @@ const extractPendingInvoice = async (ctx: MyContext, pendingId: string) => {
 };
 
 invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
   const pData = pendingAction.data as any;
@@ -943,6 +950,7 @@ invoiceHandler.callbackQuery(/^force_dup_inv:(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
   const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
@@ -971,7 +979,7 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
       rawImageUrl: pData.imageUrl || null,
     });
 
-    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    await deleteOwnedPendingAction(pendingId, ctx.from.id);
     clearSession(ctx);
 
     if (result.isDuplicate && result.warningText) {
@@ -1013,6 +1021,7 @@ invoiceHandler.callbackQuery(/^confirm_invdebt_i_(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
   const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
@@ -1041,7 +1050,7 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
       rawImageUrl: pData.imageUrl || null,
     });
 
-    await prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {});
+    await deleteOwnedPendingAction(pendingId, ctx.from.id);
     clearSession(ctx);
 
     if (result.isDuplicate && result.warningText) {
@@ -1080,12 +1089,13 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^cancel_(?:i|idis)_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (pendingAction) {
     await Promise.all([
       safeDelete(ctx, ctx.chat?.id, (pendingAction.data as any)?.userPhotoMsgId),
-      prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {}),
+      deleteOwnedPendingAction(pendingId, ctx.from.id),
     ]);
   }
   clearSession(ctx);
@@ -1096,7 +1106,7 @@ invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
   const [, pendingId, rawIdx] = ctx.match;
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } });
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction || pendingAction.type !== 'INVOICE_DISAMBIGUATION')
     return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
   const pData = pendingAction.data as any;
@@ -1110,7 +1120,7 @@ invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
   pData.data.supplierName = supplier.name;
 
   await Promise.all([
-    prisma.pendingAction.delete({ where: { id: pendingId } }),
+    deleteOwnedPendingAction(pendingId, ctx.from.id),
     ctx.deleteMessage().catch(() => {}),
   ]);
   await processParsedInvoice(
@@ -1124,8 +1134,9 @@ invoiceHandler.callbackQuery(/^isel_(.+)_(\d+)$/, async (ctx) => {
 });
 
 invoiceHandler.callbackQuery(/^inew_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } });
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction || pendingAction.type !== 'INVOICE_DISAMBIGUATION')
     return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
@@ -1145,7 +1156,7 @@ invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):inv_(.+)
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
   const pendingId = ctx.match[1] || ctx.match[3];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
   const pData = pendingAction.data as any;
@@ -1159,7 +1170,7 @@ invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):inv_(.+)
   pData.data.supplierName = supplier.name;
 
   await Promise.all([
-    prisma.pendingAction.delete({ where: { id: pendingId } }),
+    deleteOwnedPendingAction(pendingId, ctx.from.id),
     ctx.deleteMessage().catch(() => {}),
   ]);
   await processParsedInvoice(
@@ -1173,8 +1184,9 @@ invoiceHandler.callbackQuery(/^(?:sf_use:inv_(.+)|sup_fuzzy_use:([^:]+):inv_(.+)
 });
 
 invoiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):inv_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (!pendingAction) return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
 
   const pData = pendingAction.data as any;
@@ -1182,7 +1194,7 @@ invoiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):inv_(.+)$/, async (ctx) 
   pData.data.supplierName = toLatinUz(pData.data.supplierName || "Noma'lum");
 
   await Promise.all([
-    prisma.pendingAction.delete({ where: { id: pendingId } }),
+    deleteOwnedPendingAction(pendingId, ctx.from.id),
     ctx.deleteMessage().catch(() => {}),
   ]);
   await processParsedInvoice(
@@ -1196,12 +1208,13 @@ invoiceHandler.callbackQuery(/^(?:sf_new|sup_fuzzy_new):inv_(.+)$/, async (ctx) 
 });
 
 invoiceHandler.callbackQuery(/^(?:sf_no|sup_fuzzy_cancel):inv_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
   const pendingId = ctx.match[1];
-  const pendingAction = await prisma.pendingAction.findUnique({ where: { id: pendingId } }).catch(() => null);
+  const pendingAction = await findOwnedPendingAction(pendingId, ctx.from.id);
   if (pendingAction) {
     await Promise.all([
       safeDelete(ctx, ctx.chat?.id, (pendingAction.data as any)?.userPhotoMsgId),
-      prisma.pendingAction.delete({ where: { id: pendingId } }).catch(() => {}),
+      deleteOwnedPendingAction(pendingId, ctx.from.id),
     ]);
   }
   clearSession(ctx);

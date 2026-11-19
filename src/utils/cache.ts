@@ -8,13 +8,17 @@ interface CacheEntry<T> {
 }
 
 const DEFAULT_TTL_MS = 60 * 1000; // 60 seconds
+const SESSION_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_MAX_ENTRIES = 5000;
 
 export class MemoryTtlCache<T = any> {
   private store = new Map<string, CacheEntry<T>>();
   private ttlMs: number;
+  private maxEntries: number;
 
-  constructor(ttlMs = DEFAULT_TTL_MS) {
+  constructor(ttlMs = DEFAULT_TTL_MS, maxEntries = DEFAULT_MAX_ENTRIES) {
     this.ttlMs = ttlMs;
+    this.maxEntries = maxEntries;
   }
 
   get(key: string): T | null {
@@ -28,6 +32,13 @@ export class MemoryTtlCache<T = any> {
   }
 
   set(key: string, value: T, customTtlMs?: number): void {
+    if (!this.store.has(key) && this.store.size >= this.maxEntries) {
+      this.sweepExpired();
+      if (this.store.size >= this.maxEntries) {
+        const oldestKey = this.store.keys().next().value;
+        if (oldestKey !== undefined) this.store.delete(oldestKey);
+      }
+    }
     this.store.set(key, {
       value,
       expiresAt: Date.now() + (customTtlMs ?? this.ttlMs),
@@ -67,8 +78,9 @@ export class MemoryTtlCache<T = any> {
   }
 }
 
-export const userStatusCache = new MemoryTtlCache<any>(DEFAULT_TTL_MS);
-export const suppliersListCache = new MemoryTtlCache<any[]>(DEFAULT_TTL_MS);
+export const userStatusCache = new MemoryTtlCache<any>(DEFAULT_TTL_MS, 5000);
+export const suppliersListCache = new MemoryTtlCache<any[]>(DEFAULT_TTL_MS, 5000);
+export const sessionCache = new MemoryTtlCache<any>(SESSION_TTL_MS, 5000);
 
 export function getSuppliersCacheKey(ownerId: string): string {
   return `suppliersListCache:${String(ownerId).trim()}`;
@@ -90,5 +102,6 @@ export function invalidateCache(ownerId?: string | number | bigint): void {
 const gcTimer = setInterval(() => {
   userStatusCache.sweepExpired();
   suppliersListCache.sweepExpired();
+  sessionCache.sweepExpired();
 }, 30 * 60 * 1000);
 gcTimer.unref();

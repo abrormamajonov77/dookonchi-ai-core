@@ -207,7 +207,15 @@ export class ExportService {
     const pdfBuffer = buildMinimalPdfBuffer(pdfLines);
     const pdfFilename = `SmartBaqqol_Hisobot_${cleanOwnerId}_${dateStamp}.pdf`;
 
-    const htmlContent = `<!DOCTYPE html>
+const escapeHtml = (val: any): string =>
+  String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const htmlContent = `<!DOCTYPE html>
 <html lang="uz">
 <head>
 <meta charset="UTF-8" />
@@ -224,9 +232,9 @@ export class ExportService {
 <body>
   <h1>📊 SmartBaqqol — Shaxsiy Baza Hisoboti</h1>
   <div class="summary">
-    <p><strong>Foydalanuvchi ID:</strong> ${cleanOwnerId}</p>
-    <p><strong>Sana:</strong> ${formatDate(new Date())}</p>
-    <p><strong>Jami Qarz (UZS):</strong> ${formatSom(totalDebtUzs)} | <strong>Jami Qarz (USD):</strong> ${formatUsd(totalDebtUsd)}</p>
+    <p><strong>Foydalanuvchi ID:</strong> ${escapeHtml(cleanOwnerId)}</p>
+    <p><strong>Sana:</strong> ${escapeHtml(formatDate(new Date()))}</p>
+    <p><strong>Jami Qarz (UZS):</strong> ${escapeHtml(formatSom(totalDebtUzs))} | <strong>Jami Qarz (USD):</strong> ${escapeHtml(formatUsd(totalDebtUsd))}</p>
   </div>
   <h2>1. Ta'minotchilar va Qarzlar (${suppliers.length} ta)</h2>
   <table>
@@ -235,7 +243,7 @@ export class ExportService {
       ${suppliers
         .map(
           (s, i) =>
-            `<tr><td>${i + 1}</td><td>${s.name}</td><td>${s.phone || '-'}</td><td>${formatSom(s.debtUzs)}</td><td>${formatUsd(s.debtUsd)}</td></tr>`
+            `<tr><td>${i + 1}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.phone || '-')}</td><td>${escapeHtml(formatSom(s.debtUzs))}</td><td>${escapeHtml(formatUsd(s.debtUsd))}</td></tr>`
         )
         .join('')}
     </tbody>
@@ -247,7 +255,7 @@ export class ExportService {
       ${invoices
         .map(
           (inv, i) =>
-            `<tr><td>${i + 1}</td><td>${formatDate(inv.createdAt)}</td><td>${inv.supplier?.name || "Noma'lum"}</td><td>${inv.paymentType === 'CASH' ? '💵 Naqd' : '📝 Nasiya'}</td><td>${formatCurrency(inv.originalAmount ?? inv.totalAmount, inv.currency)}</td><td>${formatCurrency(inv.discountAmount ?? 0, inv.currency)}</td><td>${formatCurrency(inv.totalAmount, inv.currency)}</td></tr>`
+            `<tr><td>${i + 1}</td><td>${escapeHtml(formatDate(inv.createdAt))}</td><td>${escapeHtml(inv.supplier?.name || "Noma'lum")}</td><td>${inv.paymentType === 'CASH' ? '💵 Naqd' : '📝 Nasiya'}</td><td>${escapeHtml(formatCurrency(inv.originalAmount ?? inv.totalAmount, inv.currency))}</td><td>${escapeHtml(formatCurrency(inv.discountAmount ?? 0, inv.currency))}</td><td>${escapeHtml(formatCurrency(inv.totalAmount, inv.currency))}</td></tr>`
         )
         .join('')}
     </tbody>
@@ -259,7 +267,7 @@ export class ExportService {
       ${zReports
         .map(
           (z, i) =>
-            `<tr><td>${i + 1}</td><td>${formatDateShort(z.date)}</td><td>${formatSom(z.terminalAmount)}</td><td>${formatSom(z.clickAmount)}</td><td>${formatSom(z.cashRemainingInDrawer)}</td><td>${formatSom(z.dailyCashPurchasesUzs)}</td><td>${formatSom(z.dailySupplierPaymentsUzs)}</td><td><strong>${formatSom(z.totalDailySalesUzs)}</strong></td></tr>`
+            `<tr><td>${i + 1}</td><td>${escapeHtml(formatDateShort(z.date))}</td><td>${escapeHtml(formatSom(z.terminalAmount))}</td><td>${escapeHtml(formatSom(z.clickAmount))}</td><td>${escapeHtml(formatSom(z.cashRemainingInDrawer))}</td><td>${escapeHtml(formatSom(z.dailyCashPurchasesUzs))}</td><td>${escapeHtml(formatSom(z.dailySupplierPaymentsUzs))}</td><td><strong>${escapeHtml(formatSom(z.totalDailySalesUzs))}</strong></td></tr>`
         )
         .join('')}
     </tbody>
