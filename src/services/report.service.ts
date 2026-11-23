@@ -76,7 +76,7 @@ export interface RawReportInputs {
     isClosed: boolean;
   }>;
   supplierTransactions: Array<{
-    type: 'INCOMING_GOODS' | 'PAYMENT';
+    type: 'INCOMING_GOODS' | 'PAYMENT' | 'RETURN';
     amount: any;
     currency: 'UZS' | 'USD';
     supplier: { name: string };
@@ -126,6 +126,8 @@ export interface AggregatedReportMetrics {
   incomingGoodsUzs: number;
   incomingGoodsUsd: number;
   incomingGoodsCount: number;
+  supplierReturnsUzs?: number;
+  supplierReturnsUsd?: number;
   netSupplierDebtChangeUzs: number;
   netSupplierDebtChangeUsd: number;
   totalSupplierDebtUzs: number;
@@ -522,6 +524,8 @@ export class ReportService {
     let incomingGoodsUzs = 0;
     let incomingGoodsUsd = 0;
     let incomingGoodsCount = 0;
+    let supplierReturnsUzs = 0;
+    let supplierReturnsUsd = 0;
 
     const supplierMap = new Map<string, SupplierPaymentSummary>();
 
@@ -544,6 +548,9 @@ export class ReportService {
         incomingGoodsCount++;
         if (isUsd) incomingGoodsUsd += amt;
         else incomingGoodsUzs += amt;
+      } else if (tx.type === 'RETURN') {
+        if (isUsd) supplierReturnsUsd += amt;
+        else supplierReturnsUzs += amt;
       }
     }
 
@@ -551,8 +558,8 @@ export class ReportService {
       .sort((a, b) => b.paidUzs - a.paidUzs || b.paidUsd - a.paidUsd)
       .slice(0, 5);
 
-    const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs;
-    const netSupplierDebtChangeUsd = incomingGoodsUsd - supplierPaidUsd;
+    const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs - supplierReturnsUzs;
+    const netSupplierDebtChangeUsd = incomingGoodsUsd - supplierPaidUsd - supplierReturnsUsd;
 
     let cashPurchasesUzs = 0;
     for (const c of inputs.cashTransactions) {
@@ -628,6 +635,8 @@ export class ReportService {
       incomingGoodsUzs,
       incomingGoodsUsd,
       incomingGoodsCount,
+      supplierReturnsUzs,
+      supplierReturnsUsd,
       netSupplierDebtChangeUzs,
       netSupplierDebtChangeUsd,
       totalSupplierDebtUzs: inputs.totalSupplierDebtUzs,
@@ -865,8 +874,12 @@ export class ReportService {
     metrics.incomingGoodsUzs = Number((metrics.incomingGoodsUzs + invoiceCreditSumUzs).toFixed(2));
     metrics.incomingGoodsUsd = Number((metrics.incomingGoodsUsd + invoiceCreditSumUsd).toFixed(2));
     metrics.incomingGoodsCount += invoiceCreditCount;
-    metrics.netSupplierDebtChangeUzs = Number((metrics.incomingGoodsUzs - metrics.supplierPaidUzs).toFixed(2));
-    metrics.netSupplierDebtChangeUsd = Number((metrics.incomingGoodsUsd - metrics.supplierPaidUsd).toFixed(2));
+    metrics.netSupplierDebtChangeUzs = Number(
+      (metrics.incomingGoodsUzs - metrics.supplierPaidUzs - (metrics.supplierReturnsUzs || 0)).toFixed(2)
+    );
+    metrics.netSupplierDebtChangeUsd = Number(
+      (metrics.incomingGoodsUsd - metrics.supplierPaidUsd - (metrics.supplierReturnsUsd || 0)).toFixed(2)
+    );
 
     const prevCashSum = prevInvoicesInPeriod
       .filter((i) => i.currency === 'UZS')

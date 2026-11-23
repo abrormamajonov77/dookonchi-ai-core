@@ -162,3 +162,106 @@ export function getDisambiguationKeyboard(
     .text('❌ Bekor qilish', `${cancelPrefix}_${pendingId}`)
     .row();
 }
+
+export type SupplierCategoryCode = 'C' | 'P' | 'V';
+
+export function categoryCodeToCategory(code: string): 'CHEKLAR' | 'PULLAR' | 'VOZVRAT' {
+  if (code === 'C') return 'CHEKLAR';
+  if (code === 'P') return 'PULLAR';
+  return 'VOZVRAT';
+}
+
+export function categoryToCode(category: 'CHEKLAR' | 'PULLAR' | 'VOZVRAT'): SupplierCategoryCode {
+  if (category === 'CHEKLAR') return 'C';
+  if (category === 'PULLAR') return 'P';
+  return 'V';
+}
+
+export function getSupplierCardKeyboard(supplierId: string) {
+  return new InlineKeyboard()
+    .text('🧾 Cheklar', `sup:cat:C:${supplierId}:1`)
+    .text('💵 Pullar', `sup:cat:P:${supplierId}:1`)
+    .row()
+    .text('🔄 Vozvrat', `sup:ret:${supplierId}`)
+    .text('📄 Tarix (PDF)', `sup:pdf:${supplierId}`)
+    .row()
+    .text('📦 Yuk olish', `sup:goods:${supplierId}`)
+    .text("💸 To'lov qilish", `sup:pay:${supplierId}`)
+    .row()
+    .text("✏️ Nomini o'zgartirish", `edit_supplier_name:${supplierId}`)
+    .text('🛑 Arxivlash', `sup:archive:${supplierId}`)
+    .row()
+    .text('⬅️ Orqaga', 'sup:p:1');
+}
+
+export function getSupplierCategoryListKeyboard(
+  supplierId: string,
+  catCode: SupplierCategoryCode,
+  items: Array<{ id: string; date: Date; amount: number; currency: 'UZS' | 'USD'; note?: string }>,
+  page: number,
+  totalPages: number,
+  formatShortDate: (d: Date) => string
+) {
+  const kb = new InlineKeyboard();
+  const icon = catCode === 'C' ? '🧾' : catCode === 'P' ? '💵' : '🔄';
+
+  for (const item of items) {
+    const dt = formatShortDate(item.date);
+    const amt = formatCompactAmount(Number(item.amount), item.currency);
+    const shortNote = item.note ? ` • ${toLatinUz(item.note).slice(0, 14)}` : '';
+    kb.text(`${icon} ${dt} | ${amt}${shortNote}`, `sup:rec:${catCode}:${item.id}`).row();
+  }
+
+  if (totalPages > 1) {
+    addPaginationRow(kb, page, totalPages, `sup:cat:${catCode}:${supplierId}:`);
+  }
+
+  if (catCode === 'C') {
+    kb.text('📦 Yangi yuk', `sup:goods:${supplierId}`);
+  } else if (catCode === 'P') {
+    kb.text("💸 Yangi to'lov", `sup:pay:${supplierId}`);
+  } else {
+    kb.text('🔄 Yangi vozvrat', `sup:ret:${supplierId}`);
+  }
+
+  kb.text('🔙 Orqaga', `sup:v:${supplierId}`).row();
+  return kb;
+}
+
+export function getSupplierRecordDetailKeyboard(
+  catCode: SupplierCategoryCode,
+  recordId: string,
+  supplierId: string,
+  photoFileId?: string | null
+) {
+  const kb = new InlineKeyboard()
+    .text('✏️ Tahrirlash', `sup:ed:${catCode}:${recordId}`)
+    .text("🗑 O'chirish", `sup:del:${catCode}:${recordId}`)
+    .row();
+
+  if (catCode === 'C' && photoFileId) {
+    kb.text("🖼 Asl rasmni ko'rish", `sup:photo:${recordId}`).row();
+  }
+
+  kb.text('🔙 Orqaga', `sup:cat:${catCode}:${supplierId}:1`).row();
+  return kb;
+}
+
+export function getSupplierRecordDeleteConfirmKeyboard(
+  catCode: SupplierCategoryCode,
+  recordId: string
+) {
+  return new InlineKeyboard()
+    .text("✅ Ha, o'chirish", `sup:delok:${catCode}:${recordId}`)
+    .text('❌ Bekor qilish', `sup:rec:${catCode}:${recordId}`);
+}
+
+export function getSupplierReturnCurrencyKeyboard(supplierId: string) {
+  return new InlineKeyboard()
+    .text("🇺🇿 So'm (UZS)", `sup:retc:UZS:${supplierId}`)
+    .text('💵 Dollar (USD)', `sup:retc:USD:${supplierId}`)
+    .row()
+    .text('📋 Vozvratlar tarixi', `sup:cat:V:${supplierId}:1`)
+    .row()
+    .text('🔙 Orqaga', `sup:v:${supplierId}`);
+}

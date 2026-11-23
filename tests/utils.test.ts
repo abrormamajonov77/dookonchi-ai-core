@@ -76,6 +76,11 @@ import {
   getDiscountConfirmationKeyboard,
   getSavedInvoiceCardKeyboard,
   getDuplicateInvoiceWarningKeyboard,
+  getSupplierCardKeyboard,
+  getSupplierCategoryListKeyboard,
+  getSupplierRecordDetailKeyboard,
+  getSupplierRecordDeleteConfirmKeyboard,
+  getSupplierReturnCurrencyKeyboard,
 } from '../src/bot/keyboards/inline';
 import { reconcileInvoiceTotals, getTashkentDayRange, parseCurrencyAndAmount } from '../src/utils/formatters';
 import { parseTextCommandLocally } from '../src/utils/local-parser';
@@ -94,6 +99,18 @@ describe('Telegram callback_data 64-byte & edge-case regressions', () => {
       getDiscountConfirmationKeyboard(`i_${uuid}`, 100000, false, 'USD'),
       getSavedInvoiceCardKeyboard(uuid, uuid2, 'photo_id', uuid),
       getDuplicateInvoiceWarningKeyboard(uuid),
+      getSupplierCardKeyboard(uuid),
+      getSupplierCategoryListKeyboard(
+        uuid,
+        'C',
+        [{ id: uuid2, date: new Date(), amount: 500000, currency: 'UZS', note: 'Nakladnoy' }],
+        2,
+        10,
+        () => '23.11.2026'
+      ),
+      getSupplierRecordDetailKeyboard('C', uuid2, uuid, 'photo_file_id'),
+      getSupplierRecordDeleteConfirmKeyboard('V', uuid2),
+      getSupplierReturnCurrencyKeyboard(uuid),
     ];
 
     for (const kb of keyboards) {

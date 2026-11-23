@@ -314,6 +314,8 @@ class ReportService {
         let incomingGoodsUzs = 0;
         let incomingGoodsUsd = 0;
         let incomingGoodsCount = 0;
+        let supplierReturnsUzs = 0;
+        let supplierReturnsUsd = 0;
         const supplierMap = new Map();
         for (const tx of inputs.supplierTransactions) {
             const amt = Math.abs(Number(tx.amount || 0));
@@ -340,12 +342,18 @@ class ReportService {
                 else
                     incomingGoodsUzs += amt;
             }
+            else if (tx.type === 'RETURN') {
+                if (isUsd)
+                    supplierReturnsUsd += amt;
+                else
+                    supplierReturnsUzs += amt;
+            }
         }
         const topPaidSuppliers = Array.from(supplierMap.values())
             .sort((a, b) => b.paidUzs - a.paidUzs || b.paidUsd - a.paidUsd)
             .slice(0, 5);
-        const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs;
-        const netSupplierDebtChangeUsd = incomingGoodsUsd - supplierPaidUsd;
+        const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs - supplierReturnsUzs;
+        const netSupplierDebtChangeUsd = incomingGoodsUsd - supplierPaidUsd - supplierReturnsUsd;
         let cashPurchasesUzs = 0;
         for (const c of inputs.cashTransactions) {
             cashPurchasesUzs += Math.abs(Number(c.amount || 0));
@@ -420,6 +428,8 @@ class ReportService {
             incomingGoodsUzs,
             incomingGoodsUsd,
             incomingGoodsCount,
+            supplierReturnsUzs,
+            supplierReturnsUsd,
             netSupplierDebtChangeUzs,
             netSupplierDebtChangeUsd,
             totalSupplierDebtUzs: inputs.totalSupplierDebtUzs,
@@ -587,8 +597,8 @@ class ReportService {
         metrics.incomingGoodsUzs = Number((metrics.incomingGoodsUzs + invoiceCreditSumUzs).toFixed(2));
         metrics.incomingGoodsUsd = Number((metrics.incomingGoodsUsd + invoiceCreditSumUsd).toFixed(2));
         metrics.incomingGoodsCount += invoiceCreditCount;
-        metrics.netSupplierDebtChangeUzs = Number((metrics.incomingGoodsUzs - metrics.supplierPaidUzs).toFixed(2));
-        metrics.netSupplierDebtChangeUsd = Number((metrics.incomingGoodsUsd - metrics.supplierPaidUsd).toFixed(2));
+        metrics.netSupplierDebtChangeUzs = Number((metrics.incomingGoodsUzs - metrics.supplierPaidUzs - (metrics.supplierReturnsUzs || 0)).toFixed(2));
+        metrics.netSupplierDebtChangeUsd = Number((metrics.incomingGoodsUsd - metrics.supplierPaidUsd - (metrics.supplierReturnsUsd || 0)).toFixed(2));
         const prevCashSum = prevInvoicesInPeriod
             .filter((i) => i.currency === 'UZS')
             .reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);

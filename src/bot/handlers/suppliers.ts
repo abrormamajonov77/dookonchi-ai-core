@@ -1,4 +1,5 @@
-import { Composer, InlineKeyboard } from 'grammy';
+import { Composer, InlineKeyboard, InputFile } from 'grammy';
+import { Currency } from '@prisma/client';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
 import {
@@ -11,27 +12,102 @@ import {
   parseCurrencyAndAmount,
   parseSmartAmount,
 } from '../../utils/formatters';
-import { SupplierService } from '../../services/supplier.service';
+import { SupplierRecordCategory, SupplierService } from '../../services/supplier.service';
+import { ExportService } from '../../services/export.service';
 import { cacheService } from '../../services/cache.service';
 import {
   addPaginationRow,
   addTwoColButtons,
+  categoryCodeToCategory,
+  categoryToCode,
   getSavedInvoiceCardKeyboard,
   getPaymentSourceConfirmationKeyboard,
+  getSupplierCardKeyboard,
+  getSupplierCategoryListKeyboard,
+  getSupplierRecordDetailKeyboard,
+  getSupplierRecordDeleteConfirmKeyboard,
+  getSupplierReturnCurrencyKeyboard,
+  SupplierCategoryCode,
 } from '../keyboards/inline';
 import {
   replyOrEdit,
   clearSession,
+  safeDelete,
   safeEditMessageText,
   safeReply,
   sanitizeMdV1,
   findOwnedPendingAction,
   deleteOwnedPendingAction,
+  withChatAction,
 } from '../../utils/telegram';
 import { isMenuButton } from '../keyboards/menu';
 import { toLatinUz } from '../../utils/transliterate';
 
 export const suppliersHandler = new Composer<MyContext>();
+
+/**
+ * Parses a leading numeric amount plus an optional trailing note, e.g.:
+ * - "250000 5 ta yog' singan" -> { amount: 250000, currency: defaultCurrency, note: "5 ta yog' singan" }
+ * - "250.000 5 ta yog' singan" -> { amount: 250000, currency: defaultCurrency, note: "5 ta yog' singan" }
+ * - "$15.50 quti ezilgan" -> { amount: 15.5, currency: 'USD', note: "quti ezilgan" }
+ */
+export function parseAmountAndOptionalNote(
+  rawText: string,
+  defaultCurrency: Currency = 'UZS'
+): { amount: number; currency: Currency; note?: string } {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) {
+    return { amount: 0, currency: defaultCurrency };
+  }
+
+  const leadingAmtRe =
+    /^\s*(\$?\s*(?:\d{1,3}(?:[.,\s]\d{3})+|\d+(?:[.,]\d{1,2})?)\s*(?:(?:mln|million|ming|k)\b)?(?:\s*(?:\$|usd|usdt|dollar(?:u)?|so['`’]?m|uzs|som)\b|\$)?)(?:\s+(.*))?$/i;
+
+  const match = trimmed.match(leadingAmtRe);
+  if (match) {
+    const amountToken = match[1].trim();
+    const noteRaw = (match[2] || '').trim();
+    const parsedToken = parseCurrencyAndAmount(amountToken);
+    const amount = parseSmartAmount(amountToken) || parsedToken.amount;
+    const hasExplicitUsd = /(\$|usd\b|usdt\b|dollar)/i.test(amountToken);
+    const hasExplicitUzs = /(so['`’]?m\b|uzs\b|som\b)/i.test(amountToken);
+    const currency: Currency = hasExplicitUsd
+      ? 'USD'
+      : hasExplicitUzs
+      ? 'UZS'
+      : defaultCurrency;
+    return {
+      amount,
+      currency,
+      note: noteRaw ? toLatinUz(noteRaw) : undefined,
+    };
+  }
+
+  const fallbackParsed = parseCurrencyAndAmount(trimmed);
+  const amount = parseSmartAmount(trimmed) || fallbackParsed.amount;
+  const currency: Currency = /(\$|usd\b|usdt\b|dollar)/i.test(trimmed)
+    ? 'USD'
+    : defaultCurrency;
+  return { amount, currency };
+}
+
+function formatCategoryTitle(category: SupplierRecordCategory): string {
+  if (category === 'CHEKLAR') return '🧾 Cheklar (Kelgan yuklar)';
+  if (category === 'PULLAR') return "💵 Pullar (Berilgan to'lovlar)";
+  return '🔄 Vozvratlar (Qaytarilgan tovarlar)';
+}
+
+function formatDebtLines(debtUzs: number, debtUsd: number): string {
+  const uzsLine =
+    debtUzs >= 0
+      ? `💰 **Joriy qarz (UZS):** ${formatSom(debtUzs)}`
+      : `🟢 **Haqimiz (UZS):** ${formatSom(Math.abs(debtUzs))}`;
+  const usdLine =
+    debtUsd >= 0
+      ? `💵 **Joriy qarz (USD):** ${formatUsd(debtUsd, true)}`
+      : `🟢 **Haqimiz (USD):** ${formatUsd(Math.abs(debtUsd), true)}`;
+  return `${uzsLine}\n${usdLine}`;
+}
 
 async function sendSuppliersPage(ctx: MyContext, page: number, isEdit = false) {
   if (!ctx.from) return;
@@ -54,114 +130,394 @@ async function sendSuppliersPage(ctx: MyContext, page: number, isEdit = false) {
 export async function sendSupplierDetails(
   ctx: MyContext,
   supplierId: string,
-  filter: 'all' | 'month' | 'today' = 'all',
+  _filter: 'all' | 'month' | 'today' = 'all',
   isEdit = false
 ) {
   if (!ctx.from) return;
   const ownerId = String(ctx.from.id);
-  const now = new Date();
-  const startDate =
-    filter === 'today'
-      ? new Date(now.getFullYear(), now.getMonth(), now.getDate())
-      : filter === 'month'
-      ? new Date(now.getFullYear(), now.getMonth(), 1)
-      : undefined;
 
-  const [supplier, allIncoming, txStats] = await Promise.all([
-    prisma.supplier.findFirst({
-      where: { id: supplierId, ownerId },
-      select: { id: true, name: true, phone: true, debtUzs: true, debtUsd: true },
-    }),
-    prisma.supplierTransaction.findMany({
-      where: { ownerId, supplierId, type: 'INCOMING_GOODS' },
-      orderBy: { date: 'asc' },
-      select: { id: true, invoiceId: true, date: true, amount: true, currency: true },
-    }),
-    prisma.supplierTransaction.groupBy({
-      by: ['type', 'currency'],
-      where: startDate ? { ownerId, supplierId, date: { gte: startDate } } : { ownerId, supplierId },
-      _sum: { amount: true },
-    }),
-  ]);
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, ownerId },
+    select: { id: true, name: true, phone: true },
+  });
 
-  if (!supplier) return ctx.callbackQuery ? ctx.answerCallbackQuery("Ta'minotchi topilmadi.") : undefined;
+  if (!supplier) {
+    return ctx.callbackQuery ? ctx.answerCallbackQuery("Ta'minotchi topilmadi.") : undefined;
+  }
 
-  const incUzs = Number(
-    txStats.find((s) => s.type === 'INCOMING_GOODS' && s.currency === 'UZS')?._sum.amount || 0
-  );
-  const incUsd = Number(
-    txStats.find((s) => s.type === 'INCOMING_GOODS' && s.currency === 'USD')?._sum.amount || 0
-  );
-  const payUzs = Number(txStats.find((s) => s.type === 'PAYMENT' && s.currency === 'UZS')?._sum.amount || 0);
-  const payUsd = Number(txStats.find((s) => s.type === 'PAYMENT' && s.currency === 'USD')?._sum.amount || 0);
+  const balance = await SupplierService.getSupplierBalance(ownerId, supplier.id);
 
-  const balUzs = Number(supplier.debtUzs);
-  const balUsd = Number(supplier.debtUsd);
+  const incParts: string[] = [];
+  if (balance.uzs.totalIncoming > 0 || balance.usd.totalIncoming === 0) {
+    incParts.push(formatSom(balance.uzs.totalIncoming));
+  }
+  if (balance.usd.totalIncoming > 0) incParts.push(formatUsd(balance.usd.totalIncoming));
 
-  const uzsLine =
-    balUzs >= 0
-      ? `💰 **Qarzimiz (UZS):** ${formatSom(balUzs)}`
-      : `🟢 **Haqimiz (UZS):** ${formatSom(Math.abs(balUzs))}`;
-  const usdLine =
-    balUsd >= 0
-      ? `💵 **Qarzimiz (USD/USDT):** ${formatUsd(balUsd, true)}`
-      : `🟢 **Haqimiz (USD/USDT):** ${formatUsd(Math.abs(balUsd), true)}`;
+  const payParts: string[] = [];
+  if (balance.uzs.totalPayments > 0 || balance.usd.totalPayments === 0) {
+    payParts.push(formatSom(balance.uzs.totalPayments));
+  }
+  if (balance.usd.totalPayments > 0) payParts.push(formatUsd(balance.usd.totalPayments));
 
-  const filterText = filter === 'today' ? 'Bugun' : filter === 'month' ? 'Shu oy' : 'Barcha vaqt';
-  const incText = incUsd > 0 ? `${formatSom(incUzs)} | 💵 ${formatUsd(incUsd)}` : formatSom(incUzs);
-  const payText = payUsd > 0 ? `${formatSom(payUzs)} | 💵 ${formatUsd(payUsd)}` : formatSom(payUzs);
+  const retParts: string[] = [];
+  if (balance.uzs.totalReturns > 0) retParts.push(formatSom(balance.uzs.totalReturns));
+  if (balance.usd.totalReturns > 0) retParts.push(formatUsd(balance.usd.totalReturns));
+
+  const phoneLine = supplier.phone ? `📞 **Tel:** ${sanitizeMdV1(supplier.phone)}\n` : '';
+  const retLine = retParts.length ? `\n🔄 Vozvrat: ${retParts.join(' | ')}` : '';
 
   const text =
     `🏢 **Ta'minotchi:** ${sanitizeMdV1(toLatinUz(supplier.name))}\n` +
-    `📞 **Tel:** ${sanitizeMdV1(supplier.phone || "Yo'q")}\n` +
-    `${uzsLine}\n` +
-    `${usdLine}\n\n` +
-    `📊 **Statistika (${filterText}):**\n` +
-    `📥 Kirim: ${incText}\n` +
-    `📤 To'lov: ${payText}\n`;
+    phoneLine +
+    `${formatDebtLines(balance.debtUzs, balance.debtUsd)}\n\n` +
+    `📊 **Umumiy ko'rsatkichlar:**\n` +
+    `📥 Jami kelgan yuk: ${incParts.join(' | ')}\n` +
+    `📤 Jami berilgan pul: ${payParts.join(' | ')}` +
+    retLine;
 
-  const kb = new InlineKeyboard()
-    .text(filter === 'today' ? '✅ Bugun' : 'Bugun', `sup:tx:${supplier.id}:today`)
-    .text(filter === 'month' ? '✅ Shu oy' : 'Shu oy', `sup:tx:${supplier.id}:month`)
-    .text(filter === 'all' ? '✅ Barcha' : 'Barcha', `sup:tx:${supplier.id}:all`)
-    .row();
-
-  for (const tx of allIncoming.slice(-3).reverse()) {
-    const checkIdx = allIncoming.findIndex((i) => i.id === tx.id) + 1;
-    kb.text(
-      `📄 Chek #${checkIdx} (${formatDateShort(tx.date)} | ${formatCompactAmount(Number(tx.amount), tx.currency)})`,
-      `sup:receipt:${tx.id}`
-    ).row();
-  }
-  if (allIncoming.length > 3) {
-    kb.text(`📂 Barcha cheklar tarixi (Jami: ${allIncoming.length} ta)`, `sup:receipts:list:${supplier.id}:1`).row();
-  }
-
-  kb.text('📦 Yuk olish (Kirim)', `sup:goods:${supplier.id}`)
-    .text("💸 To'lov qilish", `sup:pay:${supplier.id}`)
-    .row()
-    .text("✏️ Nomini o'zgartirish", `edit_supplier_name:${supplier.id}`)
-    .row()
-    .text("🛑 Faoliyatni to'xtatish (Arxivlash)", `sup:archive:${supplier.id}`)
-    .row()
-    .text("🔙 Ro'yxatga qaytish", 'sup:p:1');
-
+  const kb = getSupplierCardKeyboard(supplier.id);
   await replyOrEdit(ctx, text, kb, isEdit);
+}
+
+async function sendSupplierCategoryPage(
+  ctx: MyContext,
+  supplierId: string,
+  catCode: SupplierCategoryCode,
+  page: number,
+  isEdit = true
+) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const category = categoryCodeToCategory(catCode);
+
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, ownerId },
+    select: { id: true, name: true },
+  });
+  if (!supplier) {
+    return ctx.callbackQuery ? ctx.answerCallbackQuery("Ta'minotchi topilmadi.") : undefined;
+  }
+
+  const paginated = await SupplierService.getSupplierRecordsPaginated(
+    ownerId,
+    supplierId,
+    category,
+    page,
+    5
+  );
+
+  const title = formatCategoryTitle(category);
+  const supName = sanitizeMdV1(toLatinUz(supplier.name));
+  const body =
+    paginated.items.length > 0
+      ? `Jami: **${paginated.total} ta** yozuv (Sahifa **${paginated.page}/${paginated.totalPages}**)\n\nBatafsil ko'rish, tahrirlash yoki o'chirish uchun quyidagi yozuvlardan birini tanlang:`
+      : "Hozircha bu bo'limda yozuvlar mavjud emas.";
+
+  const text = `${title}\n🏢 **${supName}**\n\n${body}`;
+  const kb = getSupplierCategoryListKeyboard(
+    supplierId,
+    catCode,
+    paginated.items,
+    paginated.page,
+    paginated.totalPages,
+    formatDateShort
+  );
+  await replyOrEdit(ctx, text, kb, isEdit);
+}
+
+async function sendSupplierRecordDetailView(
+  ctx: MyContext,
+  catCode: SupplierCategoryCode,
+  recordId: string,
+  isEdit = true
+) {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const category = categoryCodeToCategory(catCode);
+
+  const record = await SupplierService.getSupplierRecordDetail(ownerId, category, recordId);
+  if (!record) {
+    return ctx.callbackQuery
+      ? ctx.answerCallbackQuery("Yozuv topilmadi yoki o'chirilgan.")
+      : ctx.reply("Yozuv topilmadi yoki o'chirilgan.");
+  }
+
+  const header =
+    category === 'CHEKLAR'
+      ? '🧾 **Chek tafsilotlari**'
+      : category === 'PULLAR'
+      ? "💵 **To'lov tafsilotlari**"
+      : '🔄 **Vozvrat tafsilotlari**';
+
+  const lines: string[] = [
+    header,
+    '',
+    `🏢 **Ta'minotchi:** ${sanitizeMdV1(record.supplierName)}`,
+    `📅 **Sana:** ${formatDate(record.date)}`,
+    `💰 **Summa:** ${formatCurrency(record.amount, record.currency)}`,
+    `💱 **Valyuta:** ${record.currency}`,
+  ];
+
+  if (category === 'CHEKLAR') {
+    if (record.invoiceNo) {
+      lines.push(`🔢 **Nakladnoy №:** ${sanitizeMdV1(record.invoiceNo)}`);
+    }
+    if (record.paymentType) {
+      const pLabel =
+        record.paymentType === 'CASH'
+          ? '💵 Naqd'
+          : record.paymentType === 'PARTIAL'
+          ? '⚖️ Qisman naqd'
+          : '📝 Nasiya';
+      lines.push(`🏷 **To'lov turi:** ${pLabel}`);
+    }
+    if (record.discountAmount && record.discountAmount > 0 && record.originalAmount) {
+      lines.push(`📦 **Asl summa:** ${formatCurrency(record.originalAmount, record.currency)}`);
+      lines.push(`🎁 **Skidka:** -${formatCurrency(record.discountAmount, record.currency)}`);
+    }
+  } else if (category === 'PULLAR' && record.paymentSource) {
+    const srcLabel =
+      record.paymentSource === 'PREVIOUS_SAFE' ? '🏦 Kechagi puldan / Seyfdan' : '💵 Bugungi kassadan';
+    lines.push(`🗂 **Manba:** ${srcLabel}`);
+  }
+
+  if (record.note) {
+    lines.push(`📝 **Izoh:** ${sanitizeMdV1(record.note)}`);
+  }
+
+  if (category === 'CHEKLAR' && record.items && record.items.length > 0) {
+    lines.push('', `📋 **Tovarlar (${record.items.length} ta):**`);
+    for (const it of record.items.slice(0, 15)) {
+      lines.push(
+        `• ${sanitizeMdV1(it.rawName)} — ${it.quantity} ${sanitizeMdV1(it.unit)} × ${formatCurrency(it.unitPrice, it.currency)} = ${formatCurrency(it.totalPrice, it.currency)}`
+      );
+    }
+    if (record.items.length > 15) {
+      lines.push(`... va yana ${record.items.length - 15} ta mahsulot`);
+    }
+  }
+
+  const kb = getSupplierRecordDetailKeyboard(catCode, record.id, record.supplierId, record.photoFileId);
+  await replyOrEdit(ctx, lines.join('\n'), kb, isEdit);
 }
 
 suppliersHandler.hears("📦 Ta'minotchilar", async (ctx) => {
   clearSession(ctx);
   await sendSuppliersPage(ctx, 1);
 });
-suppliersHandler.callbackQuery(/^sup:p:(\d+)$/, (ctx) =>
-  sendSuppliersPage(ctx, parseInt(ctx.match[1], 10), true)
-);
-suppliersHandler.callbackQuery(/^sup:v:(.+)$/, (ctx) =>
-  sendSupplierDetails(ctx, ctx.match[1], 'all', true)
-);
+suppliersHandler.callbackQuery(/^sup:p:(\d+)$/, (ctx) => {
+  clearSession(ctx);
+  return sendSuppliersPage(ctx, parseInt(ctx.match[1], 10), true);
+});
+suppliersHandler.callbackQuery(/^sup:v:(.+)$/, (ctx) => {
+  clearSession(ctx);
+  return sendSupplierDetails(ctx, ctx.match[1], 'all', true);
+});
 suppliersHandler.callbackQuery(/^sup:tx:(.+):(all|month|today)$/, (ctx) =>
   sendSupplierDetails(ctx, ctx.match[1], ctx.match[2] as any, true)
 );
+
+// Paginated category views: Cheklar (C), Pullar (P), Vozvrat (V)
+suppliersHandler.callbackQuery(/^sup:cat:(C|P|V):([^:]+):(\d+)$/, (ctx) => {
+  clearSession(ctx);
+  return sendSupplierCategoryPage(
+    ctx,
+    ctx.match[2],
+    ctx.match[1] as SupplierCategoryCode,
+    parseInt(ctx.match[3], 10) || 1,
+    true
+  );
+});
+
+// Record detail view
+suppliersHandler.callbackQuery(/^sup:rec:(C|P|V):(.+)$/, (ctx) => {
+  clearSession(ctx);
+  return sendSupplierRecordDetailView(ctx, ctx.match[1] as SupplierCategoryCode, ctx.match[2], true);
+});
+
+// Record edit amount prompt
+suppliersHandler.callbackQuery(/^sup:ed:(C|P|V):(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const catCode = ctx.match[1] as SupplierCategoryCode;
+  const recordId = ctx.match[2];
+  const recordType = categoryCodeToCategory(catCode);
+
+  const record = await SupplierService.getSupplierRecordDetail(ownerId, recordType, recordId);
+  if (!record) {
+    return ctx.answerCallbackQuery("Yozuv topilmadi yoki ruxsat yo'q.");
+  }
+
+  ctx.session.step = 'SUPPLIER_RECORD_EDIT_AMOUNT';
+  ctx.session.supplierEditRecord = {
+    recordType,
+    recordId: record.id,
+    supplierId: record.supplierId,
+    supplierName: record.supplierName,
+    currency: record.currency,
+    oldAmount: record.amount,
+  };
+
+  const kb = new InlineKeyboard().text('❌ Bekor qilish', `sup:rec:${catCode}:${record.id}`);
+  await replyOrEdit(
+    ctx,
+    `✏️ **Summani tahrirlash**\n\n` +
+      `🏢 **Ta'minotchi:** ${sanitizeMdV1(record.supplierName)}\n` +
+      `📅 **Sana:** ${formatDate(record.date)}\n` +
+      `💰 **Joriy summa:** ${formatCurrency(record.amount, record.currency)}\n\n` +
+      `Yangi summani kiriting (${record.currency}):\n` +
+      `Masalan: \`500000\` yoki \`500.000\` (USD uchun: \`125.50\`)`,
+    kb,
+    true
+  );
+});
+
+// Record delete confirmation prompt
+suppliersHandler.callbackQuery(/^sup:del:(C|P|V):(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const catCode = ctx.match[1] as SupplierCategoryCode;
+  const recordId = ctx.match[2];
+  const recordType = categoryCodeToCategory(catCode);
+
+  const record = await SupplierService.getSupplierRecordDetail(ownerId, recordType, recordId);
+  if (!record) {
+    return ctx.answerCallbackQuery("Yozuv topilmadi yoki allaqachon o'chirilgan.");
+  }
+
+  const text =
+    `⚠️ **Ushbu yozuvni o'chirishni tasdiqlaysizmi?**\n\n` +
+    `🏢 **Ta'minotchi:** ${sanitizeMdV1(record.supplierName)}\n` +
+    `📅 **Sana:** ${formatDate(record.date)}\n` +
+    `💰 **Summa:** ${formatCurrency(record.amount, record.currency)}\n` +
+    (record.note ? `📝 **Izoh:** ${sanitizeMdV1(record.note)}\n` : '') +
+    `\n_O'chirilgandan so'ng ta'minotchi balansi avtomatik qayta hisoblanadi._`;
+
+  await replyOrEdit(ctx, text, getSupplierRecordDeleteConfirmKeyboard(catCode, record.id), true);
+});
+
+// Record delete execute
+suppliersHandler.callbackQuery(/^sup:delok:(C|P|V):(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const catCode = ctx.match[1] as SupplierCategoryCode;
+  const recordId = ctx.match[2];
+  const recordType = categoryCodeToCategory(catCode);
+
+  try {
+    const res = await SupplierService.deleteSupplierRecord(ownerId, recordType, recordId);
+    await ctx.answerCallbackQuery({ text: "✅ Yozuv o'chirildi va balans yangilandi!" });
+    const deletedLabel = formatCurrency(res.deletedAmount, res.currency);
+    await replyOrEdit(
+      ctx,
+      `🗑 **Yozuv muvaffaqiyatli o'chirildi!**\n\n` +
+        `🏢 **Ta'minotchi:** ${sanitizeMdV1(toLatinUz(res.supplier.name))}\n` +
+        `❌ **O'chirilgan summa:** ${deletedLabel}\n\n` +
+        `${formatDebtLines(res.balance.debtUzs, res.balance.debtUsd)}`,
+      new InlineKeyboard()
+        .text("📋 Bo'limga qaytish", `sup:cat:${catCode}:${res.supplierId}:1`)
+        .row()
+        .text("🏢 Ta'minotchi kartasi", `sup:v:${res.supplierId}`),
+      true
+    );
+  } catch (err: any) {
+    await ctx.answerCallbackQuery({ text: err?.message || "O'chirishda xatolik yuz berdi.", show_alert: true });
+  }
+});
+
+// Vozvrat (Return) Step 1: Select Currency
+suppliersHandler.callbackQuery(/^sup:ret:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const supplierId = ctx.match[1];
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, ownerId },
+    select: { id: true, name: true },
+  });
+  if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
+
+  clearSession(ctx);
+  await replyOrEdit(
+    ctx,
+    `🔄 **Vozvrat (Tovar qaytarish)**\n\n` +
+      `🏢 **Ta'minotchi:** ${sanitizeMdV1(toLatinUz(supplier.name))}\n` +
+      `_Eslatma: Vozvrat qarzni kamaytiradi, lekin kassadagi naqd pulga ta'sir qilmaydi._\n\n` +
+      `👇 Vozvrat valyutasini tanlang:`,
+    getSupplierReturnCurrencyKeyboard(supplier.id),
+    true
+  );
+});
+
+// Vozvrat Step 2: Prompt for amount + optional reason
+suppliersHandler.callbackQuery(/^sup:retc:(UZS|USD):(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const currency = ctx.match[1] as Currency;
+  const supplierId = ctx.match[2];
+
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, ownerId },
+    select: { id: true, name: true },
+  });
+  if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
+
+  const cleanName = toLatinUz(supplier.name);
+  ctx.session.step = 'SUPPLIER_RETURN_INPUT';
+  ctx.session.supplierReturn = {
+    supplierId: supplier.id,
+    supplierName: cleanName,
+    currency,
+  };
+
+  const exampleText =
+    currency === 'USD'
+      ? "`25.50 3 ta quti singan` yoki `25.50`"
+      : "`250000 5 ta yog' singan` yoki `250000`";
+
+  const kb = new InlineKeyboard().text('❌ Bekor qilish', `sup:v:${supplier.id}`);
+  await replyOrEdit(
+    ctx,
+    `🔄 **Vozvrat kiritish (${currency})**\n\n` +
+      `🏢 **Ta'minotchi:** ${sanitizeMdV1(cleanName)}\n\n` +
+      `Vozvrat summasini va ixtiyoriy sababini yozib yuboring:\n` +
+      `Masalan: ${exampleText}`,
+    kb,
+    true
+  );
+});
+
+// PDF History (Sverka) Export
+suppliersHandler.callbackQuery(/^sup:pdf:(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const ownerId = String(ctx.from.id);
+  const supplierId = ctx.match[1];
+
+  const supplier = await prisma.supplier.findFirst({
+    where: { id: supplierId, ownerId },
+    select: { id: true, name: true },
+  });
+  if (!supplier) return ctx.answerCallbackQuery("Ta'minotchi topilmadi.");
+
+  await ctx.answerCallbackQuery({ text: '⏳ Sverka (PDF) tayyorlanmoqda...' });
+  const loadingMsg = await ctx
+    .reply(`⏳ **${sanitizeMdV1(toLatinUz(supplier.name))}** uchun to'liq tarix (PDF Sverka) tayyorlanmoqda...`, {
+      parse_mode: 'Markdown',
+    })
+    .catch(() => null);
+
+  try {
+    await withChatAction(ctx, 'upload_document', async () => {
+      const { buffer, filename } = await ExportService.generateSupplierHistoryPdf(ownerId, supplierId);
+      await ctx.replyWithDocument(new InputFile(buffer, filename), {
+        caption: `📄 ${toLatinUz(supplier.name)} — To'liq hisob-kitob tarixi (Sverka)`,
+      });
+    });
+  } catch (err: any) {
+    await ctx.reply(`❌ PDF tayyorlashda xatolik: ${err?.message || "Qaytadan urinib ko'ring."}`);
+  } finally {
+    await safeDelete(ctx, ctx.chat?.id, loadingMsg?.message_id);
+  }
+});
 
 suppliersHandler.callbackQuery(/^edit_supplier_name:(.+)$/, async (ctx) => {
   if (!ctx.from) return;
@@ -263,35 +619,9 @@ suppliersHandler.callbackQuery(/^sup:archive:(.+)$/, async (ctx) => {
   await sendSuppliersPage(ctx, 1, true);
 });
 
-suppliersHandler.callbackQuery(/^sup:receipts:list:(.+):(\d+)$/, async (ctx) => {
-  if (!ctx.from) return;
-  const ownerId = String(ctx.from.id);
-  const [supplierId, rawPage] = [ctx.match[1], parseInt(ctx.match[2], 10) || 1];
-  const PER_PAGE = 5;
-  const allIncoming = await prisma.supplierTransaction.findMany({
-    where: { ownerId, supplierId, type: 'INCOMING_GOODS' },
-    orderBy: { date: 'asc' },
-    select: { id: true, date: true, amount: true, currency: true },
-  });
-  const totalPages = Math.ceil(allIncoming.length / PER_PAGE) || 1;
-  const currentPage = Math.max(1, Math.min(rawPage, totalPages));
-
-  const kb = new InlineKeyboard();
-  for (const tx of [...allIncoming].reverse().slice((currentPage - 1) * PER_PAGE, currentPage * PER_PAGE)) {
-    kb.text(
-      `📄 Chek #${allIncoming.findIndex((i) => i.id === tx.id) + 1} (${formatDateShort(tx.date)} | ${formatCompactAmount(Number(tx.amount), tx.currency)})`,
-      `sup:receipt:${tx.id}`
-    ).row();
-  }
-  addPaginationRow(kb, currentPage, totalPages, `sup:receipts:list:${supplierId}:`);
-  kb.text('🔙 Orqaga', `sup:v:${supplierId}`).row();
-  await replyOrEdit(
-    ctx,
-    `📂 **Barcha cheklar tarixi (Sahifa ${currentPage}/${totalPages})**\n\nQuyidagi cheklardan birini tanlang:`,
-    kb,
-    true
-  );
-});
+suppliersHandler.callbackQuery(/^sup:receipts:list:(.+):(\d+)$/, (ctx) =>
+  sendSupplierCategoryPage(ctx, ctx.match[1], 'C', parseInt(ctx.match[2], 10) || 1, true)
+);
 
 suppliersHandler.callbackQuery(/^sup:receipt:(.+)$/, async (ctx) => {
   if (!ctx.from) return;
@@ -585,6 +915,114 @@ suppliersHandler.callbackQuery(/^sup:undo:(.+)$/, async (ctx) => {
 suppliersHandler.on('message:text', async (ctx, next) => {
   if (!ctx.from) return next();
   const ownerId = String(ctx.from.id);
+
+  if (ctx.session.step === 'SUPPLIER_RECORD_EDIT_AMOUNT') {
+    const rawTrimmed = ctx.message.text.trim();
+    if (rawTrimmed.startsWith('/') || isMenuButton(rawTrimmed)) {
+      clearSession(ctx);
+      return next();
+    }
+    const editState = ctx.session.supplierEditRecord;
+    if (!editState) {
+      clearSession(ctx);
+      return next();
+    }
+
+    const parsed = parseCurrencyAndAmount(rawTrimmed);
+    const newAmount = parseSmartAmount(rawTrimmed) || parsed.amount;
+    if (!newAmount || newAmount <= 0 || isNaN(newAmount)) {
+      return ctx.reply(
+        "❌ Iltimos, to'g'ri summa kiriting (masalan: `500000`, `500.000` yoki `125.50`). Bekor qilish uchun /start ni bosing.",
+        { parse_mode: 'Markdown' }
+      );
+    }
+    if (newAmount > 10_000_000_000) {
+      return ctx.reply("❌ Kiritilgan summa o'ta katta (maks: 10 mlrd). Qaytadan kiriting:");
+    }
+
+    try {
+      const res = await SupplierService.updateSupplierRecordAmount(
+        ownerId,
+        editState.recordType,
+        editState.recordId,
+        newAmount
+      );
+      clearSession(ctx);
+      const catCode = categoryToCode(res.recordType);
+      await safeReply(
+        ctx,
+        `✅ **Summa muvaffaqiyatli yangilandi!**\n\n` +
+          `🏢 **Ta'minotchi:** ${sanitizeMdV1(toLatinUz(res.supplier.name))}\n` +
+          `🔄 **O'zgarish:** ${formatCurrency(res.oldAmount, res.currency)} ➡️ **${formatCurrency(res.newAmount, res.currency)}**\n\n` +
+          `${formatDebtLines(res.balance.debtUzs, res.balance.debtUsd)}`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard()
+            .text("📋 Bo'limga qaytish", `sup:cat:${catCode}:${res.supplierId}:1`)
+            .row()
+            .text("🏢 Ta'minotchi kartasi", `sup:v:${res.supplierId}`),
+        }
+      );
+      return;
+    } catch (err: any) {
+      clearSession(ctx);
+      return ctx.reply(`❌ ${err?.message || "Summani yangilashda xatolik yuz berdi."}`);
+    }
+  }
+
+  if (ctx.session.step === 'SUPPLIER_RETURN_INPUT') {
+    const rawTrimmed = ctx.message.text.trim();
+    if (rawTrimmed.startsWith('/') || isMenuButton(rawTrimmed)) {
+      clearSession(ctx);
+      return next();
+    }
+    const retState = ctx.session.supplierReturn;
+    if (!retState) {
+      clearSession(ctx);
+      return next();
+    }
+
+    const parsed = parseAmountAndOptionalNote(rawTrimmed, retState.currency);
+    if (!parsed.amount || parsed.amount <= 0 || isNaN(parsed.amount)) {
+      return ctx.reply(
+        "❌ Iltimos, to'g'ri vozvrat summasini kiriting (masalan: `250000 5 ta yog' singan` yoki `250000`).",
+        { parse_mode: 'Markdown' }
+      );
+    }
+    if (parsed.amount > 10_000_000_000) {
+      return ctx.reply("❌ Kiritilgan summa o'ta katta (maks: 10 mlrd). Qaytadan kiriting:");
+    }
+
+    try {
+      const res = await SupplierService.addSupplierReturn(
+        ownerId,
+        retState.supplierId,
+        parsed.amount,
+        parsed.currency,
+        parsed.note
+      );
+      clearSession(ctx);
+      const noteLine = parsed.note ? `📝 **Sabab:** ${sanitizeMdV1(parsed.note)}\n` : '';
+      await safeReply(
+        ctx,
+        `✅ **Vozvrat muvaffaqiyatli saqlandi!**\n\n` +
+          `🏢 **Ta'minotchi:** ${sanitizeMdV1(toLatinUz(res.supplier.name))}\n` +
+          `🔄 **Vozvrat summasi:** -${formatCurrency(parsed.amount, parsed.currency)}\n` +
+          noteLine +
+          `_Kassa naqd puliga ta'sir qilmadi._\n\n` +
+          `${formatDebtLines(res.balance.debtUzs, res.balance.debtUsd)}`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: new InlineKeyboard().text('↩️ Bekor qilish (Undo)', `sup:undo:${res.transaction.id}`),
+        }
+      );
+      await sendSupplierDetails(ctx, retState.supplierId, 'all', false);
+      return;
+    } catch (err: any) {
+      clearSession(ctx);
+      return ctx.reply(`❌ ${err?.message || "Vozvratni saqlashda xatolik yuz berdi."}`);
+    }
+  }
 
   if (ctx.session.step === 'AWAITING_SUPPLIER_NEW_NAME') {
     const rawTrimmed = ctx.message.text.trim();

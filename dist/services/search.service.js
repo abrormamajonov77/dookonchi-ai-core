@@ -3,11 +3,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SearchService = void 0;
+exports.detectPriceIncreases = exports.SearchService = void 0;
 exports.formatDotDate = formatDotDate;
 exports.formatArrivalDateTime = formatArrivalDateTime;
 exports.formatPriceDiffLine = formatPriceDiffLine;
 exports.formatProductPriceTrackerCard = formatProductPriceTrackerCard;
+exports.findPriceIncreasesAgainstHistory = findPriceIncreasesAgainstHistory;
+exports.formatPriceIncreaseAlertsBlock = formatPriceIncreaseAlertsBlock;
 const fuse_js_1 = __importDefault(require("fuse.js"));
 const client_1 = require("@prisma/client");
 const prisma_1 = require("../database/prisma");
@@ -274,7 +276,8 @@ class SearchService {
             type: 'CUSTOMER',
         }));
         const txDocs = recentTx.map((tx) => {
-            const name = (0, transliterate_1.toLatinUz)(`${tx.supplier.name} ${tx.type === 'INCOMING_GOODS' ? 'kirim' : "to'lov"} ${tx.description || ''}`.trim());
+            const typeLabel = tx.type === 'INCOMING_GOODS' ? 'kirim' : tx.type === 'RETURN' ? 'vozvrat' : "to'lov";
+            const name = (0, transliterate_1.toLatinUz)(`${tx.supplier.name} ${typeLabel} ${tx.description || ''}`.trim());
             return {
                 id: tx.id,
                 name,
@@ -334,5 +337,149 @@ class SearchService {
             })),
         };
     }
+    /**
+     * Compares extracted invoice items against the most recent previous InvoiceItem prices
+     * for the same ownerId (exact normalized match + fuzzy fallback) and returns price-increase alerts.
+     */
+    static async detectPriceIncreases(ownerId, items, defaultCurrency = 'UZS') {
+        const cleanOwnerId = String(ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
+        if (!Array.isArray(items) || items.length === 0)
+            return [];
+        const validItems = items.filter((it) => !it?.isCrossedOut && Number(it?.unitPrice || 0) > 0);
+        if (validItems.length === 0)
+            return [];
+        const historicalItems = await prisma_1.prisma.invoiceItem.findMany({
+            where: { ownerId: cleanOwnerId },
+            orderBy: [{ createdAt: 'desc' }, { invoice: { createdAt: 'desc' } }],
+            select: {
+                rawName: true,
+                normalizedName: true,
+                unitPrice: true,
+                currency: true,
+                createdAt: true,
+                product: { select: { name: true } },
+            },
+            take: 1000,
+        });
+        return findPriceIncreasesAgainstHistory(validItems, historicalItems, defaultCurrency);
+    }
 }
 exports.SearchService = SearchService;
+function extractNumericTokens(text) {
+    const matches = (0, transliterate_1.normalizeForSearch)(text).match(/\d+(?:[.,]\d+)?/g);
+    return matches ? matches.map((m) => m.replace(',', '.')) : [];
+}
+function hasCompatibleNumericTokens(a, b) {
+    const numsA = extractNumericTokens(a);
+    const numsB = extractNumericTokens(b);
+    if (numsA.length === 0 && numsB.length === 0)
+        return true;
+    if (numsA.length !== numsB.length)
+        return false;
+    return numsA.every((n, i) => n === numsB[i]);
+}
+function findPriceIncreasesAgainstHistory(extractedItems, historicalItems, defaultCurrency = 'UZS') {
+    if (!extractedItems.length || !historicalItems.length)
+        return [];
+    // Build map of most recent price per (normalizedName, currency)
+    const sortedHistory = [...historicalItems].sort((a, b) => {
+        const tA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const tB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return tB - tA;
+    });
+    const latestByKey = new Map();
+    const histByCurrency = { UZS: [], USD: [] };
+    for (const row of sortedHistory) {
+        const unitPrice = Number(row.unitPrice || 0);
+        if (unitPrice <= 0)
+            continue;
+        const displayName = (0, transliterate_1.toLatinUz)((row.rawName || row.product?.name || '').trim());
+        const normName = (0, transliterate_1.normalizeForSearch)(row.normalizedName || displayName);
+        if (!normName || normName.length < 2)
+            continue;
+        const cur = row.currency === 'USD' ? 'USD' : 'UZS';
+        const key = `${normName}::${cur}`;
+        if (!latestByKey.has(key)) {
+            const entry = { displayName: displayName || normName, normName, unitPrice, currency: cur };
+            latestByKey.set(key, entry);
+            histByCurrency[cur].push(entry);
+        }
+    }
+    const fuseByCurrency = {
+        UZS: new fuse_js_1.default(histByCurrency.UZS, {
+            keys: ['normName'],
+            threshold: 0.25,
+            ignoreLocation: true,
+            includeScore: true,
+        }),
+        USD: new fuse_js_1.default(histByCurrency.USD, {
+            keys: ['normName'],
+            threshold: 0.25,
+            ignoreLocation: true,
+            includeScore: true,
+        }),
+    };
+    const alertsByKey = new Map();
+    for (const item of extractedItems) {
+        if (item.isCrossedOut)
+            continue;
+        const newPrice = Number(Number(item.unitPrice || 0).toFixed(2));
+        if (newPrice <= 0)
+            continue;
+        const productName = (0, transliterate_1.toLatinUz)((item.rawName || item.productName || '').trim());
+        const normName = (0, transliterate_1.normalizeForSearch)(item.normalizedName || productName);
+        if (!normName || normName.length < 2)
+            continue;
+        const cur = (item.currency || defaultCurrency) === 'USD' ? 'USD' : 'UZS';
+        const exactKey = `${normName}::${cur}`;
+        let matched = latestByKey.get(exactKey);
+        if (!matched && histByCurrency[cur].length > 0) {
+            const fuseHits = fuseByCurrency[cur].search(normName);
+            for (const hit of fuseHits) {
+                if ((hit.score ?? 1) <= 0.25 && hasCompatibleNumericTokens(normName, hit.item.normName)) {
+                    matched = hit.item;
+                    break;
+                }
+            }
+        }
+        if (!matched || matched.unitPrice <= 0)
+            continue;
+        const { priceDiff, diffStatus } = formatPriceDiffLine(newPrice, matched.unitPrice, cur);
+        if (diffStatus === 'INCREASED' && priceDiff > 0) {
+            const percentIncrease = Number(((priceDiff / matched.unitPrice) * 100).toFixed(1));
+            const alertKey = `${matched.normName}::${cur}`;
+            const existing = alertsByKey.get(alertKey);
+            if (!existing || percentIncrease > existing.percentIncrease) {
+                alertsByKey.set(alertKey, {
+                    productName: productName || matched.displayName,
+                    matchedProductName: matched.displayName,
+                    oldPrice: matched.unitPrice,
+                    newPrice,
+                    diffAmount: priceDiff,
+                    percentIncrease,
+                    currency: cur,
+                });
+            }
+        }
+    }
+    return Array.from(alertsByKey.values());
+}
+function formatPriceIncreaseAlertsBlock(alerts, sanitizeName) {
+    if (!Array.isArray(alerts) || alerts.length === 0)
+        return '';
+    const lines = ['⚠️ Narx oshdi:'];
+    for (const alert of alerts.slice(0, 15)) {
+        const cleanName = sanitizeName ? sanitizeName(alert.productName) : alert.productName;
+        const oldStr = (0, formatters_1.formatCurrency)(alert.oldPrice, alert.currency);
+        const newStr = (0, formatters_1.formatCurrency)(alert.newPrice, alert.currency);
+        const pctStr = Number.isInteger(alert.percentIncrease)
+            ? String(alert.percentIncrease)
+            : String(alert.percentIncrease).replace(/\.0$/, '');
+        lines.push(`• ${cleanName}: ${oldStr} ➡️ ${newStr} (+${pctStr}%)`);
+    }
+    if (alerts.length > 15) {
+        lines.push(`• ... va yana ${alerts.length - 15} ta mahsulot`);
+    }
+    return lines.join('\n');
+}
+exports.detectPriceIncreases = SearchService.detectPriceIncreases.bind(SearchService);

@@ -10,6 +10,13 @@ exports.getSavedInvoiceCardKeyboard = getSavedInvoiceCardKeyboard;
 exports.addPaginationRow = addPaginationRow;
 exports.addTwoColButtons = addTwoColButtons;
 exports.getDisambiguationKeyboard = getDisambiguationKeyboard;
+exports.categoryCodeToCategory = categoryCodeToCategory;
+exports.categoryToCode = categoryToCode;
+exports.getSupplierCardKeyboard = getSupplierCardKeyboard;
+exports.getSupplierCategoryListKeyboard = getSupplierCategoryListKeyboard;
+exports.getSupplierRecordDetailKeyboard = getSupplierRecordDetailKeyboard;
+exports.getSupplierRecordDeleteConfirmKeyboard = getSupplierRecordDeleteConfirmKeyboard;
+exports.getSupplierReturnCurrencyKeyboard = getSupplierReturnCurrencyKeyboard;
 const grammy_1 = require("grammy");
 const formatters_1 = require("../../utils/formatters");
 const transliterate_1 = require("../../utils/transliterate");
@@ -130,4 +137,83 @@ function getDisambiguationKeyboard(candidates, pendingId, selPrefix, newPrefix, 
         .row()
         .text('❌ Bekor qilish', `${cancelPrefix}_${pendingId}`)
         .row();
+}
+function categoryCodeToCategory(code) {
+    if (code === 'C')
+        return 'CHEKLAR';
+    if (code === 'P')
+        return 'PULLAR';
+    return 'VOZVRAT';
+}
+function categoryToCode(category) {
+    if (category === 'CHEKLAR')
+        return 'C';
+    if (category === 'PULLAR')
+        return 'P';
+    return 'V';
+}
+function getSupplierCardKeyboard(supplierId) {
+    return new grammy_1.InlineKeyboard()
+        .text('🧾 Cheklar', `sup:cat:C:${supplierId}:1`)
+        .text('💵 Pullar', `sup:cat:P:${supplierId}:1`)
+        .row()
+        .text('🔄 Vozvrat', `sup:ret:${supplierId}`)
+        .text('📄 Tarix (PDF)', `sup:pdf:${supplierId}`)
+        .row()
+        .text('📦 Yuk olish', `sup:goods:${supplierId}`)
+        .text("💸 To'lov qilish", `sup:pay:${supplierId}`)
+        .row()
+        .text("✏️ Nomini o'zgartirish", `edit_supplier_name:${supplierId}`)
+        .text('🛑 Arxivlash', `sup:archive:${supplierId}`)
+        .row()
+        .text('⬅️ Orqaga', 'sup:p:1');
+}
+function getSupplierCategoryListKeyboard(supplierId, catCode, items, page, totalPages, formatShortDate) {
+    const kb = new grammy_1.InlineKeyboard();
+    const icon = catCode === 'C' ? '🧾' : catCode === 'P' ? '💵' : '🔄';
+    for (const item of items) {
+        const dt = formatShortDate(item.date);
+        const amt = (0, formatters_1.formatCompactAmount)(Number(item.amount), item.currency);
+        const shortNote = item.note ? ` • ${(0, transliterate_1.toLatinUz)(item.note).slice(0, 14)}` : '';
+        kb.text(`${icon} ${dt} | ${amt}${shortNote}`, `sup:rec:${catCode}:${item.id}`).row();
+    }
+    if (totalPages > 1) {
+        addPaginationRow(kb, page, totalPages, `sup:cat:${catCode}:${supplierId}:`);
+    }
+    if (catCode === 'C') {
+        kb.text('📦 Yangi yuk', `sup:goods:${supplierId}`);
+    }
+    else if (catCode === 'P') {
+        kb.text("💸 Yangi to'lov", `sup:pay:${supplierId}`);
+    }
+    else {
+        kb.text('🔄 Yangi vozvrat', `sup:ret:${supplierId}`);
+    }
+    kb.text('🔙 Orqaga', `sup:v:${supplierId}`).row();
+    return kb;
+}
+function getSupplierRecordDetailKeyboard(catCode, recordId, supplierId, photoFileId) {
+    const kb = new grammy_1.InlineKeyboard()
+        .text('✏️ Tahrirlash', `sup:ed:${catCode}:${recordId}`)
+        .text("🗑 O'chirish", `sup:del:${catCode}:${recordId}`)
+        .row();
+    if (catCode === 'C' && photoFileId) {
+        kb.text("🖼 Asl rasmni ko'rish", `sup:photo:${recordId}`).row();
+    }
+    kb.text('🔙 Orqaga', `sup:cat:${catCode}:${supplierId}:1`).row();
+    return kb;
+}
+function getSupplierRecordDeleteConfirmKeyboard(catCode, recordId) {
+    return new grammy_1.InlineKeyboard()
+        .text("✅ Ha, o'chirish", `sup:delok:${catCode}:${recordId}`)
+        .text('❌ Bekor qilish', `sup:rec:${catCode}:${recordId}`);
+}
+function getSupplierReturnCurrencyKeyboard(supplierId) {
+    return new grammy_1.InlineKeyboard()
+        .text("🇺🇿 So'm (UZS)", `sup:retc:UZS:${supplierId}`)
+        .text('💵 Dollar (USD)', `sup:retc:USD:${supplierId}`)
+        .row()
+        .text('📋 Vozvratlar tarixi', `sup:cat:V:${supplierId}:1`)
+        .row()
+        .text('🔙 Orqaga', `sup:v:${supplierId}`);
 }

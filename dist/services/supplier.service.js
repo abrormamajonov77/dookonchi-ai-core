@@ -3,7 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SupplierService = void 0;
+exports.getSupplierFullHistory = exports.deleteSupplierRecord = exports.updateSupplierRecordAmount = exports.addSupplierReturn = exports.getSupplierRecordDetail = exports.getSupplierRecordsPaginated = exports.getSupplierBalance = exports.SupplierService = void 0;
+exports.computeSupplierBalanceFromLedger = computeSupplierBalanceFromLedger;
 const crypto_1 = __importDefault(require("crypto"));
 const prisma_1 = require("../database/prisma");
 const env_1 = require("../config/env");
@@ -14,6 +15,142 @@ const fuzzy_1 = require("../utils/fuzzy");
 const formatters_1 = require("../utils/formatters");
 const ai_service_1 = require("./ai.service");
 const image_service_1 = require("./image.service");
+function roundMoney(value) {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num))
+        return 0;
+    const rounded = Number(num.toFixed(2));
+    return Object.is(rounded, -0) ? 0 : rounded;
+}
+function toAuditTelegramId(ownerId) {
+    const cleaned = String(ownerId || '').trim();
+    if (/^\d+$/.test(cleaned)) {
+        return BigInt(cleaned);
+    }
+    return BigInt(0);
+}
+function categoryToTransactionType(category) {
+    if (category === 'CHEKLAR')
+        return 'INCOMING_GOODS';
+    if (category === 'PULLAR')
+        return 'PAYMENT';
+    return 'RETURN';
+}
+/**
+ * Pure deterministic balance calculator across SupplierTransaction, Invoice, and SupplierPayment.
+ * Avoids double-counting linked Invoice/SupplierPayment rows while properly honoring CASH/PARTIAL
+ * invoices and RETURN transactions: Net Debt = Total Incoming Goods - Total Payments - Total Returns.
+ */
+function computeSupplierBalanceFromLedger(ownerId, supplierId, input) {
+    const acc = {
+        UZS: { incoming: 0, payments: 0, returns: 0 },
+        USD: { incoming: 0, payments: 0, returns: 0 },
+    };
+    const invoices = input.invoices || [];
+    const payments = input.payments || [];
+    const invoiceById = new Map(invoices.map((inv) => [inv.id, inv]));
+    const linkedInvoiceIds = new Set();
+    const paymentTxMatches = [];
+    for (const tx of input.transactions) {
+        const cur = tx.currency === 'USD' ? 'USD' : 'UZS';
+        const amt = Math.abs(Number(tx.amount || 0));
+        if (tx.type === 'INCOMING_GOODS') {
+            const invId = tx.invoiceId || tx.receiptData?.invoiceId || null;
+            const linkedInv = invId ? invoiceById.get(String(invId)) : undefined;
+            if (linkedInv) {
+                linkedInvoiceIds.add(linkedInv.id);
+                const invCur = linkedInv.currency === 'USD' ? 'USD' : 'UZS';
+                const invTotal = Math.abs(Number(linkedInv.totalAmount || 0));
+                const invPaidCash = linkedInv.paymentType === 'CASH'
+                    ? invTotal
+                    : linkedInv.paymentType === 'PARTIAL'
+                        ? Math.min(invTotal, Math.abs(Number(linkedInv.paidCashAmount || 0)))
+                        : 0;
+                acc[invCur].incoming += invTotal;
+                if (invPaidCash > 0) {
+                    acc[invCur].payments += invPaidCash;
+                }
+            }
+            else {
+                const rd = tx.receiptData || {};
+                acc[cur].incoming += amt;
+                if (rd.paymentType === 'CASH') {
+                    acc[cur].payments += amt;
+                }
+                else if (rd.paymentType === 'PARTIAL' && Number(rd.paidCashAmount || 0) > 0) {
+                    acc[cur].payments += Math.min(amt, Math.abs(Number(rd.paidCashAmount || 0)));
+                }
+            }
+        }
+        else if (tx.type === 'PAYMENT') {
+            acc[cur].payments += amt;
+            paymentTxMatches.push({
+                currency: cur,
+                amount: roundMoney(amt),
+                time: new Date(tx.date).getTime(),
+                matched: false,
+            });
+        }
+        else if (tx.type === 'RETURN') {
+            acc[cur].returns += amt;
+        }
+    }
+    // Include any orphan Invoice rows not linked to a SupplierTransaction
+    for (const inv of invoices) {
+        if (linkedInvoiceIds.has(inv.id))
+            continue;
+        const cur = inv.currency === 'USD' ? 'USD' : 'UZS';
+        const invTotal = Math.abs(Number(inv.totalAmount || 0));
+        const invPaidCash = inv.paymentType === 'CASH'
+            ? invTotal
+            : inv.paymentType === 'PARTIAL'
+                ? Math.min(invTotal, Math.abs(Number(inv.paidCashAmount || 0)))
+                : 0;
+        acc[cur].incoming += invTotal;
+        if (invPaidCash > 0) {
+            acc[cur].payments += invPaidCash;
+        }
+    }
+    // Include any orphan SupplierPayment rows not already represented in SupplierTransaction(PAYMENT)
+    for (const p of payments) {
+        const cur = p.currency === 'USD' ? 'USD' : 'UZS';
+        const amt = roundMoney(Math.abs(Number(p.amount || 0)));
+        const pTime = new Date(p.createdAt).getTime();
+        const match = paymentTxMatches.find((m) => !m.matched && m.currency === cur && Math.abs(m.amount - amt) < 0.01 && Math.abs(m.time - pTime) <= 10_000);
+        if (match) {
+            match.matched = true;
+        }
+        else {
+            acc[cur].payments += amt;
+        }
+    }
+    const uzsIncoming = roundMoney(acc.UZS.incoming);
+    const uzsPayments = roundMoney(acc.UZS.payments);
+    const uzsReturns = roundMoney(acc.UZS.returns);
+    const debtUzs = roundMoney(uzsIncoming - uzsPayments - uzsReturns);
+    const usdIncoming = roundMoney(acc.USD.incoming);
+    const usdPayments = roundMoney(acc.USD.payments);
+    const usdReturns = roundMoney(acc.USD.returns);
+    const debtUsd = roundMoney(usdIncoming - usdPayments - usdReturns);
+    return {
+        supplierId,
+        ownerId,
+        uzs: {
+            totalIncoming: uzsIncoming,
+            totalPayments: uzsPayments,
+            totalReturns: uzsReturns,
+            netDebt: debtUzs,
+        },
+        usd: {
+            totalIncoming: usdIncoming,
+            totalPayments: usdPayments,
+            totalReturns: usdReturns,
+            netDebt: debtUsd,
+        },
+        debtUzs,
+        debtUsd,
+    };
+}
 class SupplierService {
     static computeImageHash(buffer) {
         return image_service_1.ImageService.getImageHash(buffer);
@@ -1021,5 +1158,1046 @@ class SupplierService {
             totalPages,
         };
     }
+    static async computeAndSyncSupplierBalanceTx(tx, ownerId, supplierId) {
+        const [transactions, invoices, payments] = await Promise.all([
+            tx.supplierTransaction.findMany({
+                where: { ownerId, supplierId },
+                orderBy: { date: 'asc' },
+                select: {
+                    id: true,
+                    type: true,
+                    amount: true,
+                    currency: true,
+                    date: true,
+                    invoiceId: true,
+                    receiptData: true,
+                },
+            }),
+            tx.invoice.findMany({
+                where: { ownerId, supplierId },
+                orderBy: { createdAt: 'asc' },
+                select: {
+                    id: true,
+                    totalAmount: true,
+                    paidCashAmount: true,
+                    creditAmount: true,
+                    paymentType: true,
+                    currency: true,
+                    createdAt: true,
+                },
+            }),
+            tx.supplierPayment.findMany({
+                where: { ownerId, supplierId },
+                orderBy: { createdAt: 'asc' },
+                select: {
+                    id: true,
+                    amount: true,
+                    currency: true,
+                    createdAt: true,
+                },
+            }),
+        ]);
+        const balance = computeSupplierBalanceFromLedger(ownerId, supplierId, {
+            transactions,
+            invoices,
+            payments,
+        });
+        const supplier = await tx.supplier.update({
+            where: { id: supplierId },
+            data: {
+                debtUzs: balance.debtUzs,
+                debtUsd: balance.debtUsd,
+            },
+        });
+        return { balance, supplier };
+    }
+    /**
+     * 1. Calculates exact net debt separately for UZS and USD from all records:
+     * Total Incoming Goods - Total Payments - Total Returns (strictly ownerId scoped).
+     */
+    static async getSupplierBalance(ownerId, supplierId) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanSupplierId = String(supplierId).trim();
+        const supplier = await prisma_1.prisma.supplier.findFirst({
+            where: { id: cleanSupplierId, ownerId: cleanOwnerId },
+            select: { id: true },
+        });
+        if (!supplier) {
+            throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
+        }
+        const [transactions, invoices, payments] = await Promise.all([
+            prisma_1.prisma.supplierTransaction.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { date: 'asc' },
+                select: {
+                    id: true,
+                    type: true,
+                    amount: true,
+                    currency: true,
+                    date: true,
+                    invoiceId: true,
+                    receiptData: true,
+                },
+            }),
+            prisma_1.prisma.invoice.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { createdAt: 'asc' },
+                select: {
+                    id: true,
+                    totalAmount: true,
+                    paidCashAmount: true,
+                    creditAmount: true,
+                    paymentType: true,
+                    currency: true,
+                    createdAt: true,
+                },
+            }),
+            prisma_1.prisma.supplierPayment.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { createdAt: 'asc' },
+                select: {
+                    id: true,
+                    amount: true,
+                    currency: true,
+                    createdAt: true,
+                },
+            }),
+        ]);
+        return computeSupplierBalanceFromLedger(cleanOwnerId, cleanSupplierId, {
+            transactions,
+            invoices,
+            payments,
+        });
+    }
+    /**
+     * 2. Paginated supplier records by category: 'CHEKLAR' | 'PULLAR' | 'VOZVRAT'.
+     * Strictly filtered by ownerId and ordered newest first.
+     */
+    static async getSupplierRecordsPaginated(ownerId, supplierId, category, page = 1, limit = 5) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanSupplierId = String(supplierId).trim();
+        const safeLimit = Math.max(1, Math.min(50, Math.floor(limit || 5)));
+        const supplier = await prisma_1.prisma.supplier.findFirst({
+            where: { id: cleanSupplierId, ownerId: cleanOwnerId },
+            select: { id: true, name: true },
+        });
+        if (!supplier) {
+            throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
+        }
+        const supplierName = (0, transliterate_1.toLatinUz)(supplier.name);
+        const records = [];
+        if (category === 'CHEKLAR') {
+            const [txs, invoices] = await Promise.all([
+                prisma_1.prisma.supplierTransaction.findMany({
+                    where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId, type: 'INCOMING_GOODS' },
+                    orderBy: { date: 'desc' },
+                }),
+                prisma_1.prisma.invoice.findMany({
+                    where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                    orderBy: { createdAt: 'desc' },
+                    include: {
+                        items: {
+                            select: {
+                                rawName: true,
+                                quantity: true,
+                                unit: true,
+                                unitPrice: true,
+                                totalPrice: true,
+                                currency: true,
+                            },
+                        },
+                    },
+                }),
+            ]);
+            const invoiceMap = new Map(invoices.map((inv) => [inv.id, inv]));
+            const linkedInvoiceIds = new Set();
+            for (const tx of txs) {
+                const invId = tx.invoiceId || tx.receiptData?.invoiceId || null;
+                const inv = invId ? invoiceMap.get(String(invId)) : undefined;
+                if (inv)
+                    linkedInvoiceIds.add(inv.id);
+                const note = (0, transliterate_1.toLatinUz)(tx.description ||
+                    (inv?.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Yuk keldi')).trim();
+                records.push({
+                    id: tx.id,
+                    supplierId: cleanSupplierId,
+                    supplierName,
+                    category: 'CHEKLAR',
+                    type: 'INCOMING_GOODS',
+                    amount: roundMoney(Number(inv ? inv.totalAmount : tx.amount)),
+                    currency: (inv?.currency || tx.currency),
+                    date: tx.date,
+                    createdAt: tx.date,
+                    note,
+                    paymentType: inv?.paymentType || tx.receiptData?.paymentType || 'CREDIT',
+                    paymentSource: inv?.paymentSource || tx.paymentSource,
+                    invoiceId: inv?.id || tx.invoiceId || null,
+                    invoiceNo: inv?.invoiceNo || tx.receiptData?.invoiceNo || null,
+                    originalAmount: inv?.originalAmount != null
+                        ? roundMoney(Number(inv.originalAmount))
+                        : tx.originalAmount != null
+                            ? roundMoney(Number(tx.originalAmount))
+                            : null,
+                    discountAmount: inv?.discountAmount != null
+                        ? roundMoney(Number(inv.discountAmount))
+                        : tx.discountAmount != null
+                            ? roundMoney(Number(tx.discountAmount))
+                            : null,
+                    photoFileId: inv?.imageFileId || tx.photoFileId || null,
+                    verbatimText: inv?.verbatimText || tx.formattedReceipt || null,
+                    items: inv?.items?.map((it) => ({
+                        rawName: (0, transliterate_1.toLatinUz)(it.rawName || "Noma'lum"),
+                        quantity: Number(it.quantity),
+                        unit: (0, transliterate_1.toLatinUz)(it.unit || 'dona'),
+                        unitPrice: roundMoney(Number(it.unitPrice)),
+                        totalPrice: roundMoney(Number(it.totalPrice)),
+                        currency: it.currency,
+                    })),
+                });
+            }
+            for (const inv of invoices) {
+                if (linkedInvoiceIds.has(inv.id))
+                    continue;
+                records.push({
+                    id: inv.id,
+                    supplierId: cleanSupplierId,
+                    supplierName,
+                    category: 'CHEKLAR',
+                    type: 'INCOMING_GOODS',
+                    amount: roundMoney(Number(inv.totalAmount)),
+                    currency: inv.currency,
+                    date: inv.createdAt,
+                    createdAt: inv.createdAt,
+                    note: (0, transliterate_1.toLatinUz)(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
+                    paymentType: inv.paymentType,
+                    paymentSource: inv.paymentSource,
+                    invoiceId: inv.id,
+                    invoiceNo: inv.invoiceNo,
+                    originalAmount: inv.originalAmount != null ? roundMoney(Number(inv.originalAmount)) : null,
+                    discountAmount: inv.discountAmount != null ? roundMoney(Number(inv.discountAmount)) : null,
+                    photoFileId: inv.imageFileId,
+                    verbatimText: inv.verbatimText,
+                    items: inv.items.map((it) => ({
+                        rawName: (0, transliterate_1.toLatinUz)(it.rawName || "Noma'lum"),
+                        quantity: Number(it.quantity),
+                        unit: (0, transliterate_1.toLatinUz)(it.unit || 'dona'),
+                        unitPrice: roundMoney(Number(it.unitPrice)),
+                        totalPrice: roundMoney(Number(it.totalPrice)),
+                        currency: it.currency,
+                    })),
+                });
+            }
+        }
+        else if (category === 'PULLAR') {
+            const [txs, payments] = await Promise.all([
+                prisma_1.prisma.supplierTransaction.findMany({
+                    where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId, type: 'PAYMENT' },
+                    orderBy: { date: 'desc' },
+                }),
+                prisma_1.prisma.supplierPayment.findMany({
+                    where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                    orderBy: { createdAt: 'desc' },
+                }),
+            ]);
+            const txMarkers = txs.map((tx) => ({
+                currency: tx.currency,
+                amount: roundMoney(Number(tx.amount)),
+                time: tx.date.getTime(),
+                matched: false,
+            }));
+            for (const tx of txs) {
+                records.push({
+                    id: tx.id,
+                    supplierId: cleanSupplierId,
+                    supplierName,
+                    category: 'PULLAR',
+                    type: 'PAYMENT',
+                    amount: roundMoney(Number(tx.amount)),
+                    currency: tx.currency,
+                    date: tx.date,
+                    createdAt: tx.date,
+                    note: (0, transliterate_1.toLatinUz)(tx.description ||
+                        (tx.paymentSource === 'PREVIOUS_SAFE'
+                            ? "Kechagi puldan / Seyfdan to'lov"
+                            : "Bugungi kassadan to'lov")),
+                    paymentSource: tx.paymentSource,
+                });
+            }
+            for (const p of payments) {
+                const pAmt = roundMoney(Number(p.amount));
+                const pTime = p.createdAt.getTime();
+                const match = txMarkers.find((m) => !m.matched &&
+                    m.currency === p.currency &&
+                    Math.abs(m.amount - pAmt) < 0.01 &&
+                    Math.abs(m.time - pTime) <= 10_000);
+                if (match) {
+                    match.matched = true;
+                    continue;
+                }
+                records.push({
+                    id: p.id,
+                    supplierId: cleanSupplierId,
+                    supplierName,
+                    category: 'PULLAR',
+                    type: 'PAYMENT',
+                    amount: pAmt,
+                    currency: p.currency,
+                    date: p.createdAt,
+                    createdAt: p.createdAt,
+                    note: (0, transliterate_1.toLatinUz)(p.comment || "To'lov"),
+                    paymentSource: p.paymentSource,
+                });
+            }
+        }
+        else {
+            const txs = await prisma_1.prisma.supplierTransaction.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId, type: 'RETURN' },
+                orderBy: { date: 'desc' },
+            });
+            for (const tx of txs) {
+                records.push({
+                    id: tx.id,
+                    supplierId: cleanSupplierId,
+                    supplierName,
+                    category: 'VOZVRAT',
+                    type: 'RETURN',
+                    amount: roundMoney(Number(tx.amount)),
+                    currency: tx.currency,
+                    date: tx.date,
+                    createdAt: tx.date,
+                    note: (0, transliterate_1.toLatinUz)(tx.description || 'Vozvrat (Tovar qaytarildi)'),
+                    paymentSource: tx.paymentSource,
+                });
+            }
+        }
+        records.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        const total = records.length;
+        const totalPages = Math.max(1, Math.ceil(total / safeLimit));
+        const currentPage = Math.max(1, Math.min(Math.floor(page || 1), totalPages));
+        const start = (currentPage - 1) * safeLimit;
+        const items = records.slice(start, start + safeLimit);
+        return {
+            items,
+            total,
+            page: currentPage,
+            totalPages,
+        };
+    }
+    /**
+     * Fetch a single supplier record by category & recordId, strictly verified against ownerId.
+     */
+    static async getSupplierRecordDetail(ownerId, recordType, recordId) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanRecordId = String(recordId).trim();
+        const expectedType = categoryToTransactionType(recordType);
+        const tx = await prisma_1.prisma.supplierTransaction.findFirst({
+            where: { id: cleanRecordId, ownerId: cleanOwnerId, type: expectedType },
+            include: { supplier: { select: { id: true, name: true } } },
+        });
+        if (tx) {
+            let inv = null;
+            if (recordType === 'CHEKLAR') {
+                const linkedInvoiceId = tx.invoiceId || tx.receiptData?.invoiceId || null;
+                if (linkedInvoiceId) {
+                    inv = await prisma_1.prisma.invoice.findFirst({
+                        where: { id: String(linkedInvoiceId), ownerId: cleanOwnerId },
+                        include: {
+                            items: {
+                                select: {
+                                    rawName: true,
+                                    quantity: true,
+                                    unit: true,
+                                    unitPrice: true,
+                                    totalPrice: true,
+                                    currency: true,
+                                },
+                            },
+                        },
+                    });
+                }
+            }
+            return {
+                id: tx.id,
+                supplierId: tx.supplierId,
+                supplierName: (0, transliterate_1.toLatinUz)(tx.supplier.name),
+                category: recordType,
+                type: tx.type,
+                amount: roundMoney(Number(inv ? inv.totalAmount : tx.amount)),
+                currency: (inv?.currency || tx.currency),
+                date: tx.date,
+                createdAt: tx.date,
+                note: (0, transliterate_1.toLatinUz)(tx.description ||
+                    (recordType === 'VOZVRAT'
+                        ? 'Vozvrat (Tovar qaytarildi)'
+                        : recordType === 'PULLAR'
+                            ? "To'lov"
+                            : 'Yuk keldi')),
+                paymentType: inv?.paymentType || tx.receiptData?.paymentType || null,
+                paymentSource: inv?.paymentSource || tx.paymentSource,
+                invoiceId: inv?.id || tx.invoiceId || null,
+                invoiceNo: inv?.invoiceNo || tx.receiptData?.invoiceNo || null,
+                originalAmount: inv?.originalAmount != null
+                    ? roundMoney(Number(inv.originalAmount))
+                    : tx.originalAmount != null
+                        ? roundMoney(Number(tx.originalAmount))
+                        : null,
+                discountAmount: inv?.discountAmount != null
+                    ? roundMoney(Number(inv.discountAmount))
+                    : tx.discountAmount != null
+                        ? roundMoney(Number(tx.discountAmount))
+                        : null,
+                photoFileId: inv?.imageFileId || tx.photoFileId || null,
+                verbatimText: inv?.verbatimText || tx.formattedReceipt || null,
+                items: inv?.items?.map((it) => ({
+                    rawName: (0, transliterate_1.toLatinUz)(it.rawName || "Noma'lum"),
+                    quantity: Number(it.quantity),
+                    unit: (0, transliterate_1.toLatinUz)(it.unit || 'dona'),
+                    unitPrice: roundMoney(Number(it.unitPrice)),
+                    totalPrice: roundMoney(Number(it.totalPrice)),
+                    currency: it.currency,
+                })),
+            };
+        }
+        if (recordType === 'CHEKLAR') {
+            const inv = await prisma_1.prisma.invoice.findFirst({
+                where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                include: {
+                    supplier: { select: { id: true, name: true } },
+                    items: {
+                        select: {
+                            rawName: true,
+                            quantity: true,
+                            unit: true,
+                            unitPrice: true,
+                            totalPrice: true,
+                            currency: true,
+                        },
+                    },
+                },
+            });
+            if (!inv)
+                return null;
+            return {
+                id: inv.id,
+                supplierId: inv.supplierId,
+                supplierName: (0, transliterate_1.toLatinUz)(inv.supplier.name),
+                category: 'CHEKLAR',
+                type: 'INCOMING_GOODS',
+                amount: roundMoney(Number(inv.totalAmount)),
+                currency: inv.currency,
+                date: inv.createdAt,
+                createdAt: inv.createdAt,
+                note: (0, transliterate_1.toLatinUz)(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
+                paymentType: inv.paymentType,
+                paymentSource: inv.paymentSource,
+                invoiceId: inv.id,
+                invoiceNo: inv.invoiceNo,
+                originalAmount: inv.originalAmount != null ? roundMoney(Number(inv.originalAmount)) : null,
+                discountAmount: inv.discountAmount != null ? roundMoney(Number(inv.discountAmount)) : null,
+                photoFileId: inv.imageFileId,
+                verbatimText: inv.verbatimText,
+                items: inv.items.map((it) => ({
+                    rawName: (0, transliterate_1.toLatinUz)(it.rawName || "Noma'lum"),
+                    quantity: Number(it.quantity),
+                    unit: (0, transliterate_1.toLatinUz)(it.unit || 'dona'),
+                    unitPrice: roundMoney(Number(it.unitPrice)),
+                    totalPrice: roundMoney(Number(it.totalPrice)),
+                    currency: it.currency,
+                })),
+            };
+        }
+        if (recordType === 'PULLAR') {
+            const p = await prisma_1.prisma.supplierPayment.findFirst({
+                where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                include: { supplier: { select: { id: true, name: true } } },
+            });
+            if (!p)
+                return null;
+            return {
+                id: p.id,
+                supplierId: p.supplierId,
+                supplierName: (0, transliterate_1.toLatinUz)(p.supplier.name),
+                category: 'PULLAR',
+                type: 'PAYMENT',
+                amount: roundMoney(Number(p.amount)),
+                currency: p.currency,
+                date: p.createdAt,
+                createdAt: p.createdAt,
+                note: (0, transliterate_1.toLatinUz)(p.comment || "To'lov"),
+                paymentSource: p.paymentSource,
+            };
+        }
+        return null;
+    }
+    /**
+     * 3. Creates a RETURN (Vozvrat) transaction for a supplier.
+     * IMPORTANT: Does NOT touch CashTransaction, SupplierPayment, or DailyRegister.
+     */
+    static async addSupplierReturn(ownerId, supplierId, amount, currency, note) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanSupplierId = String(supplierId).trim();
+        const cleanAmount = roundMoney(Math.abs(Number(amount || 0)));
+        if (!cleanAmount || cleanAmount <= 0) {
+            throw new Error("Vozvrat summasi 0 dan katta bo'lishi kerak.");
+        }
+        const cleanNote = note && note.trim() ? (0, transliterate_1.toLatinUz)(note.trim()) : 'Vozvrat (Tovar qaytarildi)';
+        const result = await prisma_1.prisma.$transaction(async (tx) => {
+            const existingSupplier = await tx.supplier.findFirst({
+                where: { id: cleanSupplierId, ownerId: cleanOwnerId },
+                select: { id: true, name: true },
+            });
+            if (!existingSupplier) {
+                throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
+            }
+            const transaction = await tx.supplierTransaction.create({
+                data: {
+                    ownerId: cleanOwnerId,
+                    supplierId: cleanSupplierId,
+                    type: 'RETURN',
+                    sourceType: 'MANUAL',
+                    paymentSource: 'RETURN',
+                    amount: cleanAmount,
+                    currency,
+                    description: cleanNote,
+                },
+            });
+            const { balance, supplier } = await this.computeAndSyncSupplierBalanceTx(tx, cleanOwnerId, cleanSupplierId);
+            await tx.auditLog.create({
+                data: {
+                    telegramId: toAuditTelegramId(cleanOwnerId),
+                    action: 'SUPPLIER_RETURN_ADD',
+                    details: {
+                        ownerId: cleanOwnerId,
+                        supplierId: cleanSupplierId,
+                        transactionId: transaction.id,
+                        amount: cleanAmount,
+                        currency,
+                        note: cleanNote,
+                    },
+                },
+            });
+            return { transaction, supplier, balance };
+        }, { maxWait: 15000, timeout: 30000 });
+        cache_service_1.cacheService.invalidateSupplierNames(cleanOwnerId);
+        return result;
+    }
+    /**
+     * 4a. Updates the amount of a CHEKLAR, PULLAR, or VOZVRAT record.
+     * Strictly enforces ownerId ownership, recalculates supplier balance, and logs to AuditLog.
+     */
+    static async updateSupplierRecordAmount(ownerId, recordType, recordId, newAmount) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanRecordId = String(recordId).trim();
+        const cleanNewAmount = roundMoney(Math.abs(Number(newAmount || 0)));
+        if (!cleanNewAmount || cleanNewAmount <= 0) {
+            throw new Error("Yangi summa 0 dan katta bo'lishi kerak.");
+        }
+        const expectedType = categoryToTransactionType(recordType);
+        const result = await prisma_1.prisma.$transaction(async (tx) => {
+            let supTx = await tx.supplierTransaction.findFirst({
+                where: { id: cleanRecordId, ownerId: cleanOwnerId, type: expectedType },
+            });
+            let linkedInvoice = null;
+            let linkedPayment = null;
+            if (recordType === 'CHEKLAR') {
+                if (supTx) {
+                    const invId = supTx.invoiceId || supTx.receiptData?.invoiceId || null;
+                    if (invId) {
+                        linkedInvoice = await tx.invoice.findFirst({
+                            where: { id: String(invId), ownerId: cleanOwnerId },
+                        });
+                    }
+                }
+                else {
+                    linkedInvoice = await tx.invoice.findFirst({
+                        where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                    });
+                    if (linkedInvoice) {
+                        supTx = await tx.supplierTransaction.findFirst({
+                            where: { ownerId: cleanOwnerId, invoiceId: linkedInvoice.id, type: 'INCOMING_GOODS' },
+                        });
+                    }
+                }
+            }
+            else if (recordType === 'PULLAR') {
+                if (supTx) {
+                    const windowStart = new Date(supTx.date.getTime() - 10_000);
+                    const windowEnd = new Date(supTx.date.getTime() + 10_000);
+                    linkedPayment = await tx.supplierPayment.findFirst({
+                        where: {
+                            ownerId: cleanOwnerId,
+                            supplierId: supTx.supplierId,
+                            currency: supTx.currency,
+                            amount: supTx.amount,
+                            createdAt: { gte: windowStart, lte: windowEnd },
+                        },
+                        orderBy: { createdAt: 'desc' },
+                    });
+                }
+                else {
+                    linkedPayment = await tx.supplierPayment.findFirst({
+                        where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                    });
+                    if (linkedPayment) {
+                        const windowStart = new Date(linkedPayment.createdAt.getTime() - 10_000);
+                        const windowEnd = new Date(linkedPayment.createdAt.getTime() + 10_000);
+                        supTx = await tx.supplierTransaction.findFirst({
+                            where: {
+                                ownerId: cleanOwnerId,
+                                supplierId: linkedPayment.supplierId,
+                                type: 'PAYMENT',
+                                currency: linkedPayment.currency,
+                                amount: linkedPayment.amount,
+                                date: { gte: windowStart, lte: windowEnd },
+                            },
+                            orderBy: { date: 'desc' },
+                        });
+                    }
+                }
+            }
+            if (!supTx && !linkedInvoice && !linkedPayment) {
+                throw new Error("Yozuv topilmadi yoki tahrirlashga ruxsat yo'q.");
+            }
+            const supplierId = supTx?.supplierId || linkedInvoice?.supplierId || linkedPayment?.supplierId;
+            const currency = (linkedInvoice?.currency || supTx?.currency || linkedPayment?.currency);
+            const oldAmount = roundMoney(Number(linkedInvoice ? linkedInvoice.totalAmount : supTx ? supTx.amount : linkedPayment.amount));
+            if (recordType === 'CHEKLAR' && linkedInvoice) {
+                const origRaw = Math.max(roundMoney(Number(linkedInvoice.originalAmount ?? cleanNewAmount)), cleanNewAmount);
+                const discountAmt = roundMoney(Math.max(0, origRaw - cleanNewAmount));
+                const payType = linkedInvoice.paymentType || 'CREDIT';
+                const paidCashAmt = payType === 'CASH'
+                    ? cleanNewAmount
+                    : payType === 'PARTIAL'
+                        ? Math.min(cleanNewAmount, roundMoney(Number(linkedInvoice.paidCashAmount || 0)))
+                        : 0;
+                const creditAmt = payType === 'CASH' ? 0 : roundMoney(Math.max(0, cleanNewAmount - paidCashAmt));
+                await tx.invoice.update({
+                    where: { id: linkedInvoice.id },
+                    data: {
+                        originalAmount: origRaw,
+                        discountAmount: discountAmt,
+                        totalAmount: cleanNewAmount,
+                        paidCashAmount: paidCashAmt,
+                        creditAmount: creditAmt,
+                    },
+                });
+                if (payType === 'CASH' && oldAmount > 0) {
+                    const winStart = new Date(linkedInvoice.createdAt.getTime() - 10_000);
+                    const winEnd = new Date(linkedInvoice.createdAt.getTime() + 10_000);
+                    const matchingCash = await tx.cashTransaction.findFirst({
+                        where: {
+                            ownerId: cleanOwnerId,
+                            currency,
+                            amount: oldAmount,
+                            createdAt: { gte: winStart, lte: winEnd },
+                        },
+                        orderBy: { createdAt: 'desc' },
+                    });
+                    if (matchingCash) {
+                        await tx.cashTransaction.update({
+                            where: { id: matchingCash.id },
+                            data: { amount: cleanNewAmount },
+                        });
+                    }
+                }
+            }
+            if (recordType === 'PULLAR' && linkedPayment) {
+                await tx.supplierPayment.update({
+                    where: { id: linkedPayment.id },
+                    data: { amount: cleanNewAmount },
+                });
+            }
+            if (supTx) {
+                await tx.supplierTransaction.update({
+                    where: { id: supTx.id },
+                    data: { amount: cleanNewAmount },
+                });
+            }
+            const { balance, supplier } = await this.computeAndSyncSupplierBalanceTx(tx, cleanOwnerId, supplierId);
+            if (recordType === 'CHEKLAR' && supTx && linkedInvoice) {
+                const postDebt = currency === 'USD' ? balance.debtUsd : balance.debtUzs;
+                const origRaw = Math.max(roundMoney(Number(linkedInvoice.originalAmount ?? cleanNewAmount)), cleanNewAmount);
+                const discountAmt = roundMoney(Math.max(0, origRaw - cleanNewAmount));
+                const formattedReceipt = this.buildFormattedReceiptText({
+                    supplierName: supplier.name,
+                    date: supTx.date,
+                    verbatimText: linkedInvoice.verbatimText,
+                    rawTotal: origRaw,
+                    discountAmount: discountAmt,
+                    finalTotal: cleanNewAmount,
+                    currency,
+                    postDebt,
+                });
+                await tx.supplierTransaction.update({
+                    where: { id: supTx.id },
+                    data: { originalAmount: origRaw, discountAmount: discountAmt, formattedReceipt },
+                });
+            }
+            await tx.auditLog.create({
+                data: {
+                    telegramId: toAuditTelegramId(cleanOwnerId),
+                    action: `SUPPLIER_RECORD_UPDATE_${recordType}`,
+                    details: {
+                        ownerId: cleanOwnerId,
+                        supplierId,
+                        recordType,
+                        recordId: cleanRecordId,
+                        oldAmount,
+                        newAmount: cleanNewAmount,
+                        currency,
+                    },
+                },
+            });
+            return {
+                recordId: cleanRecordId,
+                recordType,
+                supplierId,
+                supplier,
+                balance,
+                oldAmount,
+                newAmount: cleanNewAmount,
+                currency,
+            };
+        }, { maxWait: 15000, timeout: 30000 });
+        cache_service_1.cacheService.invalidateSupplierNames(cleanOwnerId);
+        return result;
+    }
+    /**
+     * 4b. Deletes a CHEKLAR, PULLAR, or VOZVRAT record.
+     * Strictly enforces ownerId ownership, recalculates supplier balance, and logs to AuditLog.
+     */
+    static async deleteSupplierRecord(ownerId, recordType, recordId) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanRecordId = String(recordId).trim();
+        const expectedType = categoryToTransactionType(recordType);
+        const result = await prisma_1.prisma.$transaction(async (tx) => {
+            let supTx = await tx.supplierTransaction.findFirst({
+                where: { id: cleanRecordId, ownerId: cleanOwnerId, type: expectedType },
+            });
+            let linkedInvoice = null;
+            let linkedPayment = null;
+            if (recordType === 'CHEKLAR') {
+                if (supTx) {
+                    const invId = supTx.invoiceId || supTx.receiptData?.invoiceId || null;
+                    if (invId) {
+                        linkedInvoice = await tx.invoice.findFirst({
+                            where: { id: String(invId), ownerId: cleanOwnerId },
+                        });
+                    }
+                }
+                else {
+                    linkedInvoice = await tx.invoice.findFirst({
+                        where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                    });
+                    if (linkedInvoice) {
+                        supTx = await tx.supplierTransaction.findFirst({
+                            where: { ownerId: cleanOwnerId, invoiceId: linkedInvoice.id, type: 'INCOMING_GOODS' },
+                        });
+                    }
+                }
+            }
+            else if (recordType === 'PULLAR') {
+                if (supTx) {
+                    const windowStart = new Date(supTx.date.getTime() - 10_000);
+                    const windowEnd = new Date(supTx.date.getTime() + 10_000);
+                    linkedPayment = await tx.supplierPayment.findFirst({
+                        where: {
+                            ownerId: cleanOwnerId,
+                            supplierId: supTx.supplierId,
+                            currency: supTx.currency,
+                            amount: supTx.amount,
+                            createdAt: { gte: windowStart, lte: windowEnd },
+                        },
+                        orderBy: { createdAt: 'desc' },
+                    });
+                }
+                else {
+                    linkedPayment = await tx.supplierPayment.findFirst({
+                        where: { id: cleanRecordId, ownerId: cleanOwnerId },
+                    });
+                    if (linkedPayment) {
+                        const windowStart = new Date(linkedPayment.createdAt.getTime() - 10_000);
+                        const windowEnd = new Date(linkedPayment.createdAt.getTime() + 10_000);
+                        supTx = await tx.supplierTransaction.findFirst({
+                            where: {
+                                ownerId: cleanOwnerId,
+                                supplierId: linkedPayment.supplierId,
+                                type: 'PAYMENT',
+                                currency: linkedPayment.currency,
+                                amount: linkedPayment.amount,
+                                date: { gte: windowStart, lte: windowEnd },
+                            },
+                            orderBy: { date: 'desc' },
+                        });
+                    }
+                }
+            }
+            if (!supTx && !linkedInvoice && !linkedPayment) {
+                throw new Error("Yozuv topilmadi yoki o'chirishga ruxsat yo'q.");
+            }
+            const supplierId = supTx?.supplierId || linkedInvoice?.supplierId || linkedPayment?.supplierId;
+            const currency = (linkedInvoice?.currency || supTx?.currency || linkedPayment?.currency);
+            const deletedAmount = roundMoney(Number(linkedInvoice ? linkedInvoice.totalAmount : supTx ? supTx.amount : linkedPayment.amount));
+            const description = supTx?.description || linkedPayment?.comment || linkedInvoice?.invoiceNo || null;
+            if (recordType === 'CHEKLAR' && linkedInvoice) {
+                const paidCashAmt = roundMoney(Number(linkedInvoice.paidCashAmount || 0));
+                if (paidCashAmt > 0) {
+                    const winStart = new Date(linkedInvoice.createdAt.getTime() - 10_000);
+                    const winEnd = new Date(linkedInvoice.createdAt.getTime() + 10_000);
+                    const matchingCash = await tx.cashTransaction.findFirst({
+                        where: {
+                            ownerId: cleanOwnerId,
+                            currency,
+                            amount: paidCashAmt,
+                            createdAt: { gte: winStart, lte: winEnd },
+                        },
+                        orderBy: { createdAt: 'desc' },
+                    });
+                    if (matchingCash) {
+                        await tx.cashTransaction.delete({ where: { id: matchingCash.id } });
+                    }
+                }
+                await tx.invoice.delete({ where: { id: linkedInvoice.id } });
+            }
+            if (recordType === 'PULLAR' && linkedPayment) {
+                await tx.supplierPayment.delete({ where: { id: linkedPayment.id } });
+            }
+            if (supTx) {
+                await tx.supplierTransaction.delete({ where: { id: supTx.id } });
+            }
+            const { balance, supplier } = await this.computeAndSyncSupplierBalanceTx(tx, cleanOwnerId, supplierId);
+            await tx.auditLog.create({
+                data: {
+                    telegramId: toAuditTelegramId(cleanOwnerId),
+                    action: `SUPPLIER_RECORD_DELETE_${recordType}`,
+                    details: {
+                        ownerId: cleanOwnerId,
+                        supplierId,
+                        recordType,
+                        recordId: cleanRecordId,
+                        deletedAmount,
+                        currency,
+                        description,
+                    },
+                },
+            });
+            return {
+                deleted: true,
+                recordId: cleanRecordId,
+                recordType,
+                supplierId,
+                supplier,
+                balance,
+                deletedAmount,
+                currency,
+            };
+        }, { maxWait: 15000, timeout: 30000 });
+        cache_service_1.cacheService.invalidateSupplierNames(cleanOwnerId);
+        return result;
+    }
+    /**
+     * 5. Fetches ALL incoming goods, payments, and returns for a supplier from day 0 to today,
+     * merged and sorted chronologically (createdAt asc) for Sverka / PDF generation.
+     */
+    static async getSupplierFullHistory(ownerId, supplierId) {
+        const cleanOwnerId = String(ownerId).trim();
+        const cleanSupplierId = String(supplierId).trim();
+        const supplier = await prisma_1.prisma.supplier.findFirst({
+            where: { id: cleanSupplierId, ownerId: cleanOwnerId },
+            select: { id: true, ownerId: true, name: true, phone: true },
+        });
+        if (!supplier) {
+            throw new Error("Ta'minotchi topilmadi yoki ruxsat yo'q.");
+        }
+        const [transactions, invoices, payments] = await Promise.all([
+            prisma_1.prisma.supplierTransaction.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { date: 'asc' },
+            }),
+            prisma_1.prisma.invoice.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { createdAt: 'asc' },
+            }),
+            prisma_1.prisma.supplierPayment.findMany({
+                where: { ownerId: cleanOwnerId, supplierId: cleanSupplierId },
+                orderBy: { createdAt: 'asc' },
+            }),
+        ]);
+        const invoiceMap = new Map(invoices.map((inv) => [inv.id, inv]));
+        const linkedInvoiceIds = new Set();
+        const paymentTxMarkers = [];
+        const entries = [];
+        for (const tx of transactions) {
+            if (tx.type === 'INCOMING_GOODS') {
+                const invId = tx.invoiceId || tx.receiptData?.invoiceId || null;
+                const inv = invId ? invoiceMap.get(String(invId)) : undefined;
+                if (inv)
+                    linkedInvoiceIds.add(inv.id);
+                const cur = (inv?.currency || tx.currency);
+                const totalAmt = roundMoney(Math.abs(Number(inv ? inv.totalAmount : tx.amount)));
+                const payType = inv?.paymentType || tx.receiptData?.paymentType || 'CREDIT';
+                const paidCash = payType === 'CASH'
+                    ? totalAmt
+                    : payType === 'PARTIAL'
+                        ? Math.min(totalAmt, roundMoney(Math.abs(Number(inv?.paidCashAmount ?? tx.receiptData?.paidCashAmount ?? 0))))
+                        : 0;
+                const invLabel = inv?.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : (0, transliterate_1.toLatinUz)(tx.description || 'Yuk keldi');
+                const noteSuffix = payType === 'CASH' ? ' (Naqd)' : payType === 'PARTIAL' ? ' (Qisman naqd)' : '';
+                entries.push({
+                    id: tx.id,
+                    date: tx.date,
+                    createdAt: tx.date,
+                    type: 'INCOMING_GOODS',
+                    actionLabel: 'Yuk keldi (+)',
+                    amount: totalAmt,
+                    currency: cur,
+                    note: (0, transliterate_1.toLatinUz)(`${invLabel}${invLabel.includes('(') ? '' : noteSuffix}`).trim(),
+                    paymentType: payType,
+                });
+                if (paidCash > 0) {
+                    entries.push({
+                        id: `${tx.id}:cash`,
+                        date: tx.date,
+                        createdAt: tx.date,
+                        type: 'PAYMENT',
+                        actionLabel: 'Pul berildi (-)',
+                        amount: paidCash,
+                        currency: cur,
+                        note: (0, transliterate_1.toLatinUz)(payType === 'CASH'
+                            ? `Naqd to'lov (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`
+                            : `Qisman naqd to'lov (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`),
+                        paymentType: payType,
+                    });
+                }
+            }
+            else if (tx.type === 'PAYMENT') {
+                const amt = roundMoney(Math.abs(Number(tx.amount)));
+                paymentTxMarkers.push({
+                    currency: tx.currency,
+                    amount: amt,
+                    time: tx.date.getTime(),
+                    matched: false,
+                });
+                entries.push({
+                    id: tx.id,
+                    date: tx.date,
+                    createdAt: tx.date,
+                    type: 'PAYMENT',
+                    actionLabel: 'Pul berildi (-)',
+                    amount: amt,
+                    currency: tx.currency,
+                    note: (0, transliterate_1.toLatinUz)(tx.description ||
+                        (tx.paymentSource === 'PREVIOUS_SAFE'
+                            ? "Seyfdan to'lov"
+                            : "Kassadan to'lov")),
+                });
+            }
+            else if (tx.type === 'RETURN') {
+                entries.push({
+                    id: tx.id,
+                    date: tx.date,
+                    createdAt: tx.date,
+                    type: 'RETURN',
+                    actionLabel: 'Vozvrat (-)',
+                    amount: roundMoney(Math.abs(Number(tx.amount))),
+                    currency: tx.currency,
+                    note: (0, transliterate_1.toLatinUz)(tx.description || 'Tovar qaytarildi'),
+                });
+            }
+        }
+        // Add orphan invoices if any exist without SupplierTransaction
+        for (const inv of invoices) {
+            if (linkedInvoiceIds.has(inv.id))
+                continue;
+            const totalAmt = roundMoney(Math.abs(Number(inv.totalAmount)));
+            const paidCash = inv.paymentType === 'CASH'
+                ? totalAmt
+                : inv.paymentType === 'PARTIAL'
+                    ? Math.min(totalAmt, roundMoney(Math.abs(Number(inv.paidCashAmount || 0))))
+                    : 0;
+            entries.push({
+                id: inv.id,
+                date: inv.createdAt,
+                createdAt: inv.createdAt,
+                type: 'INCOMING_GOODS',
+                actionLabel: 'Yuk keldi (+)',
+                amount: totalAmt,
+                currency: inv.currency,
+                note: (0, transliterate_1.toLatinUz)(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
+                paymentType: inv.paymentType,
+            });
+            if (paidCash > 0) {
+                entries.push({
+                    id: `${inv.id}:cash`,
+                    date: inv.createdAt,
+                    createdAt: inv.createdAt,
+                    type: 'PAYMENT',
+                    actionLabel: 'Pul berildi (-)',
+                    amount: paidCash,
+                    currency: inv.currency,
+                    note: (0, transliterate_1.toLatinUz)(inv.paymentType === 'CASH' ? "Naqd to'lov" : "Qisman naqd to'lov"),
+                    paymentType: inv.paymentType,
+                });
+            }
+        }
+        // Add orphan payments if any exist without SupplierTransaction
+        for (const p of payments) {
+            const pAmt = roundMoney(Math.abs(Number(p.amount)));
+            const pTime = p.createdAt.getTime();
+            const match = paymentTxMarkers.find((m) => !m.matched &&
+                m.currency === p.currency &&
+                Math.abs(m.amount - pAmt) < 0.01 &&
+                Math.abs(m.time - pTime) <= 10_000);
+            if (match) {
+                match.matched = true;
+                continue;
+            }
+            entries.push({
+                id: p.id,
+                date: p.createdAt,
+                createdAt: p.createdAt,
+                type: 'PAYMENT',
+                actionLabel: 'Pul berildi (-)',
+                amount: pAmt,
+                currency: p.currency,
+                note: (0, transliterate_1.toLatinUz)(p.comment || "To'lov"),
+            });
+        }
+        const typeOrder = {
+            INCOMING_GOODS: 0,
+            PAYMENT: 1,
+            RETURN: 2,
+        };
+        entries.sort((a, b) => {
+            const diff = a.createdAt.getTime() - b.createdAt.getTime();
+            if (diff !== 0)
+                return diff;
+            return typeOrder[a.type] - typeOrder[b.type];
+        });
+        const summary = computeSupplierBalanceFromLedger(cleanOwnerId, cleanSupplierId, {
+            transactions,
+            invoices,
+            payments,
+        });
+        return {
+            supplier: {
+                id: supplier.id,
+                ownerId: supplier.ownerId,
+                name: (0, transliterate_1.toLatinUz)(supplier.name),
+                phone: supplier.phone,
+            },
+            entries,
+            summary,
+            firstDate: entries.length > 0 ? entries[0].createdAt : null,
+            lastDate: entries.length > 0 ? entries[entries.length - 1].createdAt : null,
+        };
+    }
 }
 exports.SupplierService = SupplierService;
+exports.getSupplierBalance = SupplierService.getSupplierBalance.bind(SupplierService);
+exports.getSupplierRecordsPaginated = SupplierService.getSupplierRecordsPaginated.bind(SupplierService);
+exports.getSupplierRecordDetail = SupplierService.getSupplierRecordDetail.bind(SupplierService);
+exports.addSupplierReturn = SupplierService.addSupplierReturn.bind(SupplierService);
+exports.updateSupplierRecordAmount = SupplierService.updateSupplierRecordAmount.bind(SupplierService);
+exports.deleteSupplierRecord = SupplierService.deleteSupplierRecord.bind(SupplierService);
+exports.getSupplierFullHistory = SupplierService.getSupplierFullHistory.bind(SupplierService);

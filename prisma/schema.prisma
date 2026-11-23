@@ -22,6 +22,7 @@ enum DebtStatus {
 enum TransactionType {
   INCOMING_GOODS
   PAYMENT
+  RETURN
 }
 
 enum ExpenseCategory {

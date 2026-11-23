@@ -14,6 +14,7 @@ const prisma_1 = require("../../database/prisma");
 const cache_service_1 = require("../../services/cache.service");
 const telegram_1 = require("../../utils/telegram");
 const supplier_service_1 = require("../../services/supplier.service");
+const search_service_1 = require("../../services/search.service");
 const transliterate_1 = require("../../utils/transliterate");
 const local_parser_1 = require("../../utils/local-parser");
 exports.invoiceHandler = new grammy_1.Composer();
@@ -79,6 +80,12 @@ function buildPendingPreviewMessage(invoiceData, editableText) {
     text += `💰 Skidkadan keyingi yakuniy summa (Itogo): **${(0, formatters_1.formatCurrency)(math.finalTotal, currency)}**\n`;
     if (invoiceData.isCashOverride) {
         text += `📦 Amal turi: 💵 Naqd xarid (Qarzga ta'sir qilmaydi)\n`;
+    }
+    if (Array.isArray(invoiceData.priceAlerts) && invoiceData.priceAlerts.length > 0) {
+        const alertBlock = (0, search_service_1.formatPriceIncreaseAlertsBlock)(invoiceData.priceAlerts, telegram_1.sanitizeMdV1);
+        if (alertBlock) {
+            text += `\n${alertBlock}\n`;
+        }
     }
     text += `\n_💡 Skidka yoki ta'minotchi nomini to'g'rilash uchun pastdagi tugmalardan foydalaning yoki chatga yozing_\n\nMa'lumotlar to'g'rimi?`;
     return text;
@@ -201,6 +208,15 @@ async function processParsedInvoice(ctx, invoiceData, imageUrl, photoFileId, use
             }
             return ctx.reply(dupCheck.warningText, { reply_markup: dupKb });
         }
+    }
+    if (Array.isArray(invoiceData.items) && invoiceData.items.length > 0) {
+        invoiceData.priceAlerts = await search_service_1.SearchService.detectPriceIncreases(ownerId, invoiceData.items, invoiceData.currency).catch((err) => {
+            logger_1.logger.warn({ err }, 'Automatic price-increase alert check failed');
+            return [];
+        });
+    }
+    else {
+        invoiceData.priceAlerts = [];
     }
     const pendingAction = await prisma_1.prisma.pendingAction.create({
         data: {
@@ -456,6 +472,7 @@ exports.invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ct
         if (Array.isArray(invoiceData.items)) {
             invoiceData.items.forEach((it) => (it.currency = invoiceData.currency));
             invoiceData.verbatimText = (0, ai_service_1.buildVerbatimTableText)(invoiceData.items, invoiceData.currency);
+            invoiceData.priceAlerts = await search_service_1.SearchService.detectPriceIncreases(ownerId, invoiceData.items, invoiceData.currency).catch(() => []);
         }
         await prisma_1.prisma.pendingAction.update({
             where: { id: cleanId },

@@ -56,6 +56,8 @@ exports.safeDelete = safeDelete;
 const clearSession = (ctx) => {
     ctx.session.step = undefined;
     ctx.session.tempData = null;
+    ctx.session.supplierEditRecord = null;
+    ctx.session.supplierReturn = null;
 };
 exports.clearSession = clearSession;
 function sanitizeMdV1(text) {

@@ -1,8 +1,17 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ExportService = void 0;
+exports.generateSupplierHistoryPdf = exports.ExportService = void 0;
+exports.normalizePdfUzbekText = normalizePdfUzbekText;
+exports.sanitizeSupplierFilename = sanitizeSupplierFilename;
+exports.renderSupplierHistoryPdfBuffer = renderSupplierHistoryPdfBuffer;
+const pdfkit_1 = __importDefault(require("pdfkit"));
 const prisma_1 = require("../database/prisma");
 const formatters_1 = require("../utils/formatters");
+const transliterate_1 = require("../utils/transliterate");
+const supplier_service_1 = require("./supplier.service");
 function escapeCsvCell(val) {
     const str = String(val ?? '').replace(/\r?\n/g, ' ').trim();
     if (str.includes(',') || str.includes('"') || str.includes(';')) {
@@ -10,9 +19,80 @@ function escapeCsvCell(val) {
     }
     return str;
 }
+/**
+ * Normalizes Cyrillic / Unicode Uzbek Latin text into crisp ASCII-compatible Uzbek Latin
+ * so built-in PDF Helvetica renders cleanly without broken symbols or '?' placeholders.
+ */
+function normalizePdfUzbekText(text) {
+    return (0, transliterate_1.toLatinUz)(String(text ?? ''))
+        .replace(/[ʻʼ‘’ʹ`´]/g, "'")
+        .replace(/[–—]/g, '-')
+        .replace(/[«»“”]/g, '"')
+        .replace(/№/g, 'No.')
+        .replace(/\u00A0/g, ' ')
+        .replace(/[^\x20-\x7E]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+function sanitizeSupplierFilename(supplierName) {
+    const normalized = normalizePdfUzbekText(supplierName)
+        .replace(/['"`]/g, '')
+        .replace(/[^A-Za-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+    return (normalized || 'Taminotchi').slice(0, 48);
+}
+function formatTashkentDate(date, sep = '.') {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        timeZone: 'Asia/Tashkent',
+    }).formatToParts(date);
+    const dd = parts.find((p) => p.type === 'day')?.value || '01';
+    const mm = parts.find((p) => p.type === 'month')?.value || '01';
+    const yyyy = parts.find((p) => p.type === 'year')?.value || '2026';
+    return `${dd}${sep}${mm}${sep}${yyyy}`;
+}
+function formatTashkentDateTime(date) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+        timeZone: 'Asia/Tashkent',
+    }).formatToParts(date);
+    const dd = parts.find((p) => p.type === 'day')?.value || '01';
+    const mm = parts.find((p) => p.type === 'month')?.value || '01';
+    const yyyy = parts.find((p) => p.type === 'year')?.value || '2026';
+    const hh = parts.find((p) => p.type === 'hour')?.value || '00';
+    const min = parts.find((p) => p.type === 'minute')?.value || '00';
+    return `${dd}.${mm}.${yyyy} ${hh}:${min}`;
+}
+function formatPdfUzsNumber(amount, signPrefix = '') {
+    const rounded = Number(Number(amount || 0).toFixed(2));
+    const abs = Math.abs(rounded);
+    const hasCents = abs % 1 !== 0;
+    const formatted = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits: hasCents ? 2 : 0,
+        maximumFractionDigits: hasCents ? 2 : 0,
+    }).format(abs);
+    const effectiveSign = signPrefix || (rounded < 0 ? '-' : '');
+    return `${effectiveSign}${formatted}`;
+}
+function formatPdfUsdNumber(amount, signPrefix = '') {
+    const rounded = Number(Number(amount || 0).toFixed(2));
+    const abs = Math.abs(rounded);
+    const formatted = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    }).format(abs);
+    const effectiveSign = signPrefix || (rounded < 0 ? '-' : '');
+    return `${effectiveSign}$${formatted}`;
+}
 function escapePdfText(text) {
-    return text
-        .replace(/[^\x20-\x7E]/g, '?')
+    return normalizePdfUzbekText(text)
         .replace(/\\/g, '\\\\')
         .replace(/\(/g, '\\(')
         .replace(/\)/g, '\\)');
@@ -250,5 +330,255 @@ class ExportService {
             customerDebts,
         };
     }
+    /**
+     * Generates a clean, multi-page business Sverka PDF for a supplier's full history (strictly ownerId scoped).
+     */
+    static async generateSupplierHistoryPdf(ownerId, supplierId, options) {
+        const history = await supplier_service_1.SupplierService.getSupplierFullHistory(ownerId, supplierId);
+        const now = options?.now || new Date();
+        const filename = `${sanitizeSupplierFilename(history.supplier.name)}_Sverka_${formatTashkentDate(now, '_')}.pdf`;
+        const buffer = await renderSupplierHistoryPdfBuffer(history, {
+            now,
+            compress: options?.compress ?? true,
+        });
+        return { buffer, filename };
+    }
 }
 exports.ExportService = ExportService;
+async function renderSupplierHistoryPdfBuffer(history, options) {
+    const now = options?.now || new Date();
+    const compress = options?.compress ?? true;
+    return new Promise((resolve, reject) => {
+        const doc = new pdfkit_1.default({
+            size: 'A4',
+            margin: 36,
+            bufferPages: true,
+            compress,
+            info: {
+                Title: normalizePdfUzbekText(`${history.supplier.name} - Sverka`),
+                Author: 'Dookonchi AI',
+            },
+        });
+        const chunks = [];
+        doc.on('data', (chunk) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        const leftX = 36;
+        const pageWidth = doc.page.width - 72; // ~523.28 pt
+        const bottomLimitY = doc.page.height - 52;
+        const cols = [
+            { key: 'date', label: 'Sana', width: 72, align: 'left' },
+            { key: 'action', label: 'Amal', width: 96, align: 'left' },
+            { key: 'uzs', label: 'Summa (UZS)', width: 102, align: 'right' },
+            { key: 'usd', label: 'Summa (USD)', width: 82, align: 'right' },
+            { key: 'note', label: 'Izoh', width: pageWidth - (72 + 96 + 102 + 82), align: 'left' },
+        ];
+        const supplierName = normalizePdfUzbekText(history.supplier.name);
+        const supplierPhone = history.supplier.phone ? normalizePdfUzbekText(history.supplier.phone) : null;
+        const todayStr = formatTashkentDate(now, '.');
+        const firstStr = history.firstDate ? formatTashkentDate(history.firstDate, '.') : todayStr;
+        const periodText = history.entries.length > 0 ? `${firstStr} - ${todayStr}` : `Hozircha amaliyotlar yo'q (${todayStr})`;
+        const generatedAtStr = formatTashkentDateTime(now);
+        // Header Card
+        const headerTopY = 36;
+        const headerHeight = supplierPhone ? 88 : 74;
+        doc
+            .save()
+            .roundedRect(leftX, headerTopY, pageWidth, headerHeight, 4)
+            .fillAndStroke('#EEF2FF', '#1E3A8A')
+            .restore();
+        doc
+            .fillColor('#1E3A8A')
+            .font('Helvetica-Bold')
+            .fontSize(13)
+            .text("TA'MINOTCHI BILAN HISOB-KITOB TARIXI (SVERKA)", leftX + 12, headerTopY + 10, {
+            width: pageWidth - 24,
+        });
+        doc.fillColor('#111827').font('Helvetica-Bold').fontSize(10);
+        doc.text(`Ta'minotchi: ${supplierName}`, leftX + 12, headerTopY + 30, { width: pageWidth - 24 });
+        doc.font('Helvetica').fontSize(9.5);
+        let metaY = headerTopY + 45;
+        if (supplierPhone) {
+            doc.text(`Telefon: ${supplierPhone}`, leftX + 12, metaY, { width: pageWidth - 24 });
+            metaY += 14;
+        }
+        doc.text(`Davr: ${periodText}`, leftX + 12, metaY, { width: (pageWidth - 24) * 0.55 });
+        doc.text(`Yaratilgan sana: ${generatedAtStr}`, leftX + 12 + (pageWidth - 24) * 0.55, metaY, {
+            width: (pageWidth - 24) * 0.45,
+            align: 'right',
+        });
+        let y = headerTopY + headerHeight + 14;
+        const drawTableHeader = (startY) => {
+            const rowH = 22;
+            doc.save().rect(leftX, startY, pageWidth, rowH).fill('#1E3A8A').restore();
+            doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(9);
+            let cx = leftX;
+            for (const col of cols) {
+                doc.text(col.label, cx + 5, startY + 6, {
+                    width: col.width - 10,
+                    align: col.align,
+                    lineBreak: false,
+                });
+                cx += col.width;
+            }
+            return startY + rowH;
+        };
+        y = drawTableHeader(y);
+        if (history.entries.length === 0) {
+            const emptyH = 28;
+            doc.save().rect(leftX, y, pageWidth, emptyH).fillAndStroke('#F8FAFC', '#CBD5E1').restore();
+            doc
+                .fillColor('#64748B')
+                .font('Helvetica')
+                .fontSize(9.5)
+                .text("Hozircha amaliyotlar mavjud emas.", leftX, y + 9, {
+                width: pageWidth,
+                align: 'center',
+            });
+            y += emptyH;
+        }
+        else {
+            history.entries.forEach((entry, idx) => {
+                const dateStr = formatTashkentDate(entry.date, '.');
+                const actionStr = normalizePdfUzbekText(entry.actionLabel);
+                const sign = entry.type === 'INCOMING_GOODS' ? '+' : '-';
+                const uzsStr = entry.currency === 'UZS' ? formatPdfUzsNumber(entry.amount, sign) : '-';
+                const usdStr = entry.currency === 'USD' ? formatPdfUsdNumber(entry.amount, sign) : '-';
+                const noteStr = normalizePdfUzbekText(entry.note || '-') || '-';
+                doc.font('Helvetica').fontSize(8.5);
+                const noteHeight = doc.heightOfString(noteStr, {
+                    width: cols[4].width - 10,
+                });
+                const rowH = Math.max(19, Math.min(54, Math.ceil(noteHeight) + 9));
+                if (y + rowH > bottomLimitY) {
+                    doc.addPage();
+                    y = 36;
+                    y = drawTableHeader(y);
+                }
+                const bg = idx % 2 === 0 ? '#FFFFFF' : '#F8FAFC';
+                doc.save().rect(leftX, y, pageWidth, rowH).fill(bg).restore();
+                doc
+                    .save()
+                    .lineWidth(0.5)
+                    .strokeColor('#CBD5E1')
+                    .rect(leftX, y, pageWidth, rowH)
+                    .stroke()
+                    .restore();
+                // Draw vertical column dividers
+                let divX = leftX;
+                doc.save().lineWidth(0.4).strokeColor('#E2E8F0');
+                for (let i = 0; i < cols.length - 1; i++) {
+                    divX += cols[i].width;
+                    doc.moveTo(divX, y).lineTo(divX, y + rowH).stroke();
+                }
+                doc.restore();
+                const actionColor = entry.type === 'INCOMING_GOODS'
+                    ? '#1E40AF'
+                    : entry.type === 'PAYMENT'
+                        ? '#15803D'
+                        : '#B45309';
+                let cx = leftX;
+                const textY = y + 5;
+                doc.fillColor('#111827').font('Helvetica').fontSize(8.5);
+                doc.text(dateStr, cx + 5, textY, { width: cols[0].width - 10, align: 'left', lineBreak: false });
+                cx += cols[0].width;
+                doc.fillColor(actionColor).font('Helvetica-Bold').fontSize(8.5);
+                doc.text(actionStr, cx + 5, textY, { width: cols[1].width - 10, align: 'left', lineBreak: false });
+                cx += cols[1].width;
+                doc.fillColor('#111827').font('Helvetica').fontSize(8.5);
+                doc.text(uzsStr, cx + 5, textY, { width: cols[2].width - 10, align: 'right', lineBreak: false });
+                cx += cols[2].width;
+                doc.text(usdStr, cx + 5, textY, { width: cols[3].width - 10, align: 'right', lineBreak: false });
+                cx += cols[3].width;
+                doc.fillColor('#334155').font('Helvetica').fontSize(8.3);
+                doc.text(noteStr, cx + 5, textY, {
+                    width: cols[4].width - 10,
+                    height: rowH - 6,
+                    ellipsis: true,
+                });
+                y += rowH;
+            });
+        }
+        // Summary Footer Block
+        const summaryBlockH = 128;
+        if (y + 16 + summaryBlockH > bottomLimitY) {
+            doc.addPage();
+            y = 36;
+        }
+        else {
+            y += 16;
+        }
+        const { uzs, usd } = history.summary;
+        const sumCol1W = pageWidth - 260;
+        const sumCol2W = 140;
+        const sumCol3W = 120;
+        // Summary Title Bar
+        doc.save().rect(leftX, y, pageWidth, 22).fill('#1E3A8A').restore();
+        doc
+            .fillColor('#FFFFFF')
+            .font('Helvetica-Bold')
+            .fontSize(9.5)
+            .text('YAKUNIY HISOB-KITOB', leftX + 8, y + 6, { width: sumCol1W - 12 });
+        doc.text("UZS (so'm)", leftX + sumCol1W, y + 6, { width: sumCol2W - 8, align: 'right' });
+        doc.text('USD ($)', leftX + sumCol1W + sumCol2W, y + 6, { width: sumCol3W - 8, align: 'right' });
+        y += 22;
+        const summaryRows = [
+            {
+                label: 'Jami kelgan yuk',
+                uzsVal: `${formatPdfUzsNumber(uzs.totalIncoming)} so'm`,
+                usdVal: formatPdfUsdNumber(usd.totalIncoming),
+            },
+            {
+                label: 'Jami berilgan pul',
+                uzsVal: `${formatPdfUzsNumber(uzs.totalPayments)} so'm`,
+                usdVal: formatPdfUsdNumber(usd.totalPayments),
+            },
+            {
+                label: 'Jami vozvrat',
+                uzsVal: `${formatPdfUzsNumber(uzs.totalReturns)} so'm`,
+                usdVal: formatPdfUsdNumber(usd.totalReturns),
+            },
+            {
+                label: 'Joriy qoldiq qarz',
+                uzsVal: `${formatPdfUzsNumber(uzs.netDebt)} so'm`,
+                usdVal: formatPdfUsdNumber(usd.netDebt),
+                highlight: true,
+            },
+        ];
+        for (const sRow of summaryRows) {
+            const rowH = sRow.highlight ? 26 : 22;
+            const fill = sRow.highlight ? '#DBEAFE' : '#F8FAFC';
+            const border = sRow.highlight ? '#1E3A8A' : '#CBD5E1';
+            doc.save().rect(leftX, y, pageWidth, rowH).fillAndStroke(fill, border).restore();
+            doc
+                .fillColor(sRow.highlight ? '#1E3A8A' : '#111827')
+                .font(sRow.highlight ? 'Helvetica-Bold' : 'Helvetica')
+                .fontSize(sRow.highlight ? 10 : 9.2);
+            const ty = sRow.highlight ? y + 7 : y + 6;
+            doc.text(sRow.label, leftX + 8, ty, { width: sumCol1W - 12, lineBreak: false });
+            doc.text(sRow.uzsVal, leftX + sumCol1W, ty, { width: sumCol2W - 8, align: 'right', lineBreak: false });
+            doc.text(sRow.usdVal, leftX + sumCol1W + sumCol2W, ty, {
+                width: sumCol3W - 8,
+                align: 'right',
+                lineBreak: false,
+            });
+            y += rowH;
+        }
+        // Add page footers to all buffered pages without triggering PDFKit auto-pagination
+        const pageRange = doc.bufferedPageRange();
+        for (let i = pageRange.start; i < pageRange.start + pageRange.count; i++) {
+            doc.switchToPage(i);
+            const savedBottom = doc.page.margins.bottom;
+            doc.page.margins.bottom = 0;
+            const footerY = doc.page.height - 24;
+            doc
+                .fillColor('#64748B')
+                .font('Helvetica')
+                .fontSize(8)
+                .text(`Dookonchi AI  |  ${supplierName}  |  Sahifa ${i + 1} / ${pageRange.count}`, leftX, footerY, { width: pageWidth, align: 'center', lineBreak: false });
+            doc.page.margins.bottom = savedBottom;
+        }
+        doc.end();
+    });
+}
+exports.generateSupplierHistoryPdf = ExportService.generateSupplierHistoryPdf.bind(ExportService);

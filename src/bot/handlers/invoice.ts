@@ -34,6 +34,7 @@ import {
   deleteOwnedPendingAction,
 } from '../../utils/telegram';
 import { SupplierService } from '../../services/supplier.service';
+import { SearchService, formatPriceIncreaseAlertsBlock } from '../../services/search.service';
 import { toLatinUz } from '../../utils/transliterate';
 import { parseTextCommandLocally } from '../../utils/local-parser';
 
@@ -112,6 +113,12 @@ export function buildPendingPreviewMessage(invoiceData: any, editableText: strin
   text += `💰 Skidkadan keyingi yakuniy summa (Itogo): **${formatCurrency(math.finalTotal, currency)}**\n`;
   if (invoiceData.isCashOverride) {
     text += `📦 Amal turi: 💵 Naqd xarid (Qarzga ta'sir qilmaydi)\n`;
+  }
+  if (Array.isArray(invoiceData.priceAlerts) && invoiceData.priceAlerts.length > 0) {
+    const alertBlock = formatPriceIncreaseAlertsBlock(invoiceData.priceAlerts, sanitizeMdV1);
+    if (alertBlock) {
+      text += `\n${alertBlock}\n`;
+    }
   }
   text += `\n_💡 Skidka yoki ta'minotchi nomini to'g'rilash uchun pastdagi tugmalardan foydalaning yoki chatga yozing_\n\nMa'lumotlar to'g'rimi?`;
   return text;
@@ -253,6 +260,19 @@ async function processParsedInvoice(
       }
       return ctx.reply(dupCheck.warningText, { reply_markup: dupKb });
     }
+  }
+
+  if (Array.isArray(invoiceData.items) && invoiceData.items.length > 0) {
+    invoiceData.priceAlerts = await SearchService.detectPriceIncreases(
+      ownerId,
+      invoiceData.items,
+      invoiceData.currency
+    ).catch((err) => {
+      logger.warn({ err }, 'Automatic price-increase alert check failed');
+      return [];
+    });
+  } else {
+    invoiceData.priceAlerts = [];
   }
 
   const pendingAction = await prisma.pendingAction.create({
@@ -560,6 +580,11 @@ invoiceHandler.callbackQuery(/^toggle_invoice_currency:(.+)$/, async (ctx) => {
     if (Array.isArray(invoiceData.items)) {
       invoiceData.items.forEach((it: any) => (it.currency = invoiceData.currency));
       invoiceData.verbatimText = buildVerbatimTableText(invoiceData.items, invoiceData.currency);
+      invoiceData.priceAlerts = await SearchService.detectPriceIncreases(
+        ownerId,
+        invoiceData.items,
+        invoiceData.currency
+      ).catch(() => []);
     }
 
     await prisma.pendingAction.update({

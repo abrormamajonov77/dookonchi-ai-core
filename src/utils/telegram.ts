@@ -45,6 +45,8 @@ export const safeDelete = async (ctx: MyContext, chatId?: number | string, msgId
 export const clearSession = (ctx: MyContext) => {
   ctx.session.step = undefined;
   ctx.session.tempData = null;
+  ctx.session.supplierEditRecord = null;
+  ctx.session.supplierReturn = null;
 };
 
 export function sanitizeMdV1(text: string): string {
