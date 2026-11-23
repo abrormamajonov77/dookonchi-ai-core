@@ -44,16 +44,11 @@ exports.startHandler.command('start', async (ctx) => {
         });
         return;
     }
-    // 3. Pending User (Waiting Room + Immediate Notification to Super-Admin)
+    // 3. Pending User (Prompt to share contact for instant 7-day free trial)
     if (user.status === 'PENDING') {
         await ctx.reply(subscription_service_1.SubscriptionService.buildWelcomePendingMessage(), {
             reply_markup: (0, menu_1.getPendingRegistrationKeyboard)(),
         });
-        const adminMsg = subscription_service_1.SubscriptionService.buildAdminNewUserRequestMessage(user);
-        const adminKb = subscription_service_1.SubscriptionService.getAdminUserGrantKeyboard(user.telegramId);
-        await ctx.api
-            .sendMessage(env_1.env.OWNER_TELEGRAM_ID, adminMsg, { reply_markup: adminKb })
-            .catch(() => { });
         return;
     }
     // 4. Expired User
@@ -71,7 +66,7 @@ exports.startHandler.command('start', async (ctx) => {
         return;
     }
 });
-// Contact registration handler
+// Contact registration handler -> Auto 7-Day Free Trial + 30-Second Onboarding
 exports.startHandler.on('message:contact', async (ctx) => {
     if (!ctx.from || !ctx.message.contact)
         return;
@@ -79,13 +74,42 @@ exports.startHandler.on('message:contact', async (ctx) => {
     const phone = ctx.message.contact.phone_number;
     const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ').trim();
     const username = ctx.from.username || null;
-    const { user } = await subscription_service_1.SubscriptionService.registerOrGetUser({
+    const trialResult = await subscription_service_1.SubscriptionService.activateAutoTrialOnContact({
         telegramId,
         fullName,
         username,
         phone,
     });
+    const user = trialResult.user;
     ctx.user = user;
+    // Keep BLOCKED and PAUSED protections strictly intact
+    if (!subscription_service_1.SubscriptionService.isSuperAdmin(telegramId)) {
+        if (user.status === 'BLOCKED') {
+            await ctx.reply("⛔️ Kechirasiz, sizning hisobingiz bloklangan.");
+            return;
+        }
+        if (user.status === 'PAUSED') {
+            await ctx.reply("⏸ Sizning obunangiz Admin tomonidan vaqtincha to'xtatilgan. Shaxsiy bazangizdagi barcha ma'lumotlar xavfsiz saqlanmoqda.");
+            return;
+        }
+        if (user.status === 'EXPIRED') {
+            const kb = new grammy_1.InlineKeyboard().text("📸 To'lov chekini (skrinshot) yuborish", 'sub:send_receipt');
+            await ctx.reply("⏳ Obuna muddatingiz yakunlandi. Davom ettirish uchun to'lov cheki (skrinshot) rasmini yuboring:", { reply_markup: kb });
+            return;
+        }
+    }
+    if (trialResult.activated && trialResult.onboardingMessage) {
+        await (0, telegram_1.safeReply)(ctx, trialResult.onboardingMessage, {
+            parse_mode: 'Markdown',
+            reply_markup: (0, menu_1.getMainMenu)('STORE_OWNER'),
+        });
+        if (trialResult.adminNotification) {
+            await ctx.api
+                .sendMessage(env_1.env.OWNER_TELEGRAM_ID, trialResult.adminNotification)
+                .catch(() => { });
+        }
+        return;
+    }
     if (user.status === 'PENDING') {
         await ctx.reply("✅ Telefon raqamingiz tasdiqlandi! So'rovingiz Adminga yuborildi. Ruxsat berilishi bilan sizga shu yerda xabar keladi.", { reply_markup: { remove_keyboard: true } });
         const adminMsg = subscription_service_1.SubscriptionService.buildAdminNewUserRequestMessage(user);

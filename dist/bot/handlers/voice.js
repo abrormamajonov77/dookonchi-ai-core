@@ -1,8 +1,12 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.voiceHandler = void 0;
 exports.parseShorthandTx = parseShorthandTx;
 const grammy_1 = require("grammy");
+const fuse_js_1 = __importDefault(require("fuse.js"));
 const ai_service_1 = require("../../services/ai.service");
 const inline_1 = require("../keyboards/inline");
 const menu_1 = require("../keyboards/menu");
@@ -93,6 +97,218 @@ async function saveSupplierTxData(data, ownerId, overrideSource) {
     });
     return currency === 'USD' ? Number(res.supplier.debtUsd) : Number(res.supplier.debtUzs);
 }
+async function handleZeroMenuProductSearch(ctx, ownerId, rawQuery) {
+    const query = (0, transliterate_1.toLatinUz)(rawQuery || '').trim();
+    if (!query) {
+        return ctx.reply("🔍 Qaysi mahsulot narxini qidiramiz? Masalan: `ole narxi`", { parse_mode: 'Markdown' });
+    }
+    const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query, ownerId);
+    if (!items.length) {
+        return ctx.reply(`🤷‍♂️ "${query}" nomli mahsulot bazadan topilmadi.`);
+    }
+    const topItems = items.slice(0, 5);
+    const kb = new grammy_1.InlineKeyboard();
+    const seenSupIds = new Set();
+    for (const it of topItems) {
+        if (it.supplierId && !seenSupIds.has(it.supplierId) && seenSupIds.size < 3) {
+            seenSupIds.add(it.supplierId);
+            kb.text(`🏢 ${it.partyName.slice(0, 28)}`, `sup:v:${it.supplierId}`).row();
+        }
+    }
+    const header = items.length > topItems.length
+        ? `🔎 **"${(0, telegram_1.sanitizeMdV1)(query)}" bo'yicha top-${topItems.length} natija (jami ${items.length} ta):**\n\n`
+        : '';
+    return (0, telegram_1.safeReply)(ctx, header + topItems.map((i) => i.formattedCard).join('\n\n────────────────────\n\n'), {
+        reply_markup: kb.inline_keyboard.length > 0 ? kb : undefined,
+    });
+}
+async function handleZeroMenuDebtLookup(ctx, ownerId, rawName) {
+    const query = (0, transliterate_1.toLatinUz)(rawName || '').trim();
+    const isAll = !query || query.toUpperCase() === 'ALL';
+    const [allSuppliers, allDebts] = await Promise.all([
+        prisma_1.prisma.supplier.findMany({
+            where: { ownerId, isActive: true },
+            orderBy: [{ debtUzs: 'desc' }, { debtUsd: 'desc' }],
+            select: { id: true, name: true, debtUzs: true, debtUsd: true },
+        }),
+        prisma_1.prisma.customerDebt.findMany({
+            where: { ownerId, status: { in: ['PENDING', 'PARTIALLY_PAID'] } },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, customerName: true, amount: true, paidAmount: true, currency: true },
+        }),
+    ]);
+    const customerMap = new Map();
+    for (const d of allDebts) {
+        const rem = Number((Number(d.amount) - Number(d.paidAmount)).toFixed(2));
+        if (rem <= 0)
+            continue;
+        const cleanCust = (0, transliterate_1.toLatinUz)(d.customerName).trim();
+        const key = cleanCust.toLowerCase();
+        const existing = customerMap.get(key) || {
+            name: cleanCust,
+            searchName: (0, transliterate_1.normalizeForSearch)(cleanCust),
+            firstId: d.id,
+            uzs: 0,
+            usd: 0,
+        };
+        if (d.currency === 'USD')
+            existing.usd = Number((existing.usd + rem).toFixed(2));
+        else
+            existing.uzs = Number((existing.uzs + rem).toFixed(2));
+        customerMap.set(key, existing);
+    }
+    const customers = Array.from(customerMap.values()).sort((a, b) => b.uzs - a.uzs || b.usd - a.usd);
+    if (isAll) {
+        const activeDebtSuppliers = allSuppliers.filter((s) => Math.abs(Number(s.debtUzs)) > 0.001 || Math.abs(Number(s.debtUsd)) > 0.001);
+        const totalSupUzs = Number(allSuppliers.reduce((acc, s) => acc + Number(s.debtUzs || 0), 0).toFixed(2));
+        const totalSupUsd = Number(allSuppliers.reduce((acc, s) => acc + Number(s.debtUsd || 0), 0).toFixed(2));
+        const totalCustUzs = Number(customers.reduce((acc, c) => acc + c.uzs, 0).toFixed(2));
+        const totalCustUsd = Number(customers.reduce((acc, c) => acc + c.usd, 0).toFixed(2));
+        const lines = ['📊 **Umumiy qarzlar holati:**', ''];
+        lines.push(`🏢 **Ta'minotchilarga qarzimiz (${activeDebtSuppliers.length} ta):**`, `• UZS: **${(0, formatters_1.formatSom)(totalSupUzs)}**`, `• USD: **${(0, formatters_1.formatUsd)(totalSupUsd, true)}**`);
+        for (const s of activeDebtSuppliers.slice(0, 5)) {
+            const parts = [];
+            if (Math.abs(Number(s.debtUzs)) > 0.001)
+                parts.push((0, formatters_1.formatSom)(s.debtUzs));
+            if (Math.abs(Number(s.debtUsd)) > 0.001)
+                parts.push((0, formatters_1.formatUsd)(s.debtUsd));
+            lines.push(`  – ${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(s.name))}: ${parts.join(' | ')}`);
+        }
+        lines.push('');
+        lines.push(`👥 **Mijozlar nasiyasi (${customers.length} ta):**`, `• UZS: **${(0, formatters_1.formatSom)(totalCustUzs)}**`, `• USD: **${(0, formatters_1.formatUsd)(totalCustUsd, true)}**`);
+        for (const c of customers.slice(0, 5)) {
+            const parts = [];
+            if (c.uzs > 0)
+                parts.push((0, formatters_1.formatSom)(c.uzs));
+            if (c.usd > 0)
+                parts.push((0, formatters_1.formatUsd)(c.usd));
+            lines.push(`  – ${(0, telegram_1.sanitizeMdV1)(c.name)}: ${parts.join(' | ')}`);
+        }
+        const kb = new grammy_1.InlineKeyboard()
+            .text("📦 Ta'minotchilar", 'sup:p:1')
+            .text('👥 Nasiyadorlar', 'debt:p:1');
+        return (0, telegram_1.safeReply)(ctx, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    const normQuery = (0, transliterate_1.normalizeForSearch)(query);
+    const supplierDocs = allSuppliers.map((s) => ({
+        ...s,
+        latinName: (0, transliterate_1.toLatinUz)(s.name),
+        searchName: (0, transliterate_1.normalizeForSearch)(s.name),
+    }));
+    let matchedSuppliers = supplierDocs.filter((s) => s.searchName === normQuery || s.searchName.includes(normQuery) || normQuery.includes(s.searchName));
+    if (!matchedSuppliers.length && supplierDocs.length > 0) {
+        const fuzzySup = await supplier_service_1.SupplierService.findOrSuggestSupplier(query, ownerId);
+        const direct = fuzzySup.supplier || fuzzySup.suggestedSupplier;
+        if (direct) {
+            const doc = supplierDocs.find((s) => s.id === direct.id);
+            if (doc)
+                matchedSuppliers = [doc];
+        }
+        if (!matchedSuppliers.length) {
+            matchedSuppliers = new fuse_js_1.default(supplierDocs, {
+                keys: ['searchName'],
+                threshold: 0.35,
+                ignoreLocation: true,
+            })
+                .search(normQuery)
+                .slice(0, 3)
+                .map((r) => r.item);
+        }
+    }
+    matchedSuppliers = matchedSuppliers.slice(0, 3);
+    let matchedCustomers = customers.filter((c) => c.searchName === normQuery || c.searchName.includes(normQuery) || normQuery.includes(c.searchName));
+    if (!matchedCustomers.length && customers.length > 0) {
+        matchedCustomers = new fuse_js_1.default(customers, {
+            keys: ['searchName'],
+            threshold: 0.35,
+            ignoreLocation: true,
+        })
+            .search(normQuery)
+            .slice(0, 3)
+            .map((r) => r.item);
+    }
+    matchedCustomers = matchedCustomers.slice(0, 3);
+    if (!matchedSuppliers.length && !matchedCustomers.length) {
+        return ctx.reply(`🤷‍♂️ "${query}" bo'yicha ta'minotchi yoki nasiyador topilmadi.`);
+    }
+    const blocks = [];
+    const kb = new grammy_1.InlineKeyboard();
+    for (const sup of matchedSuppliers) {
+        const bal = await supplier_service_1.SupplierService.getSupplierBalance(ownerId, sup.id);
+        const uzsLine = bal.debtUzs >= 0
+            ? `💰 Qarz (UZS): **${(0, formatters_1.formatSom)(bal.debtUzs)}**`
+            : `🟢 Haqimiz (UZS): **${(0, formatters_1.formatSom)(Math.abs(bal.debtUzs))}**`;
+        const usdLine = bal.debtUsd >= 0
+            ? `💵 Qarz (USD): **${(0, formatters_1.formatUsd)(bal.debtUsd, true)}**`
+            : `🟢 Haqimiz (USD): **${(0, formatters_1.formatUsd)(Math.abs(bal.debtUsd), true)}**`;
+        blocks.push(`🏢 **Ta'minotchi:** ${(0, telegram_1.sanitizeMdV1)(sup.latinName)}\n${uzsLine}\n${usdLine}`);
+        kb.text(`🏢 ${sup.latinName.slice(0, 28)} kartasi`, `sup:v:${sup.id}`).row();
+    }
+    for (const cust of matchedCustomers) {
+        blocks.push(`👤 **Mijoz (Nasiya):** ${(0, telegram_1.sanitizeMdV1)(cust.name)}\n` +
+            `💰 Qarz (UZS): **${(0, formatters_1.formatSom)(cust.uzs)}**\n` +
+            `💵 Qarz (USD): **${(0, formatters_1.formatUsd)(cust.usd, true)}**`);
+        kb.text(`👤 ${cust.name.slice(0, 28)}`, `debt:v:${cust.firstId}`).row();
+    }
+    return (0, telegram_1.safeReply)(ctx, `📊 **Qarz ma'lumoti:**\n\n${blocks.join('\n\n────────────────\n\n')}`, {
+        parse_mode: 'Markdown',
+        reply_markup: kb.inline_keyboard.length > 0 ? kb : undefined,
+    });
+}
+async function handleZeroMenuSupplierReturn(ctx, ownerId, intentData) {
+    const rawName = (0, transliterate_1.toLatinUz)(intentData.supplierName || intentData.name || '').trim();
+    const amount = Number(Math.abs(Number(intentData.amount || 0)).toFixed(2));
+    const currency = (intentData.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
+    const note = (0, transliterate_1.toLatinUz)(String(intentData.note || intentData.comment || '')).trim() || undefined;
+    if (!rawName || rawName.length < 2) {
+        return ctx.reply("❌ Vozvrat uchun ta'minotchi nomini aniqroq yozing. Masalan: `Milloraga 250 ming yog' vozvrat`", {
+            parse_mode: 'Markdown',
+        });
+    }
+    if (!amount || amount <= 0 || isNaN(amount)) {
+        return ctx.reply("❌ Vozvrat summasini aniqlab bo'lmadi. Masalan: `Milloraga 250 ming vozvrat`", {
+            parse_mode: 'Markdown',
+        });
+    }
+    if (amount > 10_000_000_000) {
+        return ctx.reply("❌ Kiritilgan summa o'ta katta (maks: 10 mlrd). Tekshirib qayta yuboring.");
+    }
+    let targetSupplier = null;
+    if (intentData.exactSupplierId && intentData.exactSupplierId !== 'CREATE_NEW') {
+        targetSupplier = await prisma_1.prisma.supplier.findFirst({
+            where: { id: intentData.exactSupplierId, ownerId },
+            select: { id: true, name: true },
+        });
+    }
+    if (!targetSupplier) {
+        const fuzzyCheck = await supplier_service_1.SupplierService.findOrSuggestSupplier(rawName, ownerId);
+        const matched = fuzzyCheck.supplier || fuzzyCheck.suggestedSupplier;
+        if (matched) {
+            targetSupplier = { id: matched.id, name: matched.name };
+        }
+    }
+    if (!targetSupplier) {
+        return ctx.reply(`🤷‍♂️ "${rawName}" ismli ta'minotchi bazadan topilmadi. Avval ta'minotchi nomini tekshiring yoki 📦 Ta'minotchilar bo'limidan tanlang.`);
+    }
+    const res = await supplier_service_1.SupplierService.addSupplierReturn(ownerId, targetSupplier.id, amount, currency, note);
+    const safeSupName = (0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(res.supplier.name));
+    const noteLine = note ? `📝 Izoh: ${(0, telegram_1.sanitizeMdV1)(note)}\n` : '';
+    const uzsLine = res.balance.debtUzs >= 0
+        ? `💰 Joriy qarz (UZS): **${(0, formatters_1.formatSom)(res.balance.debtUzs)}**`
+        : `🟢 Haqimiz (UZS): **${(0, formatters_1.formatSom)(Math.abs(res.balance.debtUzs))}**`;
+    const usdLine = res.balance.debtUsd >= 0
+        ? `💵 Joriy qarz (USD): **${(0, formatters_1.formatUsd)(res.balance.debtUsd, true)}**`
+        : `🟢 Haqimiz (USD): **${(0, formatters_1.formatUsd)(Math.abs(res.balance.debtUsd), true)}**`;
+    const kb = new grammy_1.InlineKeyboard()
+        .text('🗑 Bekor qilish', `vret:undo:${res.transaction.id}`)
+        .text("🏢 Ta'minotchi kartasi", `sup:v:${res.supplier.id}`);
+    return (0, telegram_1.safeReply)(ctx, `✅ **Vozvrat (Tovar qaytarish) saqlandi!**\n\n` +
+        `🏢 Ta'minotchi: **${safeSupName}**\n` +
+        `🔄 Vozvrat summasi: **-${(0, formatters_1.formatCurrency)(amount, currency)}**\n` +
+        noteLine +
+        `_Kassa naqd puliga ta'sir qilmadi._\n\n` +
+        `${uzsLine}\n${usdLine}`, { parse_mode: 'Markdown', reply_markup: kb });
+}
 async function processIntent(ctx, intentData) {
     if (!ctx.from)
         return;
@@ -106,19 +322,13 @@ async function processIntent(ctx, intentData) {
     if (intentData.intent === 'GENERAL_CHAT')
         return ctx.reply(intentData.replyText || 'Savolingizga javob topa olmadim.');
     if (intentData.intent === 'SEARCH_PRODUCT') {
-        const query = intentData.name || '';
-        const items = await search_service_1.SearchService.searchProductsWithPriceDiff(query, ownerId);
-        if (!items.length)
-            return ctx.reply(`🤷‍♂️ "${query}" nomli mahsulot topilmadi.`);
-        return (0, telegram_1.safeReply)(ctx, items.slice(0, 8).map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
+        return handleZeroMenuProductSearch(ctx, ownerId, intentData.name || intentData.supplierName || '');
     }
     if (intentData.intent === 'GET_DEBT_INFO') {
-        const name = (0, transliterate_1.toLatinUz)(intentData.name || '');
-        const matchRes = await supplier_service_1.SupplierService.findOrSuggestSupplier(name, ownerId);
-        const supplier = matchRes.supplier || matchRes.suggestedSupplier;
-        if (!supplier)
-            return ctx.reply(`🤷‍♂️ "${name}" ismli ta'minotchi topilmadi.`);
-        return (0, telegram_1.safeReply)(ctx, `📊 **Qarz ma'lumoti:**\n\n🏢 Ta'minotchi: **${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(supplier.name))}**\n💰 Qarz (UZS): **${(0, formatters_1.formatCurrency)(supplier.debtUzs, 'UZS')}**\n💵 Qarz (USD/USDT): **${(0, formatters_1.formatCurrency)(supplier.debtUsd, 'USD', true)}**`, { parse_mode: 'Markdown' });
+        return handleZeroMenuDebtLookup(ctx, ownerId, intentData.name || intentData.supplierName || 'ALL');
+    }
+    if (intentData.intent === 'ADD_SUPPLIER_RETURN') {
+        return handleZeroMenuSupplierReturn(ctx, ownerId, intentData);
     }
     // Normalize local parser intents into unified voice confirmation intents
     if (intentData.intent === 'INVOICE_CASH') {
@@ -360,10 +570,37 @@ exports.voiceHandler.on('message:voice', async (ctx, next) => {
         }
     });
 });
+exports.voiceHandler.callbackQuery(/^vret:undo:(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const txId = ctx.match[1];
+    try {
+        const res = await supplier_service_1.SupplierService.deleteSupplierRecord(ownerId, 'VOZVRAT', txId);
+        const uzsLine = res.balance.debtUzs >= 0
+            ? `💰 Joriy qarz (UZS): **${(0, formatters_1.formatSom)(res.balance.debtUzs)}**`
+            : `🟢 Haqimiz (UZS): **${(0, formatters_1.formatSom)(Math.abs(res.balance.debtUzs))}**`;
+        const usdLine = res.balance.debtUsd >= 0
+            ? `💵 Joriy qarz (USD): **${(0, formatters_1.formatUsd)(res.balance.debtUsd, true)}**`
+            : `🟢 Haqimiz (USD): **${(0, formatters_1.formatUsd)(Math.abs(res.balance.debtUsd), true)}**`;
+        await ctx.answerCallbackQuery({ text: '🗑 Vozvrat bekor qilindi!' });
+        if (ctx.callbackQuery.message && ctx.chat?.id) {
+            await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `🗑 **Vozvrat bekor qilindi va balans tiklandi!**\n\n` +
+                `🏢 Ta'minotchi: **${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(res.supplier.name))}**\n` +
+                `↩️ Qaytarilgan summa: ${(0, formatters_1.formatCurrency)(res.deletedAmount, res.currency)}\n\n` +
+                `${uzsLine}\n${usdLine}`, { parse_mode: 'Markdown' });
+        }
+    }
+    catch (err) {
+        await ctx.answerCallbackQuery({
+            text: err?.message || 'Ushbu vozvrat topilmadi yoki allaqachon bekor qilingan.',
+            show_alert: true,
+        });
+    }
+});
 exports.voiceHandler.on('message:text', async (ctx, next) => {
     if (!ctx.user || !ctx.from || ctx.message.text.startsWith('/'))
         return next();
-    const ownerId = String(ctx.from.id);
     const text = ctx.message.text.trim();
     if ((0, menu_1.isMenuButton)(text)) {
         (0, telegram_1.clearSession)(ctx);
@@ -396,12 +633,6 @@ exports.voiceHandler.on('message:text', async (ctx, next) => {
     // MODUL 2: Instant Local Text Parser (<0.001s, 100% AI-free — never hits AI rate limits!)
     const localParsed = (0, local_parser_1.parseTextCommandLocally)(text);
     if (localParsed) {
-        if (localParsed.intent === 'SEARCH_PRODUCT') {
-            const items = await search_service_1.SearchService.searchProductsWithPriceDiff(localParsed.name, ownerId);
-            if (!items.length)
-                return ctx.reply(`🤷‍♂️ "${localParsed.name}" nomli tovar bazadan topilmadi.`);
-            return (0, telegram_1.safeReply)(ctx, items.slice(0, 8).map((i) => i.formattedCard).join('\n\n────────────────────\n\n'));
-        }
         return processIntent(ctx, localParsed);
     }
     await (0, telegram_1.withChatAction)(ctx, 'typing', async () => {
@@ -411,8 +642,10 @@ exports.voiceHandler.on('message:text', async (ctx, next) => {
         catch (error) {
             logger_1.logger.error({ error }, 'Error parsing text intent');
             await ctx.reply(`🤔 Ushbu matnni tushunib bo'lmadi. Iltimos, quyidagi ko'rinishda yozing:\n` +
+                `• Narx so'rash: \`ole narxi\` yoki \`makaron qancha\`\n` +
+                `• Qarz so'rash: \`Millora qarz\` yoki \`qarzlarim\`\n` +
+                `• Vozvrat: \`Milloraga 250 ming yog' vozvrat\`\n` +
                 `• Naqd xarid: \`Sirok 500.000 naqd\`\n` +
-                `• Nasiya yuk: \`Dinar +811.432\`\n` +
                 `• Qarzdan to'lov: \`Milter -500.000\``, { parse_mode: 'Markdown' });
         }
     });

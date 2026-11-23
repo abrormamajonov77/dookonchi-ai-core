@@ -97,6 +97,7 @@ exports.VoiceIntentSchema = zod_1.z.object({
     intent: zod_1.z.enum([
         'ADD_EXPENSE',
         'ADD_SUPPLIER_TX',
+        'ADD_SUPPLIER_RETURN',
         'ADD_CUSTOMER_DEBT',
         'ADD_CASH_TX',
         'SEARCH_PRODUCT',
@@ -104,23 +105,28 @@ exports.VoiceIntentSchema = zod_1.z.object({
         'GENERAL_CHAT',
         'UNKNOWN',
     ]),
-    txType: zod_1.z.enum(['INCOMING_GOODS', 'PAYMENT']).optional().nullable(),
+    txType: zod_1.z.enum(['INCOMING_GOODS', 'PAYMENT', 'RETURN']).optional().nullable(),
     amount: zod_1.z.number().optional().nullable(),
     currency: zod_1.z.enum(['UZS', 'USD']).nullable().optional().default('UZS'),
     name: zod_1.z.string().optional().nullable(),
+    supplierName: zod_1.z.string().optional().nullable(),
     category: zod_1.z.string().optional().nullable(),
     comment: zod_1.z.string().optional().nullable(),
+    note: zod_1.z.string().optional().nullable(),
     replyText: zod_1.z.string().optional().nullable(),
 });
 const INTENT_RULES = `Maqsadlar (intent):
-- ADD_EXPENSE: Xarajat kiritish (masalan: "Ijaraga 500 dollar berdim", "Elektrga 200 ming so'm to'ladim").
+- ADD_EXPENSE: Xarajat / rasxod kiritish (masalan: "Ijaraga 500 dollar berdim", "Svetga 300 ming rasxod", "Elektrga 200 ming so'm to'ladim").
 - ADD_SUPPLIER_TX: Ta'minotchi bilan oldi-berdi amaliyoti (qarzga).
   * Agar "Yuk keldi / yuk chiqdi / yuk oldik" yoki musbat amaliyot bo'lsa -> txType="INCOMING_GOODS".
   * Agar "Pul berdik / to'ladik / to'lov qildim / qarzdan ayir / ayirdim" yoki manfiy amaliyot bo'lsa -> txType="PAYMENT".
+- ADD_SUPPLIER_RETURN: Ta'minotchiga tovar qaytarish / vozvrat (masalan: "Milloraga 250 ming yog' vozvrat", "Millora 50 dollar vozvrat", "Azamatga 150 ming singan tovar qaytardim").
+  * Majburiy maydonlar: { "intent": "ADD_SUPPLIER_RETURN", "supplierName": "Millora", "name": "Millora", "amount": 250000, "currency": "UZS"|"USD", "note": "yog' singan" }.
+  * Ta'minotchi nomidan -ga/-dan qo'shimchalarini olib tashla ("Milloraga" -> "Millora").
 - ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim").
 - ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi.
-- SEARCH_PRODUCT: Tovarni qidirish (masalan: "Kola narxi qancha?").
-- GET_DEBT_INFO: FAQAT qarz miqdorini SO'RASH (masalan: "Milterdan qancha qarzim bor?").
+- SEARCH_PRODUCT: Mahsulot narxini yoki oxirgi kelish narxini so'rash (masalan: "ole narxi", "makaron qancha", "un oxirgi narxi", "shakar bahosi", "Kola necha pul?"). "name" maydoniga faqat toza mahsulot nomini yoz (masalan: "ole", "makaron", "un").
+- GET_DEBT_INFO: Ta'minotchi yoki mijoz qarzini SO'RASH (masalan: "Millora qarz", "Millora qarzi qancha", "Millora hisob", "Milterdan qancha qarzim bor?", "Rustam qarzi", "qarzlarim"). Agar umumiy hamma qarzlar so'ralgan bo'lsa ("qarzlarim", "barcha qarzlar"), "name": "ALL" qilib qaytar; aniq shaxs/ta'minotchi bo'lsa uning toza nomini yoz.
 - GENERAL_CHAT: Erkin savdo maslahati.
 - UNKNOWN: Tushunarsiz bo'lsa.
 Javob faqat JSON formatda bo'lsin.`;
@@ -601,8 +607,17 @@ class AiService {
             if (raw.amount !== undefined && raw.amount !== null) {
                 raw.amount = Number(Number(Math.abs(raw.amount)).toFixed(2));
             }
-            if (raw.name) {
-                raw.name = (0, transliterate_1.toLatinUz)(String(raw.name));
+            const resolvedName = raw.supplierName || raw.name;
+            if (resolvedName) {
+                const latinName = (0, transliterate_1.toLatinUz)(String(resolvedName)).trim();
+                raw.name = latinName;
+                raw.supplierName = latinName;
+            }
+            const resolvedNote = raw.note || raw.comment;
+            if (resolvedNote) {
+                const latinNote = (0, transliterate_1.toLatinUz)(String(resolvedNote)).trim();
+                raw.note = latinNote;
+                raw.comment = latinNote;
             }
             return exports.VoiceIntentSchema.parse(raw);
         }, 2, 800, 30000);
@@ -625,8 +640,17 @@ class AiService {
             else if (raw.amount !== undefined && raw.amount !== null) {
                 raw.amount = Number(Number(Math.abs(raw.amount)).toFixed(2));
             }
-            if (raw.name) {
-                raw.name = (0, transliterate_1.toLatinUz)(String(raw.name));
+            const resolvedName = raw.supplierName || raw.name;
+            if (resolvedName) {
+                const latinName = (0, transliterate_1.toLatinUz)(String(resolvedName)).trim();
+                raw.name = latinName;
+                raw.supplierName = latinName;
+            }
+            const resolvedNote = raw.note || raw.comment;
+            if (resolvedNote) {
+                const latinNote = (0, transliterate_1.toLatinUz)(String(resolvedNote)).trim();
+                raw.note = latinNote;
+                raw.comment = latinNote;
             }
             return exports.VoiceIntentSchema.parse(raw);
         }, 2, 800, 30000);

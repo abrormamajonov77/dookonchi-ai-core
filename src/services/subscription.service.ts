@@ -187,6 +187,31 @@ function extractTokensFromPart(part: string): { days: number; months: number; la
   return { days, months, label: labels.join(' ') };
 }
 
+export const AUTO_TRIAL_DAYS = 7;
+export const AUTO_TRIAL_PLAN_NAME = '7 kunlik sinov (Trial)';
+
+/**
+ * Determines whether a user is eligible for the automatic 7-day free trial.
+ * Strictly preserves Super-Admin bypass and prevents BLOCKED, PAUSED, EXPIRED,
+ * or previously-trialed/approved users from receiving another free trial.
+ */
+export function isEligibleForAutoTrial(user: {
+  telegramId: string;
+  role?: string | null;
+  status: string;
+  subscriptionPlan?: string | null;
+  subscriptionExpiresAt?: Date | string | null;
+  approvedAt?: Date | string | null;
+}): boolean {
+  if (SubscriptionService.isSuperAdmin(user.telegramId) || user.role === 'SUPER_ADMIN') {
+    return false;
+  }
+  if (user.status !== 'PENDING') {
+    return false;
+  }
+  return !user.subscriptionExpiresAt && !user.approvedAt && !user.subscriptionPlan;
+}
+
 export class SubscriptionService {
   static isSuperAdmin(telegramId: string | number | bigint): boolean {
     return String(telegramId).trim() === String(env.OWNER_TELEGRAM_ID).trim();
@@ -227,14 +252,94 @@ export class SubscriptionService {
 
   static buildWelcomePendingMessage(): string {
     return (
-      `👋 Assalomu alaykum! SmartBaqqol (Do'konchi AI) botiga xush kelibsiz!\n\n` +
+      `👋 Assalomu alaykum! Do'konchi AI (SmartBaqqol) botiga xush kelibsiz!\n\n` +
       `🤖 Ushbu bot orqali siz o'z do'koningiz uchun alohida shaxsiy bazada:\n` +
-      `• Nakladnoylarni 3 soniyada skaner qilib o'qish\n` +
-      `• Ta'minotchilar qarzi (So'm va USD) hisobini yuritish\n` +
-      `• Mahsulot narxlari oshgani yoki tushganini kuzatish\n` +
-      `• Kunlik Z-Otchyot, Haftalik/Oylik Naqd va Nasiya tahlili hamda Excel/PDF hisobotlarni yuritishingiz mumkin.\n\n` +
-      `⏳ So'rovingiz qabul qilindi! Tez orada Admin sizga botdan foydalanishingiz uchun ruxsat beradi. Ruxsat berilishi bilan sizga shu yerda xabar keladi.`
+      `• Nakladnoylarni rasm orqali 3 soniyada o'qib, narx oshishini kuzatish\n` +
+      `• Ta'minotchilar qarzi, vozvrat va sverka (PDF) hisobini yuritish\n` +
+      `• Menyusiz matn va ovozli xabar orqali 1 soniyada ish yuritish\n` +
+      `• Kunlik Z-Hisobot va haftalik/oylik tahlillarni olishingiz mumkin.\n\n` +
+      `🎁 7 kunlik BEPUL sinov (Trial) muddatini darhol faollashtirish uchun pastdagi tugma orqali telefon raqamingizni yuboring 👇`
     );
+  }
+
+  static buildTrialOnboardingMessage(params: {
+    fullName?: string | null;
+    expiresAt: Date;
+  }): string {
+    const cleanName = String(params.fullName || "Do'kon egasi").replace(/[*_`\[\]]/g, '').trim() || "Do'kon egasi";
+    const expStr = formatDateShort(params.expiresAt);
+    return (
+      `🎉 Tabriklaymiz, *${cleanName}*! Sizga *7 kunlik bepul sinov (Trial)* faollashtirildi (${expStr} gacha).\n\n` +
+      `⚡️ *30 soniyada ishni boshlang:*\n\n` +
+      `📸 *1. Nakladnoy tashlang:* Yuk kelganda chekni rasmga olib yuboring — bot o'zi o'qib, narxlarni solishtiradi.\n\n` +
+      `🔎 *2. Menyusiz so'rang:* Shunchaki \`"ole narxi"\` yoki \`"Millora qarz"\` deb yozing — 1 soniyada javob olasiz.\n\n` +
+      `🎙 *3. Ovozli boshqaring:* \`"Svetga 300 ming rasxod"\` yoki \`"Milloraga 250 ming vozvrat"\` deb ovozli xabar tashlang.\n\n` +
+      `👇 Shaxsiy bazangiz tayyor! Pastdagi menyudan foydalaning yoki to'g'ridan-to'g'ri yozing:`
+    );
+  }
+
+  static buildAdminTrialStartedMessage(user: {
+    fullName?: string | null;
+    name?: string | null;
+    phone?: string | null;
+  }): string {
+    const displayName = (user.fullName || user.name || "Do'kon egasi").trim();
+    const phone = (user.phone || 'Kiritilmagan').trim();
+    return `🆕 Yangi foydalanuvchi 7 kunlik sinov (Trial) boshladi: ${displayName} (${phone})`;
+  }
+
+  static async activateAutoTrialOnContact(params: {
+    telegramId: string | number | bigint;
+    fullName?: string | null;
+    username?: string | null;
+    phone: string;
+    now?: Date;
+  }) {
+    const now = params.now || new Date();
+    const telegramId = String(params.telegramId).trim();
+    const { user } = await this.registerOrGetUser({
+      telegramId,
+      fullName: params.fullName,
+      username: params.username,
+      phone: params.phone,
+    });
+
+    if (!isEligibleForAutoTrial(user)) {
+      return {
+        activated: false as const,
+        user,
+        expiresAt: user.subscriptionExpiresAt ? new Date(user.subscriptionExpiresAt) : null,
+        onboardingMessage: null,
+        adminNotification: null,
+      };
+    }
+
+    const expiresAt = new Date(now.getTime() + AUTO_TRIAL_DAYS * 24 * 60 * 60 * 1000);
+    const updatedUser = await prisma.user.update({
+      where: { telegramId },
+      data: {
+        status: 'ACTIVE',
+        subscriptionPlan: AUTO_TRIAL_PLAN_NAME,
+        subscriptionExpiresAt: expiresAt,
+        approvedAt: now,
+        lastReminderSentAt: null,
+        phone: params.phone,
+      },
+    });
+
+    invalidateUserCache(telegramId);
+    setCachedUser(telegramId, updatedUser);
+
+    return {
+      activated: true as const,
+      user: updatedUser,
+      expiresAt,
+      onboardingMessage: this.buildTrialOnboardingMessage({
+        fullName: updatedUser.fullName || updatedUser.name,
+        expiresAt,
+      }),
+      adminNotification: this.buildAdminTrialStartedMessage(updatedUser),
+    };
   }
 
   static buildAdminNewUserRequestMessage(user: {

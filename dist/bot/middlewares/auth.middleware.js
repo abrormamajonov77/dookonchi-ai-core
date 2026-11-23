@@ -43,14 +43,26 @@ async function authMiddleware(ctx, next) {
     if (user.status === 'ACTIVE') {
         return next();
     }
-    // Allow registration, /start, contact sharing, payment screenshot submission, and replying to Admin
+    // Strictly keep BLOCKED and PAUSED users gated (except replying to Admin messages)
     const msgText = ctx.message?.text?.trim() || '';
     const cbData = ctx.callbackQuery?.data || '';
     const hasContact = !!ctx.message?.contact;
     const hasPhoto = !!ctx.message?.photo;
     const sessionStep = ctx.session?.step || '';
+    if (user.status === 'BLOCKED') {
+        await ctx.reply("⛔️ Kechirasiz, sizning hisobingiz bloklangan.");
+        return;
+    }
+    if (user.status === 'PAUSED') {
+        if (cbData === 'user_reply_admin' || sessionStep === 'USER_REPLY_TO_ADMIN') {
+            return next();
+        }
+        await ctx.reply("⏸ Sizning obunangiz Admin tomonidan vaqtincha to'xtatilgan. Shaxsiy bazangizdagi barcha ma'lumotlar xavfsiz saqlanmoqda.");
+        return;
+    }
+    // Allow registration, /start, contact sharing (for 7-day auto-trial), payment screenshot submission, and replying to Admin
     if (msgText.startsWith('/start') ||
-        hasContact ||
+        (hasContact && user.status === 'PENDING') ||
         cbData === 'sub:send_receipt' ||
         cbData === 'user_reply_admin' ||
         sessionStep === 'AWAIT_SUBSCRIPTION_RECEIPT' ||
@@ -68,14 +80,6 @@ async function authMiddleware(ctx, next) {
     if (user.status === 'EXPIRED') {
         const kb = new grammy_1.InlineKeyboard().text("📸 To'lov chekini (skrinshot) yuborish", 'sub:send_receipt');
         await ctx.reply("⏳ Obuna muddatingiz yakunlandi. Davom ettirish uchun to'lov cheki (skrinshot) rasmini yuboring:", { reply_markup: kb });
-        return;
-    }
-    if (user.status === 'PAUSED') {
-        await ctx.reply("⏸ Sizning obunangiz Admin tomonidan vaqtincha to'xtatilgan. Shaxsiy bazangizdagi barcha ma'lumotlar xavfsiz saqlanmoqda.");
-        return;
-    }
-    if (user.status === 'BLOCKED') {
-        await ctx.reply("⛔️ Kechirasiz, sizning hisobingiz bloklangan.");
         return;
     }
 }
