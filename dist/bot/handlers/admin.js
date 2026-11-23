@@ -3,10 +3,14 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.adminHandler = void 0;
 exports.getAdminMainPanelKeyboard = getAdminMainPanelKeyboard;
 exports.showSubscriberDetail = showSubscriberDetail;
+exports.getOnboardingMediaPanelKeyboard = getOnboardingMediaPanelKeyboard;
+exports.showOnboardingMediaPanel = showOnboardingMediaPanel;
 const grammy_1 = require("grammy");
 const prisma_1 = require("../../database/prisma");
 const env_1 = require("../../config/env");
 const subscription_service_1 = require("../../services/subscription.service");
+const onboarding_service_1 = require("../../services/onboarding.service");
+const start_1 = require("./start");
 const formatters_1 = require("../../utils/formatters");
 const telegram_1 = require("../../utils/telegram");
 const inline_1 = require("../keyboards/inline");
@@ -52,6 +56,8 @@ function getAdminMainPanelKeyboard() {
         .row()
         .text('💳 Karta va Obuna narxini sozlash', 'adm:settings')
         .row()
+        .text('🎬 Yo‘riqnoma media', 'adm:onb_media')
+        .row()
         .text('💬 Mijozga shaxsiy xabar yozish', 'adm:dm_list:1')
         .row()
         .text("📢 Umumiy E'lon yuborish (Rassilka)", 'adm:broadcast')
@@ -70,7 +76,7 @@ async function showAdminMainPanel(ctx, isEdit = false) {
         `⏳ Yangi so'rovlar: **${stats.pendingUsers} ta** | 🧾 Cheklar: **${stats.pendingPaymentsCount} ta**\n` +
         `💰 Shu oylik daromad: **${(0, formatters_1.formatSom)(stats.monthlyRevenueUzs)}**\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Quyidagi 6 ta boshqaruv bo'limidan birini tanlang:`;
+        `Quyidagi boshqaruv bo'limlaridan birini tanlang:`;
     await (0, telegram_1.replyOrEdit)(ctx, text, getAdminMainPanelKeyboard(), isEdit);
 }
 exports.adminHandler.hears('👑 Admin Panel', async (ctx) => {
@@ -474,11 +480,97 @@ exports.adminHandler.callbackQuery('adm:stats', async (ctx) => {
     await (0, telegram_1.replyOrEdit)(ctx, stats.formattedText, kb, true);
 });
 // ============================================================================
+// 7. 🎬 Yo‘riqnoma Media Boshqaruvi (Super-Admin Only)
+// ============================================================================
+function getOnboardingMediaPanelKeyboard() {
+    return new grammy_1.InlineKeyboard()
+        .text('🎥 Kirish videosi', 'adm:onb_set:intro')
+        .row()
+        .text('🖼 Slayd 1', 'adm:onb_set:slide_1')
+        .text('🖼 Slayd 2', 'adm:onb_set:slide_2')
+        .row()
+        .text('🖼 Slayd 3', 'adm:onb_set:slide_3')
+        .text('🖼 Slayd 4', 'adm:onb_set:slide_4')
+        .row()
+        .text('👀 Sinab ko‘rish (Preview)', 'adm:onb_preview')
+        .text('🗑 Tozalash', 'adm:onb_clear')
+        .row()
+        .text('🔙 Admin Panelga qaytish', 'adm:panel');
+}
+function getUploadTargetLabel(target) {
+    switch (target) {
+        case 'intro':
+            return '🎥 Kirish videosi';
+        case 'slide_1':
+            return '🖼 Slayd 1 (1/4)';
+        case 'slide_2':
+            return '🖼 Slayd 2 (2/4)';
+        case 'slide_3':
+            return '🖼 Slayd 3 (3/4)';
+        case 'slide_4':
+            return '🖼 Slayd 4 (4/4)';
+    }
+}
+async function showOnboardingMediaPanel(ctx, isEdit = true) {
+    if (!ensureSuperAdmin(ctx))
+        return;
+    const media = await (0, onboarding_service_1.getOnboardingMedia)();
+    const introStatus = media.introVideoFileId
+        ? `✅ Yuklangan (${media.introVideoType === 'video_note' ? 'Krujochek' : 'Video'})`
+        : '⚪ Bo‘sh';
+    const slideStatus = (idx) => {
+        const item = media.slides[idx];
+        if (!item?.fileId)
+            return '⚪ Bo‘sh';
+        return `✅ Yuklangan (${item.type === 'animation' ? 'GIF' : 'Rasm'})`;
+    };
+    const text = `🎬 **YO‘RIQNOMA MEDIA BOSHQARUVI**\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `• 🎥 Kirish videosi: ${introStatus}\n` +
+        `• 🖼 Slayd 1 (Cheklarni o‘qish): ${slideStatus(1)}\n` +
+        `• 🖼 Slayd 2 (Menyusiz boshqaruv): ${slideStatus(2)}\n` +
+        `• 🖼 Slayd 3 (1 tugmada sverka): ${slideStatus(3)}\n` +
+        `• 🖼 Slayd 4 (CEO Dashboard): ${slideStatus(4)}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Yuklamoqchi bo‘lgan media joyini tanlang:`;
+    await (0, telegram_1.replyOrEdit)(ctx, text, getOnboardingMediaPanelKeyboard(), isEdit);
+}
+exports.adminHandler.callbackQuery('adm:onb_media', async (ctx) => {
+    if (!ensureSuperAdmin(ctx))
+        return;
+    (0, telegram_1.clearSession)(ctx);
+    await showOnboardingMediaPanel(ctx, true);
+});
+exports.adminHandler.callbackQuery(/^adm:onb_set:(intro|slide_[1-4])$/, async (ctx) => {
+    if (!ensureSuperAdmin(ctx))
+        return;
+    const target = ctx.match[1];
+    ctx.session.step = 'ADM_ONBOARDING_MEDIA_UPLOAD';
+    ctx.session.adminUploadTarget = target;
+    const kb = new grammy_1.InlineKeyboard().text('❌ Bekor qilish', 'adm:onb_media');
+    await ctx.reply(`📥 **${getUploadTargetLabel(target)}**\n\nShu yerga rasm, GIF (animation) yoki video yuboring:`, { parse_mode: 'Markdown', reply_markup: kb });
+});
+exports.adminHandler.callbackQuery('adm:onb_preview', async (ctx) => {
+    if (!ensureSuperAdmin(ctx))
+        return;
+    await ctx.answerCallbackQuery({ text: '👀 Yo‘riqnoma sinovi yuborilmoqda...' }).catch(() => { });
+    await (0, start_1.sendOnboardingCarousel)(ctx, { includeIntroVideo: true });
+});
+exports.adminHandler.callbackQuery('adm:onb_clear', async (ctx) => {
+    if (!ensureSuperAdmin(ctx))
+        return;
+    (0, telegram_1.clearSession)(ctx);
+    await (0, onboarding_service_1.clearOnboardingMedia)();
+    await ctx.answerCallbackQuery({ text: '🗑 Barcha yo‘riqnoma medialari tozalandi!' }).catch(() => { });
+    await showOnboardingMediaPanel(ctx, true);
+});
+// ============================================================================
 // ADMIN TEXT / MEDIA INPUT HANDLER
 // ============================================================================
-exports.adminHandler.on(['message:text', 'message:photo', 'message:video'], async (ctx, next) => {
+exports.adminHandler.on(['message:text', 'message:photo', 'message:animation', 'message:video', 'message:video_note'], async (ctx, next) => {
     const step = ctx.session.step;
-    if (!step || !step.startsWith('ADM_'))
+    const uploadTarget = ctx.session.adminUploadTarget;
+    if ((!step || !step.startsWith('ADM_')) && !uploadTarget)
         return next();
     if (!ensureSuperAdmin(ctx))
         return next();
@@ -486,6 +578,49 @@ exports.adminHandler.on(['message:text', 'message:photo', 'message:video'], asyn
     if (text.startsWith('/') || (text && (0, menu_1.isMenuButton)(text))) {
         (0, telegram_1.clearSession)(ctx);
         return next();
+    }
+    // 0. Super-Admin Onboarding Media Upload (photo, animation/GIF, video, video_note)
+    if (uploadTarget || step === 'ADM_ONBOARDING_MEDIA_UPLOAD') {
+        const target = uploadTarget;
+        if (!target) {
+            (0, telegram_1.clearSession)(ctx);
+            return next();
+        }
+        if (target === 'intro') {
+            const videoNoteId = ctx.message.video_note?.file_id;
+            const videoId = ctx.message.video?.file_id;
+            if (videoNoteId) {
+                await (0, onboarding_service_1.setOnboardingIntroVideo)(videoNoteId, 'video_note');
+                (0, telegram_1.clearSession)(ctx);
+                await ctx.reply('✅ Saqlandi!');
+                return showOnboardingMediaPanel(ctx, false);
+            }
+            if (videoId) {
+                await (0, onboarding_service_1.setOnboardingIntroVideo)(videoId, 'video');
+                (0, telegram_1.clearSession)(ctx);
+                await ctx.reply('✅ Saqlandi!');
+                return showOnboardingMediaPanel(ctx, false);
+            }
+            await ctx.reply('⚠️ Kirish videosi uchun oddiy video yoki video-xabar (krujochek) yuboring:', { reply_markup: new grammy_1.InlineKeyboard().text('❌ Bekor qilish', 'adm:onb_media') });
+            return;
+        }
+        const slideIndex = Number(target.replace('slide_', ''));
+        const animationId = ctx.message.animation?.file_id;
+        const photoId = ctx.message.photo?.[ctx.message.photo.length - 1]?.file_id;
+        if (animationId) {
+            await (0, onboarding_service_1.setOnboardingSlideMedia)(slideIndex, animationId, 'animation');
+            (0, telegram_1.clearSession)(ctx);
+            await ctx.reply('✅ Saqlandi!');
+            return showOnboardingMediaPanel(ctx, false);
+        }
+        if (photoId) {
+            await (0, onboarding_service_1.setOnboardingSlideMedia)(slideIndex, photoId, 'photo');
+            (0, telegram_1.clearSession)(ctx);
+            await ctx.reply('✅ Saqlandi!');
+            return showOnboardingMediaPanel(ctx, false);
+        }
+        await ctx.reply('⚠️ Slayd uchun rasm yoki GIF (animation) yuboring:', { reply_markup: new grammy_1.InlineKeyboard().text('❌ Bekor qilish', 'adm:onb_media') });
+        return;
     }
     // 1. Custom Subscription Duration for User
     if (step === 'ADM_CUSTOM_DURATION' && text) {

@@ -58,6 +58,7 @@ const clearSession = (ctx) => {
     ctx.session.tempData = null;
     ctx.session.supplierEditRecord = null;
     ctx.session.supplierReturn = null;
+    ctx.session.adminUploadTarget = null;
 };
 exports.clearSession = clearSession;
 function sanitizeMdV1(text) {

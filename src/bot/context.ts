@@ -1,6 +1,7 @@
 import { Context, SessionFlavor } from 'grammy';
 import { Currency, User } from '@prisma/client';
 import { SupplierRecordCategory } from '../services/supplier.service';
+import { OnboardingUploadTarget } from '../services/onboarding.service';
 
 export interface SupplierEditRecordSession {
   recordType: SupplierRecordCategory;
@@ -22,5 +23,6 @@ export interface SessionData {
   tempData?: any;
   supplierEditRecord?: SupplierEditRecordSession | null;
   supplierReturn?: SupplierReturnSession | null;
+  adminUploadTarget?: OnboardingUploadTarget | null;
 }
 export interface MyContext extends Context, SessionFlavor<SessionData> { user?: User; }

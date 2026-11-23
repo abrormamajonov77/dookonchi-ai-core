@@ -47,6 +47,7 @@ export const clearSession = (ctx: MyContext) => {
   ctx.session.tempData = null;
   ctx.session.supplierEditRecord = null;
   ctx.session.supplierReturn = null;
+  ctx.session.adminUploadTarget = null;
 };
 
 export function sanitizeMdV1(text: string): string {

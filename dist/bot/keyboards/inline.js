@@ -17,6 +17,7 @@ exports.getSupplierCategoryListKeyboard = getSupplierCategoryListKeyboard;
 exports.getSupplierRecordDetailKeyboard = getSupplierRecordDetailKeyboard;
 exports.getSupplierRecordDeleteConfirmKeyboard = getSupplierRecordDeleteConfirmKeyboard;
 exports.getSupplierReturnCurrencyKeyboard = getSupplierReturnCurrencyKeyboard;
+exports.getOnboardingCarouselKeyboard = getOnboardingCarouselKeyboard;
 const grammy_1 = require("grammy");
 const formatters_1 = require("../../utils/formatters");
 const transliterate_1 = require("../../utils/transliterate");
@@ -216,4 +217,17 @@ function getSupplierReturnCurrencyKeyboard(supplierId) {
         .text('📋 Vozvratlar tarixi', `sup:cat:V:${supplierId}:1`)
         .row()
         .text('🔙 Orqaga', `sup:v:${supplierId}`);
+}
+function getOnboardingCarouselKeyboard(slideIndex) {
+    const kb = new grammy_1.InlineKeyboard();
+    if (slideIndex === 1) {
+        return kb.text('Keyingisi (2/4) ➡️', 'onb_slide:2');
+    }
+    if (slideIndex === 2) {
+        return kb.text('⬅️ Oldingi', 'onb_slide:1').text('Keyingisi (3/4) ➡️', 'onb_slide:3');
+    }
+    if (slideIndex === 3) {
+        return kb.text('⬅️ Oldingi', 'onb_slide:2').text('Keyingisi (4/4) ➡️', 'onb_slide:4');
+    }
+    return kb.text('⬅️ Oldingi', 'onb_slide:3').text('🚀 Ishni boshlash', 'onb_finish');
 }

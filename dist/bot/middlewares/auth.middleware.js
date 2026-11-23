@@ -60,8 +60,12 @@ async function authMiddleware(ctx, next) {
         await ctx.reply("⏸ Sizning obunangiz Admin tomonidan vaqtincha to'xtatilgan. Shaxsiy bazangizdagi barcha ma'lumotlar xavfsiz saqlanmoqda.");
         return;
     }
-    // Allow registration, /start, contact sharing (for 7-day auto-trial), payment screenshot submission, and replying to Admin
+    // Allow registration, /start, /help, onboarding carousel, contact sharing (for 7-day auto-trial), payment screenshot submission, and replying to Admin
     if (msgText.startsWith('/start') ||
+        msgText.startsWith('/help') ||
+        /^❓\s*Yo[‘'’`]?riqnoma$/i.test(msgText) ||
+        cbData.startsWith('onb_slide:') ||
+        cbData === 'onb_finish' ||
         (hasContact && user.status === 'PENDING') ||
         cbData === 'sub:send_receipt' ||
         cbData === 'user_reply_admin' ||

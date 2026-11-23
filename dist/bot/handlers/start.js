@@ -1,13 +1,134 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startHandler = void 0;
+exports.sendOnboardingSlide = sendOnboardingSlide;
+exports.sendOnboardingCarousel = sendOnboardingCarousel;
+exports.handleOnboardingSlideTransition = handleOnboardingSlideTransition;
 const grammy_1 = require("grammy");
 const menu_1 = require("../keyboards/menu");
+const inline_1 = require("../keyboards/inline");
 const telegram_1 = require("../../utils/telegram");
 const subscription_service_1 = require("../../services/subscription.service");
+const onboarding_service_1 = require("../../services/onboarding.service");
 const env_1 = require("../../config/env");
 const formatters_1 = require("../../utils/formatters");
 exports.startHandler = new grammy_1.Composer();
+/**
+ * Sends a single onboarding carousel slide with optional photo/animation media
+ * and graceful fallback to text-only if media file_id is unavailable or rejected.
+ */
+async function sendOnboardingSlide(ctx, slideIndex, mediaConfig) {
+    const media = mediaConfig ?? (await (0, onboarding_service_1.getOnboardingMedia)());
+    const caption = (0, onboarding_service_1.formatOnboardingSlideText)(slideIndex);
+    const replyMarkup = (0, inline_1.getOnboardingCarouselKeyboard)(slideIndex);
+    const slideMedia = media.slides[slideIndex];
+    if (slideMedia?.fileId) {
+        try {
+            if (slideMedia.type === 'animation') {
+                return await ctx.replyWithAnimation(slideMedia.fileId, {
+                    caption,
+                    parse_mode: 'HTML',
+                    reply_markup: replyMarkup,
+                });
+            }
+            return await ctx.replyWithPhoto(slideMedia.fileId, {
+                caption,
+                parse_mode: 'HTML',
+                reply_markup: replyMarkup,
+            });
+        }
+        catch {
+            // Fallback cleanly to text-only slide if Telegram rejects stale file_id
+        }
+    }
+    return await ctx.reply(caption, {
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+    });
+}
+/**
+ * Launches the interactive onboarding guide:
+ * 1) Optional intro video / video_note (krujochek) if configured by Super-Admin.
+ * 2) Slide 1/4 with inline carousel navigation buttons.
+ */
+async function sendOnboardingCarousel(ctx, options) {
+    const media = await (0, onboarding_service_1.getOnboardingMedia)();
+    const includeIntro = options?.includeIntroVideo !== false;
+    if (includeIntro && media.introVideoFileId) {
+        try {
+            if (media.introVideoType === 'video_note') {
+                await ctx.replyWithVideoNote(media.introVideoFileId);
+            }
+            else {
+                await ctx.replyWithVideo(media.introVideoFileId);
+            }
+        }
+        catch {
+            // Never block Slide 1 if intro video fails to send
+        }
+    }
+    await sendOnboardingSlide(ctx, 1, media);
+}
+/**
+ * Smooth in-place slide switcher for `onb_slide:<1|2|3|4>`:
+ * - Media -> Media: editMessageMedia (0 chat spam)
+ * - Text -> Text: editMessageText (0 chat spam)
+ * - Media <-> Text: send target slide + delete previous message cleanly
+ */
+async function handleOnboardingSlideTransition(ctx, targetIndex) {
+    const media = await (0, onboarding_service_1.getOnboardingMedia)();
+    const slideMedia = media.slides[targetIndex];
+    const caption = (0, onboarding_service_1.formatOnboardingSlideText)(targetIndex);
+    const replyMarkup = (0, inline_1.getOnboardingCarouselKeyboard)(targetIndex);
+    const currentMsg = ctx.callbackQuery?.message;
+    const currentHasMedia = Boolean(currentMsg &&
+        ((Array.isArray(currentMsg.photo) && currentMsg.photo.length > 0) ||
+            currentMsg.animation ||
+            currentMsg.video ||
+            currentMsg.document));
+    const chatId = ctx.chat?.id;
+    const msgId = currentMsg?.message_id;
+    // Case 1: Media -> Media (smooth in-place editMessageMedia)
+    if (slideMedia?.fileId && currentHasMedia) {
+        try {
+            const inputMedia = slideMedia.type === 'animation'
+                ? grammy_1.InputMediaBuilder.animation(slideMedia.fileId, { caption, parse_mode: 'HTML' })
+                : grammy_1.InputMediaBuilder.photo(slideMedia.fileId, { caption, parse_mode: 'HTML' });
+            await ctx.editMessageMedia(inputMedia, { reply_markup: replyMarkup });
+            return;
+        }
+        catch (err) {
+            const desc = String(err?.description || err?.message || '');
+            if (/message is not modified/i.test(desc))
+                return;
+            // Fallback: replace cleanly without throwing
+            await sendOnboardingSlide(ctx, targetIndex, media);
+            await (0, telegram_1.safeDelete)(ctx, chatId, msgId);
+            return;
+        }
+    }
+    // Case 2: Text -> Text (smooth in-place editMessageText)
+    if (!slideMedia?.fileId && !currentHasMedia) {
+        try {
+            await ctx.editMessageText(caption, {
+                parse_mode: 'HTML',
+                reply_markup: replyMarkup,
+            });
+            return;
+        }
+        catch (err) {
+            const desc = String(err?.description || err?.message || '');
+            if (/message is not modified/i.test(desc))
+                return;
+            await sendOnboardingSlide(ctx, targetIndex, media);
+            await (0, telegram_1.safeDelete)(ctx, chatId, msgId);
+            return;
+        }
+    }
+    // Case 3 & 4: Mixed transition (Text <-> Media) -> replace cleanly with 0 error
+    await sendOnboardingSlide(ctx, targetIndex, media);
+    await (0, telegram_1.safeDelete)(ctx, chatId, msgId);
+}
 exports.startHandler.command('start', async (ctx) => {
     if (!ctx.from)
         return;
@@ -66,7 +187,29 @@ exports.startHandler.command('start', async (ctx) => {
         return;
     }
 });
-// Contact registration handler -> Auto 7-Day Free Trial + 30-Second Onboarding
+// Interactive Onboarding Guide triggers (/help and "❓ Yo‘riqnoma")
+exports.startHandler.command('help', async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
+    await sendOnboardingCarousel(ctx, { includeIntroVideo: true });
+});
+exports.startHandler.hears(/^❓\s*Yo[‘'’`]?riqnoma$/i, async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
+    await sendOnboardingCarousel(ctx, { includeIntroVideo: true });
+});
+// Interactive Onboarding Carousel callbacks
+exports.startHandler.callbackQuery(/^onb_slide:(.+)$/, async (ctx) => {
+    const targetIndex = (0, onboarding_service_1.parseOnboardingSlideCallback)(ctx.callbackQuery.data);
+    if (!targetIndex) {
+        await ctx.answerCallbackQuery({ text: "Noto'g'ri slayd raqami." }).catch(() => { });
+        return;
+    }
+    await handleOnboardingSlideTransition(ctx, targetIndex);
+});
+exports.startHandler.callbackQuery('onb_finish', async (ctx) => {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => { });
+    await ctx.reply(onboarding_service_1.ONBOARDING_FINISH_MESSAGE);
+});
+// Contact registration handler -> Auto 7-Day Free Trial + Interactive Onboarding Carousel
 exports.startHandler.on('message:contact', async (ctx) => {
     if (!ctx.from || !ctx.message.contact)
         return;
@@ -103,6 +246,8 @@ exports.startHandler.on('message:contact', async (ctx) => {
             parse_mode: 'Markdown',
             reply_markup: (0, menu_1.getMainMenu)('STORE_OWNER'),
         });
+        // Trigger interactive onboarding carousel right after 7-day trial activation
+        await sendOnboardingCarousel(ctx, { includeIntroVideo: true }).catch(() => { });
         if (trialResult.adminNotification) {
             await ctx.api
                 .sendMessage(env_1.env.OWNER_TELEGRAM_ID, trialResult.adminNotification)

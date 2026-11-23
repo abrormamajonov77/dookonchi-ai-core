@@ -265,3 +265,17 @@ export function getSupplierReturnCurrencyKeyboard(supplierId: string) {
     .row()
     .text('🔙 Orqaga', `sup:v:${supplierId}`);
 }
+
+export function getOnboardingCarouselKeyboard(slideIndex: 1 | 2 | 3 | 4): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (slideIndex === 1) {
+    return kb.text('Keyingisi (2/4) ➡️', 'onb_slide:2');
+  }
+  if (slideIndex === 2) {
+    return kb.text('⬅️ Oldingi', 'onb_slide:1').text('Keyingisi (3/4) ➡️', 'onb_slide:3');
+  }
+  if (slideIndex === 3) {
+    return kb.text('⬅️ Oldingi', 'onb_slide:2').text('Keyingisi (4/4) ➡️', 'onb_slide:4');
+  }
+  return kb.text('⬅️ Oldingi', 'onb_slide:3').text('🚀 Ishni boshlash', 'onb_finish');
+}

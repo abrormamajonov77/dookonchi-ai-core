@@ -76,9 +76,13 @@ export async function authMiddleware(ctx: MyContext, next: NextFunction) {
     return;
   }
 
-  // Allow registration, /start, contact sharing (for 7-day auto-trial), payment screenshot submission, and replying to Admin
+  // Allow registration, /start, /help, onboarding carousel, contact sharing (for 7-day auto-trial), payment screenshot submission, and replying to Admin
   if (
     msgText.startsWith('/start') ||
+    msgText.startsWith('/help') ||
+    /^❓\s*Yo[‘'’`]?riqnoma$/i.test(msgText) ||
+    cbData.startsWith('onb_slide:') ||
+    cbData === 'onb_finish' ||
     (hasContact && user.status === 'PENDING') ||
     cbData === 'sub:send_receipt' ||
     cbData === 'user_reply_admin' ||

@@ -16,8 +16,11 @@ exports.SYSTEM_MENU_BUTTONS = [
     '📝 Qidiruv',
     '➕ Nakladnoy',
     '📥 Bazani yuklab olish (Excel / PDF)',
+    '❓ Yo‘riqnoma',
+    "❓ Yo'riqnoma",
     '👑 Admin Panel',
     '/start',
+    '/help',
     '/admin',
     '/report',
     '/hisobot',
@@ -74,7 +77,8 @@ function getMainMenu(role = 'STORE_OWNER', rawEnv = process.env) {
         .text('📝 Qidiruv')
         .text('➕ Nakladnoy')
         .row()
-        .text('📥 Bazani yuklab olish (Excel / PDF)');
+        .text('📥 Bazani yuklab olish (Excel / PDF)')
+        .text('❓ Yo‘riqnoma');
     if (role === 'SUPER_ADMIN') {
         kb.row().text('👑 Admin Panel');
     }
