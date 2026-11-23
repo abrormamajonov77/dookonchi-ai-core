@@ -233,6 +233,7 @@ model SupplierTransaction {
 
   @@index([ownerId])
   @@index([ownerId, date])
+  @@index([ownerId, type, date])
   @@index([ownerId, paymentSource, date])
   @@index([supplierId])
   @@index([invoiceId])
@@ -257,6 +258,7 @@ model CustomerDebt {
 
   @@index([ownerId])
   @@index([ownerId, status])
+  @@index([ownerId, createdAt])
   @@index([customerName])
   @@index([dueDate])
   @@index([status])
@@ -333,6 +335,7 @@ model ZReport {
 
   @@unique([ownerId, date])
   @@index([ownerId])
+  @@index([ownerId, createdAt])
   @@index([date])
 }
 

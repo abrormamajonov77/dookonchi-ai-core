@@ -3,6 +3,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildDailyPaymentReminderMessage = buildDailyPaymentReminderMessage;
+exports.buildDailyRestockReminderMessages = buildDailyRestockReminderMessages;
+exports.runDailySmartReminders = runDailySmartReminders;
 exports.startCronJobs = startCronJobs;
 const node_cron_1 = __importDefault(require("node-cron"));
 const prisma_1 = require("../database/prisma");
@@ -11,7 +14,74 @@ const formatters_1 = require("../utils/formatters");
 const telegram_1 = require("../utils/telegram");
 const report_service_1 = require("./report.service");
 const subscription_service_1 = require("./subscription.service");
+const dashboard_service_1 = require("./dashboard.service");
 const report_1 = require("../bot/handlers/report");
+/**
+ * Builds the 09:00 Payment Day Reminder message for suppliers whose dominant payment
+ * weekday matches today AND who currently have non-zero positive debt.
+ */
+function buildDailyPaymentReminderMessage(data) {
+    const todayDay = data.paymentCalendar.find((d) => d.weekday === data.todayWeekday);
+    if (!todayDay)
+        return null;
+    const suppliersWithDebt = todayDay.suppliers.filter((s) => s.debtUzs > 0.001 || s.debtUsd > 0.001);
+    if (suppliersWithDebt.length === 0)
+        return null;
+    const lines = suppliersWithDebt.map((s) => {
+        const debtParts = [];
+        if (s.debtUzs > 0.001)
+            debtParts.push((0, formatters_1.formatSom)(s.debtUzs));
+        if (s.debtUsd > 0.001)
+            debtParts.push((0, formatters_1.formatUsd)(s.debtUsd));
+        return `• ${s.supplierName} — ${debtParts.join(' | ')}`;
+    });
+    return [
+        `💳 Bugungi to'lov eslatmasi (${todayDay.fullLabel})`,
+        '',
+        "Odatda bugun pul oladigan ta'minotchilar va joriy qarzingiz:",
+        ...lines,
+        '',
+        "To'lov qilsangiz, botga yozib yoki ovozli xabar yuborib qayd eting.",
+    ].join('\n');
+}
+/**
+ * Builds friendly 09:00 Restock Reminder messages for suppliers whose predicted
+ * next delivery is tomorrow (daysUntilNext === 1) or in 2 days (daysUntilNext === 2).
+ */
+function buildDailyRestockReminderMessages(data) {
+    const upcoming = data.restockRadar.filter((r) => r.daysUntilNext === 1 || r.daysUntilNext === 2);
+    return upcoming.map((r) => {
+        const timing = r.daysUntilNext === 1 ? 'Ertaga' : "2 kundan so'ng";
+        return `📦 Yuk eslatmasi: ${timing} «${r.supplierName}»dan yuk olish vaqtingiz (o‘rtacha har ${r.avgCycleDays} kunda). Omborga razm soling, qaysi tovarlar kamayib qoldi?`;
+    });
+}
+/**
+ * Executes 09:00 smart Payment Day & Restock reminders for all ACTIVE store owners
+ * with strict per-ownerId multi-tenant isolation.
+ */
+async function runDailySmartReminders(bot, now = new Date()) {
+    const users = await prisma_1.prisma.user.findMany({
+        where: { status: 'ACTIVE' },
+        select: { telegramId: true },
+    });
+    for (const u of users) {
+        try {
+            const ownerId = u.telegramId;
+            const intelligence = await (0, dashboard_service_1.getRestockCyclesAndPaymentCalendar)(ownerId, now);
+            const paymentMessage = buildDailyPaymentReminderMessage(intelligence);
+            if (paymentMessage) {
+                await bot.api.sendMessage(ownerId, paymentMessage).catch(() => { });
+            }
+            const restockMessages = buildDailyRestockReminderMessages(intelligence);
+            for (const restockMsg of restockMessages) {
+                await bot.api.sendMessage(ownerId, restockMsg).catch(() => { });
+            }
+        }
+        catch (error) {
+            logger_1.logger.error({ error, ownerId: u.telegramId }, 'Failed to send 09:00 smart reminder for owner');
+        }
+    }
+}
 function startCronJobs(bot) {
     const opts = { timezone: 'Asia/Tashkent' };
     const getActiveStoreUsers = async () => {
@@ -101,6 +171,16 @@ function startCronJobs(bot) {
         }
         catch (error) {
             logger_1.logger.error({ error }, 'Failed to send pending debts cron');
+        }
+    }, opts);
+    // Har kuni soat 09:00 da — AI To'lov kuni eslatmasi va Yuk olish sikli eslatmasi (har bir faol egaga alohida)
+    node_cron_1.default.schedule('0 9 * * *', async () => {
+        logger_1.logger.info('Running cron: 09:00 Smart Payment Day & Restock Reminders');
+        try {
+            await runDailySmartReminders(bot);
+        }
+        catch (error) {
+            logger_1.logger.error({ error }, 'Failed to run 09:00 smart payment & restock reminders cron');
         }
     }, opts);
     // Har kuni soat 20:00 da — Kassa yopilmagan bo'lsa eslatma (Toshkent UTC+5 dateKey)

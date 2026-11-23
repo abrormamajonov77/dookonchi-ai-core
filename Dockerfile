@@ -13,9 +13,10 @@ COPY package*.json ./
 COPY prisma ./prisma/
 RUN npm install && npx prisma generate
 
-# 3. Copy TypeScript sources & config only (crypto-service isolated/frozen) and build inside container
+# 3. Copy TypeScript sources, public dashboard assets & config only (crypto-service isolated/frozen) and build inside container
 COPY tsconfig.json ./
 COPY src ./src/
+COPY public ./public/
 RUN npm run build
 
 ENV NODE_ENV=production

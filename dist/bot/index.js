@@ -26,6 +26,7 @@ const suppliers_1 = require("./handlers/suppliers");
 const cash_1 = require("./handlers/cash");
 const cron_service_1 = require("../services/cron.service");
 const cache_1 = require("../utils/cache");
+const dashboard_router_1 = require("../web/dashboard.router");
 const baseStorage = new storage_prisma_1.PrismaAdapter(prisma_1.prisma.session);
 const cachedStorage = {
     async read(key) {
@@ -90,11 +91,22 @@ const healthServer = node_http_1.default.createServer((req, res) => {
             uptime: Math.floor(process.uptime()),
             timestamp: new Date().toISOString()
         }));
+        return;
     }
-    else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Not Found' }));
-    }
+    void (0, dashboard_router_1.handleDashboardHttpRequest)(req, res, bot)
+        .then((handled) => {
+        if (!handled && !res.writableEnded) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not Found' }));
+        }
+    })
+        .catch((err) => {
+        logger_1.logger.error({ err, reqPath }, 'Unhandled HTTP server error');
+        if (!res.writableEnded) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Internal Server Error' }));
+        }
+    });
 });
 healthServer.on('error', (err) => {
     logger_1.logger.error({ err }, 'Health-check server error');

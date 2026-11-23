@@ -3,11 +3,94 @@ import { Bot } from 'grammy';
 import { prisma } from '../database/prisma';
 import { MyContext } from '../bot/context';
 import { logger } from '../config/logger';
-import { formatMoney, getTashkentDayRange } from '../utils/formatters';
+import { formatMoney, formatSom, formatUsd, getTashkentDayRange } from '../utils/formatters';
 import { sanitizeMdV1 } from '../utils/telegram';
 import { ReportService } from './report.service';
 import { SubscriptionService } from './subscription.service';
+import {
+  getRestockCyclesAndPaymentCalendar,
+  RestockAndPaymentCalendarResult,
+} from './dashboard.service';
 import { getReportKeyboard } from '../bot/handlers/report';
+
+/**
+ * Builds the 09:00 Payment Day Reminder message for suppliers whose dominant payment
+ * weekday matches today AND who currently have non-zero positive debt.
+ */
+export function buildDailyPaymentReminderMessage(
+  data: RestockAndPaymentCalendarResult
+): string | null {
+  const todayDay = data.paymentCalendar.find((d) => d.weekday === data.todayWeekday);
+  if (!todayDay) return null;
+
+  const suppliersWithDebt = todayDay.suppliers.filter(
+    (s) => s.debtUzs > 0.001 || s.debtUsd > 0.001
+  );
+  if (suppliersWithDebt.length === 0) return null;
+
+  const lines = suppliersWithDebt.map((s) => {
+    const debtParts: string[] = [];
+    if (s.debtUzs > 0.001) debtParts.push(formatSom(s.debtUzs));
+    if (s.debtUsd > 0.001) debtParts.push(formatUsd(s.debtUsd));
+    return `• ${s.supplierName} — ${debtParts.join(' | ')}`;
+  });
+
+  return [
+    `💳 Bugungi to'lov eslatmasi (${todayDay.fullLabel})`,
+    '',
+    "Odatda bugun pul oladigan ta'minotchilar va joriy qarzingiz:",
+    ...lines,
+    '',
+    "To'lov qilsangiz, botga yozib yoki ovozli xabar yuborib qayd eting.",
+  ].join('\n');
+}
+
+/**
+ * Builds friendly 09:00 Restock Reminder messages for suppliers whose predicted
+ * next delivery is tomorrow (daysUntilNext === 1) or in 2 days (daysUntilNext === 2).
+ */
+export function buildDailyRestockReminderMessages(
+  data: RestockAndPaymentCalendarResult
+): string[] {
+  const upcoming = data.restockRadar.filter(
+    (r) => r.daysUntilNext === 1 || r.daysUntilNext === 2
+  );
+
+  return upcoming.map((r) => {
+    const timing = r.daysUntilNext === 1 ? 'Ertaga' : "2 kundan so'ng";
+    return `📦 Yuk eslatmasi: ${timing} «${r.supplierName}»dan yuk olish vaqtingiz (o‘rtacha har ${r.avgCycleDays} kunda). Omborga razm soling, qaysi tovarlar kamayib qoldi?`;
+  });
+}
+
+/**
+ * Executes 09:00 smart Payment Day & Restock reminders for all ACTIVE store owners
+ * with strict per-ownerId multi-tenant isolation.
+ */
+export async function runDailySmartReminders(bot: Bot<MyContext>, now: Date = new Date()) {
+  const users = await prisma.user.findMany({
+    where: { status: 'ACTIVE' },
+    select: { telegramId: true },
+  });
+
+  for (const u of users) {
+    try {
+      const ownerId = u.telegramId;
+      const intelligence = await getRestockCyclesAndPaymentCalendar(ownerId, now);
+
+      const paymentMessage = buildDailyPaymentReminderMessage(intelligence);
+      if (paymentMessage) {
+        await bot.api.sendMessage(ownerId, paymentMessage).catch(() => {});
+      }
+
+      const restockMessages = buildDailyRestockReminderMessages(intelligence);
+      for (const restockMsg of restockMessages) {
+        await bot.api.sendMessage(ownerId, restockMsg).catch(() => {});
+      }
+    } catch (error) {
+      logger.error({ error, ownerId: u.telegramId }, 'Failed to send 09:00 smart reminder for owner');
+    }
+  }
+}
 
 export function startCronJobs(bot: Bot<MyContext>) {
   const opts = { timezone: 'Asia/Tashkent' };
@@ -118,6 +201,20 @@ export function startCronJobs(bot: Bot<MyContext>) {
         }
       } catch (error) {
         logger.error({ error }, 'Failed to send pending debts cron');
+      }
+    },
+    opts
+  );
+
+  // Har kuni soat 09:00 da — AI To'lov kuni eslatmasi va Yuk olish sikli eslatmasi (har bir faol egaga alohida)
+  cron.schedule(
+    '0 9 * * *',
+    async () => {
+      logger.info('Running cron: 09:00 Smart Payment Day & Restock Reminders');
+      try {
+        await runDailySmartReminders(bot);
+      } catch (error) {
+        logger.error({ error }, 'Failed to run 09:00 smart payment & restock reminders cron');
       }
     },
     opts

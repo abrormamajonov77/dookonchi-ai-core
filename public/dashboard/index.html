@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="uz" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Dookonchi AI — CEO Dashboard v4.0</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+          colors: {
+            obsidian: {
+              950: '#060913',
+              900: '#0B1120',
+              800: '#111827',
+              700: '#1E293B',
+            },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    :root {
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: none;
+    }
+    .glass-card {
+      background: rgba(17, 24, 39, 0.72);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+    }
+    html:not(.dark) .glass-card {
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      box-shadow: 0 4px 20px rgba(15, 23, 42, 0.05);
+    }
+    .glass-nav {
+      background: rgba(11, 17, 32, 0.88);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      border-top: 1px solid rgba(148, 163, 184, 0.15);
+      padding-bottom: calc(8px + var(--safe-bottom));
+    }
+    html:not(.dark) .glass-nav {
+      background: rgba(255, 255, 255, 0.94);
+      border-top: 1px solid rgba(148, 163, 184, 0.24);
+    }
+    .ambient-bg {
+      background-image:
+        radial-gradient(circle at 12% 8%, rgba(99, 102, 241, 0.18), transparent 36%),
+        radial-gradient(circle at 88% 16%, rgba(16, 185, 129, 0.12), transparent 32%);
+    }
+    html:not(.dark) .ambient-bg {
+      background-image:
+        radial-gradient(circle at 12% 8%, rgba(99, 102, 241, 0.10), transparent 38%),
+        radial-gradient(circle at 88% 14%, rgba(16, 185, 129, 0.08), transparent 34%);
+    }
+    .sheet-enter {
+      animation: slideUp 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0.4; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-slate-100 dark:bg-obsidian-950 text-slate-900 dark:text-slate-100 ambient-bg min-h-screen pb-24 transition-colors duration-200">
+  <!-- Top Header -->
+  <header class="sticky top-0 z-30 px-4 pt-3 pb-2.5 bg-slate-100/80 dark:bg-obsidian-950/80 backdrop-blur-xl border-b border-slate-200/70 dark:border-slate-800/70">
+    <div class="max-w-xl mx-auto flex items-center justify-between gap-3">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-emerald-400 flex items-center justify-center shadow-lg shadow-indigo-500/25 shrink-0">
+          <span class="text-white font-extrabold text-base">D</span>
+        </div>
+        <div class="min-w-0">
+          <div class="flex items-center gap-1.5">
+            <h1 class="text-sm font-bold tracking-tight truncate">Dookonchi CEO</h1>
+            <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border border-indigo-500/25">v4.0</span>
+          </div>
+          <p id="header-user" class="text-[11px] text-slate-500 dark:text-slate-400 truncate">Yuklanmoqda...</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-refresh" title="Yangilash" class="w-9 h-9 rounded-xl glass-card flex items-center justify-center text-slate-600 dark:text-slate-300 active:scale-95 transition">
+          <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
+        <button id="btn-theme" title="Mavzu" class="w-9 h-9 rounded-xl glass-card flex items-center justify-center text-slate-600 dark:text-slate-300 active:scale-95 transition">
+          <span id="theme-icon" class="text-sm">☀️</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="max-w-xl mx-auto px-4 pt-3.5 space-y-4">
+    <!-- Auth Error Banner -->
+    <div id="auth-error" class="hidden glass-card rounded-2xl p-5 text-center space-y-2 border-amber-500/40">
+      <div class="text-3xl">🔐</div>
+      <h2 class="text-base font-bold">Telegram orqali kiring</h2>
+      <p id="auth-error-msg" class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+        Ushbu CEO Dashboard faqat Dookonchi AI Telegram boti ichidagi «📊 Dashboard» tugmasi orqali ochiladi.
+      </p>
+    </div>
+
+    <!-- TAB 1: ASOSIY -->
+    <section id="tab-overview" class="space-y-4">
+      <!-- Month Selectors -->
+      <div class="glass-card rounded-2xl p-3 flex items-center gap-2">
+        <div class="flex-1 min-w-0">
+          <label class="block text-[10px] font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400 mb-1">Asosiy oy (A)</label>
+          <select id="select-month-a" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none focus:border-indigo-500"></select>
+        </div>
+        <div class="text-slate-400 text-xs font-bold pt-4">vs</div>
+        <div class="flex-1 min-w-0">
+          <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Taqqoslash (B)</label>
+          <select id="select-month-b" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none focus:border-indigo-500"></select>
+        </div>
+      </div>
+
+      <!-- 4 KPI Cards -->
+      <div class="grid grid-cols-2 gap-3" id="kpi-grid">
+        <div class="glass-card rounded-2xl p-3.5 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">💰 Tushum</span>
+            <span id="kpi-sales-delta" class="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-400">0%</span>
+          </div>
+          <div id="kpi-sales-val" class="text-base font-extrabold tracking-tight">—</div>
+          <div id="kpi-sales-sub" class="text-[10px] text-slate-500 dark:text-slate-400">O'tgan: —</div>
+        </div>
+
+        <div class="glass-card rounded-2xl p-3.5 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">📦 Yuk olish</span>
+            <span id="kpi-incoming-delta" class="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-400">0%</span>
+          </div>
+          <div id="kpi-incoming-val" class="text-base font-extrabold tracking-tight">—</div>
+          <div id="kpi-incoming-sub" class="text-[10px] text-slate-500 dark:text-slate-400">Koeffitsient: —</div>
+        </div>
+
+        <div class="glass-card rounded-2xl p-3.5 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">🏦 Jami qarz</span>
+            <span id="kpi-debt-count" class="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-500 dark:text-indigo-300">0 ta</span>
+          </div>
+          <div id="kpi-debt-uzs" class="text-base font-extrabold tracking-tight">—</div>
+          <div id="kpi-debt-usd" class="text-[11px] font-semibold text-emerald-500 dark:text-emerald-400">$0.00</div>
+        </div>
+
+        <div class="glass-card rounded-2xl p-3.5 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">📉 Xarajatlar</span>
+            <span id="kpi-expense-delta" class="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-400">0%</span>
+          </div>
+          <div id="kpi-expense-val" class="text-base font-extrabold tracking-tight">—</div>
+          <div id="kpi-expense-sub" class="text-[10px] text-slate-500 dark:text-slate-400">O'tgan: —</div>
+        </div>
+      </div>
+
+      <!-- Ghost-Line Chart -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <h2 class="text-sm font-bold">📈 Dinamika (Ghost-Line)</h2>
+            <p id="ghost-legend" class="text-[10px] text-slate-500 dark:text-slate-400">To'liq chiziq: A • Uzuk chiziq: B</p>
+          </div>
+          <div class="flex bg-slate-200/80 dark:bg-obsidian-900 rounded-xl p-0.5 text-[11px] font-semibold">
+            <button data-ghost="sales" class="ghost-toggle px-2.5 py-1 rounded-lg bg-indigo-500 text-white transition">Tushum</button>
+            <button data-ghost="incoming" class="ghost-toggle px-2.5 py-1 rounded-lg text-slate-500 dark:text-slate-400 transition">Yuk olish</button>
+          </div>
+        </div>
+        <div class="h-52 relative">
+          <canvas id="ghost-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Supplier Debt Map -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-bold">🏢 Ta'minotchilar Qarz Xaritasi</h2>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400">Batafsil cheklar va PDF Sverka uchun ustiga bosing</p>
+          </div>
+        </div>
+        <div id="supplier-debt-list" class="space-y-2.5">
+          <div class="text-xs text-slate-400 text-center py-6">Yuklanmoqda...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: KUNLIK (VAQT MASHINASI) -->
+    <section id="tab-daily" class="hidden space-y-4">
+      <div class="glass-card rounded-2xl p-3 space-y-3">
+        <div class="grid grid-cols-2 gap-1.5 bg-slate-200/80 dark:bg-obsidian-900 p-1 rounded-xl text-xs font-semibold">
+          <button id="daily-mode-single" class="py-2 rounded-lg bg-indigo-500 text-white transition">🔍 Sana arxivi</button>
+          <button id="daily-mode-compare" class="py-2 rounded-lg text-slate-600 dark:text-slate-400 transition">⚖️ 2 sanani taqqoslash</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="flex-1">
+            <label class="block text-[10px] font-semibold text-indigo-500 dark:text-indigo-400 mb-1">Sana A</label>
+            <input type="date" id="input-date-a" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none focus:border-indigo-500" />
+          </div>
+          <div id="date-b-wrap" class="flex-1 hidden">
+            <label class="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 mb-1">Sana B</label>
+            <input type="date" id="input-date-b" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none focus:border-indigo-500" />
+          </div>
+        </div>
+      </div>
+
+      <div id="daily-content" class="space-y-3">
+        <div class="glass-card rounded-2xl p-6 text-center text-xs text-slate-400">Sana tanlang...</div>
+      </div>
+    </section>
+
+    <!-- TAB 3: XARAJAT & ANOMALIYA RADARI -->
+    <section id="tab-expenses" class="hidden space-y-4">
+      <div class="glass-card rounded-2xl p-3 flex items-center gap-2">
+        <div class="flex-1 min-w-0">
+          <label class="block text-[10px] font-semibold uppercase tracking-wider text-indigo-500 dark:text-indigo-400 mb-1">Asosiy oy (A)</label>
+          <select id="exp-month-a" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none"></select>
+        </div>
+        <div class="text-slate-400 text-xs font-bold pt-4">vs</div>
+        <div class="flex-1 min-w-0">
+          <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Taqqoslash (B)</label>
+          <select id="exp-month-b" class="w-full text-xs font-semibold bg-slate-100 dark:bg-obsidian-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 outline-none"></select>
+        </div>
+      </div>
+
+      <!-- AI Anomaly Radar Banner -->
+      <div id="expense-anomaly-banner"></div>
+
+      <!-- Donut Chart -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-bold">🍩 Xarajatlar tarkibi</h2>
+            <p id="expense-ref-subtitle" class="text-[11px] text-slate-500 dark:text-slate-400">Kategoriyalar kesimida</p>
+          </div>
+          <div class="text-right">
+            <div id="expense-total-a" class="text-sm font-extrabold">0 so'm</div>
+            <div id="expense-total-delta" class="text-[10px] font-bold text-slate-400">0%</div>
+          </div>
+        </div>
+        <div class="h-52 relative flex items-center justify-center">
+          <canvas id="expense-donut-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Category Breakdown List -->
+      <div id="expense-category-list" class="space-y-2.5"></div>
+    </section>
+
+    <!-- TAB 4: SIKL / PUL -->
+    <section id="tab-cycles" class="hidden space-y-4">
+      <!-- Weekly Payment Calendar -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div>
+          <h2 class="text-sm font-bold">🗓 Haftalik To'lovlar Kalendari</h2>
+          <p class="text-[11px] text-slate-500 dark:text-slate-400">Odatda pul oladigan kunlar bo'yicha AI bashorati</p>
+        </div>
+        <div id="weekday-pills" class="grid grid-cols-7 gap-1.5"></div>
+        <div id="weekday-suppliers" class="space-y-2 pt-1"></div>
+      </div>
+
+      <!-- AI Restock Radar -->
+      <div class="glass-card rounded-2xl p-4 space-y-3">
+        <div>
+          <h2 class="text-sm font-bold">📦 AI Yuk Olish Radari</h2>
+          <p class="text-[11px] text-slate-500 dark:text-slate-400">O'rtacha kelish sikli va oylik yuk koeffitsienti</p>
+        </div>
+        <div id="restock-radar-list" class="space-y-2.5"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Supplier Slide-Up Bottom Sheet Modal -->
+  <div id="supplier-modal" class="fixed inset-0 z-50 hidden">
+    <div id="modal-backdrop" class="absolute inset-0 bg-black/65 backdrop-blur-sm"></div>
+    <div class="absolute inset-x-0 bottom-0 max-w-xl mx-auto sheet-enter">
+      <div class="bg-white dark:bg-obsidian-900 rounded-t-3xl border-t border-slate-200 dark:border-slate-700/80 max-h-[85vh] flex flex-col shadow-2xl">
+        <div class="px-5 pt-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div class="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700 mx-auto mb-3"></div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h3 id="modal-sup-name" class="text-base font-extrabold truncate">Ta'minotchi</h3>
+              <p id="modal-sup-debt" class="text-xs font-semibold text-indigo-500 dark:text-indigo-300 mt-0.5">—</p>
+            </div>
+            <button id="modal-close" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 dark:text-slate-300 text-sm">✕</button>
+          </div>
+          <!-- Sub-tabs -->
+          <div class="grid grid-cols-3 gap-1.5 bg-slate-100 dark:bg-obsidian-950 p-1 rounded-xl mt-3 text-xs font-semibold">
+            <button data-subtab="cheklar" class="modal-subtab py-1.5 rounded-lg bg-indigo-500 text-white">🧾 Cheklar</button>
+            <button data-subtab="pullar" class="modal-subtab py-1.5 rounded-lg text-slate-500 dark:text-slate-400">💵 Pullar</button>
+            <button data-subtab="vozvrat" class="modal-subtab py-1.5 rounded-lg text-slate-500 dark:text-slate-400">🔄 Vozvrat</button>
+          </div>
+        </div>
+        <div id="modal-records" class="p-4 overflow-y-auto space-y-2 flex-1 min-h-[180px]"></div>
+        <div class="p-4 border-t border-slate-200 dark:border-slate-800" style="padding-bottom: calc(16px + var(--safe-bottom));">
+          <button id="btn-send-pdf" class="w-full py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-sm shadow-lg shadow-indigo-600/25 active:scale-[0.99] transition flex items-center justify-center gap-2">
+            <span>📄 PDF Sverka yuborish</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed top-16 inset-x-4 max-w-md mx-auto z-50 hidden">
+    <div id="toast-inner" class="rounded-xl px-4 py-2.5 text-xs font-semibold text-white bg-emerald-600 shadow-xl text-center"></div>
+  </div>
+
+  <!-- Fixed Bottom Navigation -->
+  <nav class="fixed bottom-0 inset-x-0 z-40 glass-nav">
+    <div class="max-w-xl mx-auto grid grid-cols-4 gap-1 px-2 pt-2">
+      <button data-tab="overview" class="nav-btn flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-indigo-500 dark:text-indigo-400 font-bold">
+        <span class="text-lg leading-none">🏠</span>
+        <span class="text-[10px]">Asosiy</span>
+      </button>
+      <button data-tab="daily" class="nav-btn flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-slate-500 dark:text-slate-400 font-medium">
+        <span class="text-lg leading-none">📅</span>
+        <span class="text-[10px]">Kunlik</span>
+      </button>
+      <button data-tab="expenses" class="nav-btn flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-slate-500 dark:text-slate-400 font-medium">
+        <span class="text-lg leading-none">📉</span>
+        <span class="text-[10px]">Xarajat</span>
+      </button>
+      <button data-tab="cycles" class="nav-btn flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-slate-500 dark:text-slate-400 font-medium">
+        <span class="text-lg leading-none">📦</span>
+        <span class="text-[10px]">Sikl/Pul</span>
+      </button>
+    </div>
+  </nav>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    const UZ_MONTHS = [
+      'Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun',
+      'Iyul', 'Avgust', 'Sentyabr', 'Oktabr', 'Noyabr', 'Dekabr'
+    ];
+    const EXP_COLORS = ['#6366F1', '#10B981', '#F59E0B', '#EC4899', '#06B6D4', '#8B5CF6'];
+
+    const state = {
+      activeTab: 'overview',
+      monthA: '',
+      monthB: '',
+      ghostMetric: 'sales',
+      dailyMode: 'single',
+      dateA: '',
+      dateB: '',
+      overviewData: null,
+      expensesData: null,
+      cyclesData: null,
+      selectedWeekday: null,
+      modalSupplierId: null,
+      modalData: null,
+      modalSubtab: 'cheklar',
+      ghostChart: null,
+      donutChart: null,
+    };
+
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function fmtSom(val) {
+      const n = Number(val || 0);
+      const abs = Math.abs(n);
+      const formatted = new Intl.NumberFormat('en-US', {
+        maximumFractionDigits: abs % 1 !== 0 ? 2 : 0,
+      }).format(Math.round(abs * 100) / 100);
+      return `${n < 0 ? '-' : ''}${formatted} so'm`;
+    }
+
+    function fmtCompact(val) {
+      const n = Number(val || 0);
+      const abs = Math.abs(n);
+      const sign = n < 0 ? '-' : '';
+      if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(2)} mlrd`;
+      if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)} mln`;
+      if (abs >= 1_000) return `${sign}${Math.round(abs / 1_000)} ming`;
+      return `${sign}${Math.round(abs)}`;
+    }
+
+    function fmtUsd(val) {
+      const n = Number(val || 0);
+      const sign = n < 0 ? '-' : '';
+      return `${sign}$${Math.abs(n).toFixed(2)}`;
+    }
+
+    function fmtDateShort(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+    }
+
+    function deltaBadgeHtml(pct, invertGood = false) {
+      const num = Number(pct || 0);
+      const sign = num > 0 ? '+' : '';
+      let cls = 'bg-slate-500/15 text-slate-400';
+      if (num > 0) {
+        cls = invertGood ? 'bg-rose-500/15 text-rose-400' : 'bg-emerald-500/15 text-emerald-400';
+      } else if (num < 0) {
+        cls = invertGood ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400';
+      }
+      return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full ${cls}">${sign}${num}%</span>`;
+    }
+
+    function applyBadgeEl(el, pct, invertGood = false) {
+      const num = Number(pct || 0);
+      const sign = num > 0 ? '+' : '';
+      el.textContent = `${sign}${num}%`;
+      el.className = 'text-[10px] font-bold px-1.5 py-0.5 rounded-full ' + (
+        num > 0
+          ? (invertGood ? 'bg-rose-500/15 text-rose-500 dark:text-rose-400' : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400')
+          : num < 0
+          ? (invertGood ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-rose-500/15 text-rose-500 dark:text-rose-400')
+          : 'bg-slate-500/15 text-slate-500 dark:text-slate-400'
+      );
+    }
+
+    function showToast(msg, isError = false) {
+      const wrap = document.getElementById('toast');
+      const inner = document.getElementById('toast-inner');
+      inner.textContent = msg;
+      inner.className = `rounded-xl px-4 py-2.5 text-xs font-semibold text-white shadow-xl text-center ${
+        isError ? 'bg-rose-600' : 'bg-emerald-600'
+      }`;
+      wrap.classList.remove('hidden');
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => wrap.classList.add('hidden'), 3200);
+    }
+
+    function haptic(type = 'light') {
+      try { tg?.HapticFeedback?.impactOccurred(type); } catch {}
+    }
+
+    // Theme management
+    function applyTheme(mode) {
+      const isDark = mode !== 'light';
+      document.documentElement.classList.toggle('dark', isDark);
+      document.getElementById('theme-icon').textContent = isDark ? '☀️' : '🌙';
+      localStorage.setItem('dookonchi_theme', isDark ? 'dark' : 'light');
+      try {
+        tg?.setHeaderColor?.(isDark ? '#060913' : '#f1f5f9');
+        tg?.setBackgroundColor?.(isDark ? '#060913' : '#f1f5f9');
+      } catch {}
+      if (state.overviewData) renderGhostChart();
+      if (state.expensesData) renderExpenseDonut();
+    }
+
+    // Tashkent date helpers
+    function getTashkentNow() {
+      return new Date(Date.now() + 5 * 3600 * 1000);
+    }
+
+    function initMonthOptions() {
+      const tNow = getTashkentNow();
+      let y = tNow.getUTCFullYear();
+      let m = tNow.getUTCMonth(); // 0..11
+      const options = [];
+      for (let i = 0; i < 18; i++) {
+        const ym = `${y}-${String(m + 1).padStart(2, '0')}`;
+        options.push({ ym, label: `${UZ_MONTHS[m]} ${y}` });
+        m -= 1;
+        if (m < 0) { m = 11; y -= 1; }
+      }
+      state.monthA = options[0].ym;
+      state.monthB = options[1].ym;
+
+      const html = options.map((o) => `<option value="${o.ym}">${o.label}</option>`).join('');
+      for (const id of ['select-month-a', 'select-month-b', 'exp-month-a', 'exp-month-b']) {
+        document.getElementById(id).innerHTML = html;
+      }
+      document.getElementById('select-month-a').value = state.monthA;
+      document.getElementById('select-month-b').value = state.monthB;
+      document.getElementById('exp-month-a').value = state.monthA;
+      document.getElementById('exp-month-b').value = state.monthB;
+
+      const todayIso = `${tNow.getUTCFullYear()}-${String(tNow.getUTCMonth() + 1).padStart(2, '0')}-${String(tNow.getUTCDate()).padStart(2, '0')}`;
+      const yest = new Date(tNow.getTime() - 86400000);
+      const yestIso = `${yest.getUTCFullYear()}-${String(yest.getUTCMonth() + 1).padStart(2, '0')}-${String(yest.getUTCDate()).padStart(2, '0')}`;
+      state.dateA = todayIso;
+      state.dateB = yestIso;
+      document.getElementById('input-date-a').value = state.dateA;
+      document.getElementById('input-date-b').value = state.dateB;
+    }
+
+    async function apiFetch(url, opts = {}) {
+      const initData = tg?.initData || '';
+      const res = await fetch(url, {
+        ...opts,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': initData,
+          ...(opts.headers || {}),
+        },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          document.getElementById('auth-error').classList.remove('hidden');
+          document.getElementById('auth-error-msg').textContent = json.error || "Ruxsat yo'q. Bot orqali qayta kiring.";
+        }
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      document.getElementById('auth-error').classList.add('hidden');
+      return json;
+    }
+
+    // TAB 1: Overview
+    async function loadOverview() {
+      try {
+        const data = await apiFetch(
+          `/api/dashboard/overview?monthA=${encodeURIComponent(state.monthA)}&monthB=${encodeURIComponent(state.monthB)}`
+        );
+        state.overviewData = data;
+        document.getElementById('header-user').textContent = data.user?.name || "Do'kon egasi";
+
+        const mc = data.monthlyComparison;
+        const dm = data.supplierDebtMap;
+
+        document.getElementById('kpi-sales-val').textContent = fmtCompact(mc.monthA.salesUzs) + " so'm";
+        document.getElementById('kpi-sales-sub').textContent = `B oy: ${fmtCompact(mc.monthB.salesUzs)} so'm`;
+        applyBadgeEl(document.getElementById('kpi-sales-delta'), mc.deltas.salesPct, false);
+
+        document.getElementById('kpi-incoming-val').textContent = fmtCompact(mc.monthA.incomingUzs) + " so'm";
+        document.getElementById('kpi-incoming-sub').textContent = `Savdoga nisbati: ${mc.monthA.incomingToSalesRatioPct}%`;
+        applyBadgeEl(document.getElementById('kpi-incoming-delta'), mc.deltas.incomingUzsPct, false);
+
+        document.getElementById('kpi-debt-uzs').textContent = fmtCompact(dm.totalDebtUzs) + " so'm";
+        document.getElementById('kpi-debt-usd').textContent = fmtUsd(dm.totalDebtUsd);
+        document.getElementById('kpi-debt-count').textContent = `${dm.suppliersCount} ta`;
+
+        document.getElementById('kpi-expense-val').textContent = fmtCompact(mc.monthA.expensesUzs) + " so'm";
+        document.getElementById('kpi-expense-sub').textContent = `B oy: ${fmtCompact(mc.monthB.expensesUzs)} so'm`;
+        applyBadgeEl(document.getElementById('kpi-expense-delta'), mc.deltas.expensesUzsPct, true);
+
+        renderGhostChart();
+        renderSupplierDebtMap(dm);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    }
+
+    function renderGhostChart() {
+      const mc = state.overviewData?.monthlyComparison;
+      if (!mc) return;
+      const ctx = document.getElementById('ghost-chart').getContext('2d');
+      const isDark = document.documentElement.classList.contains('dark');
+      const isSales = state.ghostMetric === 'sales';
+
+      const seriesA = isSales ? mc.ghostLineChart.salesCumulativeA : mc.ghostLineChart.incomingCumulativeA;
+      const seriesB = isSales ? mc.ghostLineChart.salesCumulativeB : mc.ghostLineChart.incomingCumulativeB;
+      const accent = isSales ? '#6366F1' : '#10B981';
+
+      const grad = ctx.createLinearGradient(0, 0, 0, 200);
+      grad.addColorStop(0, isSales ? 'rgba(99,102,241,0.34)' : 'rgba(16,185,129,0.34)');
+      grad.addColorStop(1, 'rgba(99,102,241,0.0)');
+
+      if (state.ghostChart) state.ghostChart.destroy();
+      state.ghostChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: mc.ghostLineChart.labels,
+          datasets: [
+            {
+              label: `${mc.monthA.month} (A)`,
+              data: seriesA,
+              borderColor: accent,
+              backgroundColor: grad,
+              fill: true,
+              borderWidth: 2.5,
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              tension: 0.35,
+            },
+            {
+              label: `${mc.monthB.month} (B)`,
+              data: seriesB,
+              borderColor: isDark ? 'rgba(148,163,184,0.55)' : 'rgba(100,116,139,0.55)',
+              borderDash: [5, 5],
+              borderWidth: 1.8,
+              fill: false,
+              pointRadius: 0,
+              tension: 0.35,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: isDark ? '#0F172A' : '#1E293B',
+              titleFont: { size: 11 },
+              bodyFont: { size: 11 },
+              callbacks: {
+                title: (items) => `${items[0].label}-sana`,
+                label: (item) => `${item.dataset.label}: ${fmtSom(item.parsed.y)}`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: isDark ? '#64748B' : '#64748B', font: { size: 10 }, maxTicksLimit: 8 },
+            },
+            y: {
+              grid: { color: isDark ? 'rgba(148,163,184,0.08)' : 'rgba(15,23,42,0.06)' },
+              ticks: {
+                color: isDark ? '#64748B' : '#64748B',
+                font: { size: 10 },
+                callback: (v) => fmtCompact(v),
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function renderSupplierDebtMap(dm) {
+      const container = document.getElementById('supplier-debt-list');
+      if (!dm.suppliers.length) {
+        container.innerHTML = `<div class="text-xs text-slate-400 text-center py-6">Hozircha faol ta'minotchilar yo'q.</div>`;
+        return;
+      }
+
+      container.innerHTML = dm.suppliers
+        .map((s) => {
+          const pct = Math.max(0, Math.min(100, Number(s.sharePercentUzs || 0)));
+          const usdBadge = Math.abs(s.debtUsd) > 0.001
+            ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">${fmtUsd(s.debtUsd)}</span>`
+            : '';
+          const lastAct = s.lastActivityDate ? `Oxirgi: ${s.lastActivityDate}` : "Amaliyot yo'q";
+          return `
+            <button onclick="openSupplierModal('${escapeHtml(s.id)}')" class="w-full text-left p-3 rounded-xl bg-slate-100/80 dark:bg-obsidian-900/75 hover:bg-slate-200/70 dark:hover:bg-slate-800/80 border border-slate-200/70 dark:border-slate-800 transition active:scale-[0.99]">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <div class="min-w-0">
+                  <div class="text-xs font-bold truncate">${escapeHtml(s.name)}</div>
+                  <div class="text-[10px] text-slate-500 dark:text-slate-400">${escapeHtml(lastAct)}</div>
+                </div>
+                <div class="text-right shrink-0 space-y-0.5">
+                  <div class="text-xs font-extrabold">${fmtSom(s.debtUzs)}</div>
+                  <div class="flex items-center justify-end gap-1">${usdBadge}<span class="text-[10px] font-semibold text-indigo-500 dark:text-indigo-400">${pct}%</span></div>
+                </div>
+              </div>
+              <div class="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                <div class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500" style="width:${pct}%"></div>
+              </div>
+            </button>
+          `;
+        })
+        .join('');
+    }
+
+    // Supplier Slide-Up Modal
+    window.openSupplierModal = async function (supplierId) {
+      haptic('light');
+      state.modalSupplierId = supplierId;
+      state.modalSubtab = 'cheklar';
+      const modal = document.getElementById('supplier-modal');
+      modal.classList.remove('hidden');
+      document.getElementById('modal-sup-name').textContent = 'Yuklanmoqda...';
+      document.getElementById('modal-sup-debt').textContent = '—';
+      document.getElementById('modal-records').innerHTML = `<div class="text-xs text-slate-400 text-center py-8">Ma'lumotlar yuklanmoqda...</div>`;
+      updateModalSubtabStyles();
+
+      try {
+        const data = await apiFetch(`/api/dashboard/supplier/${encodeURIComponent(supplierId)}`);
+        state.modalData = data;
+        document.getElementById('modal-sup-name').textContent = data.supplier.name;
+        const debtText = `${fmtSom(data.balance.debtUzs)}  •  ${fmtUsd(data.balance.debtUsd)}`;
+        document.getElementById('modal-sup-debt').textContent = debtText;
+        renderModalRecords();
+      } catch (err) {
+        document.getElementById('modal-records').innerHTML = `<div class="text-xs text-rose-400 text-center py-8">${escapeHtml(err.message)}</div>`;
+      }
+    };
+
+    function closeSupplierModal() {
+      document.getElementById('supplier-modal').classList.add('hidden');
+      state.modalSupplierId = null;
+      state.modalData = null;
+    }
+
+    function updateModalSubtabStyles() {
+      document.querySelectorAll('.modal-subtab').forEach((btn) => {
+        const active = btn.dataset.subtab === state.modalSubtab;
+        btn.className = `modal-subtab py-1.5 rounded-lg transition ${
+          active ? 'bg-indigo-500 text-white' : 'text-slate-500 dark:text-slate-400'
+        }`;
+      });
+    }
+
+    function renderModalRecords() {
+      const container = document.getElementById('modal-records');
+      if (!state.modalData) return;
+      const list = state.modalData[state.modalSubtab]?.items || [];
+      if (!list.length) {
+        container.innerHTML = `<div class="text-xs text-slate-400 text-center py-8">Bu bo'limda yozuvlar yo'q.</div>`;
+        return;
+      }
+      container.innerHTML = list
+        .map((r) => {
+          const amtStr = r.currency === 'USD' ? fmtUsd(r.amount) : fmtSom(r.amount);
+          const sign = r.type === 'INCOMING_GOODS' ? '+' : '-';
+          const color =
+            r.type === 'INCOMING_GOODS'
+              ? 'text-indigo-500 dark:text-indigo-400'
+              : r.type === 'PAYMENT'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-amber-600 dark:text-amber-400';
+          return `
+            <div class="p-3 rounded-xl bg-slate-100 dark:bg-obsidian-950 border border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-xs font-semibold truncate">${escapeHtml(r.note || 'Amaliyot')}</div>
+                <div class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">${fmtDateShort(r.date)}</div>
+              </div>
+              <div class="text-xs font-extrabold shrink-0 ${color}">${sign}${amtStr}</div>
+            </div>
+          `;
+        })
+        .join('');
+    }
+
+    // TAB 2: Daily Time-Machine
+    async function loadDaily() {
+      const container = document.getElementById('daily-content');
+      container.innerHTML = `<div class="glass-card rounded-2xl p-6 text-center text-xs text-slate-400">Yuklanmoqda...</div>`;
+      try {
+        const q = state.dailyMode === 'compare'
+          ? `dateA=${encodeURIComponent(state.dateA)}&dateB=${encodeURIComponent(state.dateB)}`
+          : `dateA=${encodeURIComponent(state.dateA)}`;
+        const data = await apiFetch(`/api/dashboard/daily?${q}`);
+        renderDaily(data);
+      } catch (err) {
+        container.innerHTML = `<div class="glass-card rounded-2xl p-5 text-center text-xs text-rose-400">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderDaily(data) {
+      const container = document.getElementById('daily-content');
+      const a = data.dateA;
+      const b = data.dateB;
+      const cmp = data.comparison;
+
+      const metricCard = (title, valA, valB, deltaPct, invertGood = false) => `
+        <div class="glass-card rounded-2xl p-3.5 space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">${title}</span>
+            ${cmp ? deltaBadgeHtml(deltaPct, invertGood) : ''}
+          </div>
+          <div class="text-sm font-extrabold">${valA}</div>
+          ${b ? `<div class="text-[10px] text-slate-500 dark:text-slate-400">${escapeHtml(b.date)}: ${valB}</div>` : ''}
+        </div>
+      `;
+
+      const summaryGrid = `
+        <div class="grid grid-cols-2 gap-3">
+          ${metricCard('💰 Savdo (Z-Hisobot)', fmtSom(a.sales.totalUzs), b ? fmtSom(b.sales.totalUzs) : '', cmp?.salesDeltaPct)}
+          ${metricCard('📦 Kelgan yuk', `${fmtSom(a.incoming.totalUzs)}${a.incoming.totalUsd ? ` / ${fmtUsd(a.incoming.totalUsd)}` : ''}`, b ? fmtSom(b.incoming.totalUzs) : '', cmp?.incomingUzsDeltaPct)}
+          ${metricCard("💸 To'lovlar", `${fmtSom(a.payments.totalUzs)}${a.payments.totalUsd ? ` / ${fmtUsd(a.payments.totalUsd)}` : ''}`, b ? fmtSom(b.payments.totalUzs) : '', cmp?.paymentsUzsDeltaPct)}
+          ${metricCard('📉 Xarajatlar', fmtSom(a.expenses.totalUzs), b ? fmtSom(b.expenses.totalUzs) : '', cmp?.expensesUzsDeltaPct, true)}
+        </div>
+      `;
+
+      const renderListCard = (title, items, emptyText, renderRow) => `
+        <div class="glass-card rounded-2xl p-4 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-bold">${title}</h3>
+            <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-500/15 text-slate-500 dark:text-slate-300">${items.length} ta</span>
+          </div>
+          ${items.length ? `<div class="space-y-2">${items.map(renderRow).join('')}</div>` : `<div class="text-[11px] text-slate-400">${emptyText}</div>`}
+        </div>
+      `;
+
+      const zDetails = `
+        <div class="glass-card rounded-2xl p-4 space-y-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-bold">🧾 Kassa holati (${escapeHtml(a.date)})</h3>
+            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${a.sales.isClosed ? 'bg-emerald-500/15 text-emerald-500' : 'bg-amber-500/15 text-amber-500'}">
+              ${a.sales.isClosed ? 'Yopilgan' : 'Yopilmagan'}
+            </span>
+          </div>
+          <div class="grid grid-cols-3 gap-2 text-center pt-1">
+            <div class="p-2 rounded-xl bg-slate-100 dark:bg-obsidian-900">
+              <div class="text-[10px] text-slate-500">Terminal</div>
+              <div class="text-[11px] font-bold mt-0.5">${fmtCompact(a.sales.terminalAmount)}</div>
+            </div>
+            <div class="p-2 rounded-xl bg-slate-100 dark:bg-obsidian-900">
+              <div class="text-[10px] text-slate-500">Click</div>
+              <div class="text-[11px] font-bold mt-0.5">${fmtCompact(a.sales.clickAmount)}</div>
+            </div>
+            <div class="p-2 rounded-xl bg-slate-100 dark:bg-obsidian-900">
+              <div class="text-[10px] text-slate-500">Kassa naqd</div>
+              <div class="text-[11px] font-bold mt-0.5">${fmtCompact(a.sales.cashRemainingInDrawer)}</div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const incomingCard = renderListCard('📦 Kelgan yuklar', a.incoming.items, "Bu kunda yuk kelmagan.", (it) => `
+        <div class="p-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-900 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold truncate">${escapeHtml(it.supplierName)}</div>
+            <div class="text-[10px] text-slate-500">${escapeHtml(it.time)} • ${escapeHtml(it.note)}</div>
+          </div>
+          <div class="text-xs font-bold text-indigo-500 dark:text-indigo-400 shrink-0">+${it.currency === 'USD' ? fmtUsd(it.amount) : fmtSom(it.amount)}</div>
+        </div>
+      `);
+
+      const paymentsCard = renderListCard("💵 Ta'minotchilarga to'lovlar", a.payments.items, "Bu kunda to'lov qilinmagan.", (it) => `
+        <div class="p-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-900 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold truncate">${escapeHtml(it.supplierName)}</div>
+            <div class="text-[10px] text-slate-500">${escapeHtml(it.time)} • ${escapeHtml(it.note)}</div>
+          </div>
+          <div class="text-xs font-bold text-emerald-600 dark:text-emerald-400 shrink-0">-${it.currency === 'USD' ? fmtUsd(it.amount) : fmtSom(it.amount)}</div>
+        </div>
+      `);
+
+      const expensesCard = renderListCard('📉 Kunlik xarajatlar', a.expenses.items, "Bu kunda xarajat kiritilmagan.", (it) => `
+        <div class="p-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-900 flex items-center justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold truncate">${escapeHtml(it.label)}</div>
+            <div class="text-[10px] text-slate-500">${escapeHtml(it.time)} • ${escapeHtml(it.note || '-')}</div>
+          </div>
+          <div class="text-xs font-bold text-rose-500 shrink-0">${it.currency === 'USD' ? fmtUsd(it.amount) : fmtSom(it.amount)}</div>
+        </div>
+      `);
+
+      container.innerHTML = summaryGrid + zDetails + incomingCard + paymentsCard + expensesCard;
+    }
+
+    // TAB 3: Expenses & Anomaly Radar
+    async function loadExpenses() {
+      try {
+        const data = await apiFetch(
+          `/api/dashboard/expenses?monthA=${encodeURIComponent(state.monthA)}&monthB=${encodeURIComponent(state.monthB)}`
+        );
+        state.expensesData = data;
+        renderExpenses(data);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    }
+
+    function renderExpenses(data) {
+      document.getElementById('expense-total-a').textContent = fmtSom(data.totalUzsA);
+      document.getElementById('expense-total-delta').innerHTML = deltaBadgeHtml(data.totalDeltaPct, true);
+      document.getElementById('expense-ref-subtitle').textContent =
+        `${data.referenceMetricLabel} o'zgarishi: ${data.referenceGrowthPct > 0 ? '+' : ''}${data.referenceGrowthPct}%`;
+
+      const banner = document.getElementById('expense-anomaly-banner');
+      if (data.anomalies.length > 0) {
+        banner.innerHTML = `
+          <div class="rounded-2xl p-4 bg-rose-500/12 border border-rose-500/40 space-y-2">
+            <div class="flex items-center gap-2 text-rose-500 dark:text-rose-400 font-extrabold text-xs">
+              <span>🚨 AI ANOMALIYA RADARI (${data.anomalies.length} ta ogohlantirish)</span>
+            </div>
+            <div class="space-y-1.5">
+              ${data.anomalies.map((an) => `<p class="text-xs text-slate-800 dark:text-rose-100 leading-relaxed">• ${escapeHtml(an.message)}</p>`).join('')}
+            </div>
+          </div>
+        `;
+      } else {
+        banner.innerHTML = `
+          <div class="rounded-2xl p-3.5 bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-2.5 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+            <span>✅</span>
+            <span>Xarajatlar me'yorida — shubhali oshish (anomaliya) aniqlanmadi.</span>
+          </div>
+        `;
+      }
+
+      renderExpenseDonut();
+
+      const listEl = document.getElementById('expense-category-list');
+      listEl.innerHTML = data.categories
+        .map((cat, idx) => `
+          <div class="glass-card rounded-2xl p-3.5 flex items-center justify-between gap-3 ${cat.isAnomaly ? 'border-rose-500/50' : ''}">
+            <div class="flex items-center gap-2.5 min-w-0">
+              <span class="w-3 h-3 rounded-full shrink-0" style="background:${EXP_COLORS[idx % EXP_COLORS.length]}"></span>
+              <div class="min-w-0">
+                <div class="text-xs font-bold flex items-center gap-1.5">
+                  <span>${escapeHtml(cat.label)}</span>
+                  ${cat.isAnomaly ? '<span class="text-[9px] font-extrabold px-1.5 py-0.5 rounded bg-rose-500 text-white">ANOMALIYA</span>' : ''}
+                </div>
+                <div class="text-[10px] text-slate-500 dark:text-slate-400">O'tgan oy: ${fmtSom(cat.amountUzsB)} • Ulush: ${cat.sharePercentA}%</div>
+              </div>
+            </div>
+            <div class="text-right shrink-0 space-y-1">
+              <div class="text-xs font-extrabold">${fmtSom(cat.amountUzsA)}</div>
+              <div>${deltaBadgeHtml(cat.growthPct, true)}</div>
+            </div>
+          </div>
+        `)
+        .join('');
+    }
+
+    function renderExpenseDonut() {
+      const data = state.expensesData;
+      if (!data) return;
+      const ctx = document.getElementById('expense-donut-chart').getContext('2d');
+      const nonZero = data.categories.filter((c) => c.amountUzsA > 0);
+      if (state.donutChart) state.donutChart.destroy();
+      state.donutChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: nonZero.length ? nonZero.map((c) => c.label) : ["Ma'lumot yo'q"],
+          datasets: [{
+            data: nonZero.length ? nonZero.map((c) => c.amountUzsA) : [1],
+            backgroundColor: nonZero.length ? nonZero.map((_, i) => EXP_COLORS[i % EXP_COLORS.length]) : ['#334155'],
+            borderWidth: 0,
+            hoverOffset: 6,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '66%',
+          plugins: {
+            legend: {
+              position: 'right',
+              labels: { color: document.documentElement.classList.contains('dark') ? '#CBD5E1' : '#334155', font: { size: 11 }, boxWidth: 10 },
+            },
+            tooltip: {
+              callbacks: {
+                label: (item) => nonZero.length ? `${item.label}: ${fmtSom(item.parsed)}` : "Xarajatlar yo'q",
+              },
+            },
+          },
+        },
+      });
+    }
+
+    // TAB 4: Cycles & Payment Calendar
+    async function loadCycles() {
+      try {
+        const data = await apiFetch('/api/dashboard/cycles');
+        state.cyclesData = data;
+        if (!state.selectedWeekday) state.selectedWeekday = data.todayWeekday || 1;
+        renderCycles();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    }
+
+    function renderCycles() {
+      const data = state.cyclesData;
+      if (!data) return;
+
+      // Weekday pills
+      const pillsEl = document.getElementById('weekday-pills');
+      pillsEl.innerHTML = data.paymentCalendar
+        .map((day) => {
+          const isSelected = day.weekday === state.selectedWeekday;
+          const hasSup = day.suppliers.length > 0;
+          return `
+            <button onclick="selectWeekday(${day.weekday})" class="py-2 rounded-xl flex flex-col items-center justify-center gap-0.5 border transition ${
+              isSelected
+                ? 'bg-indigo-500 text-white border-indigo-400 shadow-md shadow-indigo-500/25'
+                : 'bg-slate-100 dark:bg-obsidian-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+            }">
+              <span class="text-[11px] font-bold">${day.shortLabel}</span>
+              <span class="text-[9px] ${isSelected ? 'text-indigo-100' : hasSup ? 'text-emerald-500 font-bold' : 'text-slate-400'}">
+                ${hasSup ? `${day.suppliers.length} ta` : '•'}
+              </span>
+            </button>
+          `;
+        })
+        .join('');
+
+      const selectedDay = data.paymentCalendar.find((d) => d.weekday === state.selectedWeekday) || data.paymentCalendar[0];
+      const supListEl = document.getElementById('weekday-suppliers');
+      if (!selectedDay.suppliers.length) {
+        supListEl.innerHTML = `<div class="text-xs text-slate-400 text-center py-4">${selectedDay.fullLabel} kuni uchun odatiy to'lovlar aniqlanmadi.</div>`;
+      } else {
+        supListEl.innerHTML = selectedDay.suppliers
+          .map((s) => `
+            <button onclick="openSupplierModal('${escapeHtml(s.supplierId)}')" class="w-full text-left p-3 rounded-xl bg-slate-100 dark:bg-obsidian-900 border border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs font-bold truncate">${escapeHtml(s.supplierName)}</div>
+                <div class="text-[10px] text-slate-500 dark:text-slate-400">${s.confidencePercent}% aniqlik (${s.paymentCount} ta to'lov asosida)</div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="text-xs font-extrabold">${fmtSom(s.debtUzs)}</div>
+                ${Math.abs(s.debtUsd) > 0.001 ? `<div class="text-[10px] font-bold text-emerald-500">${fmtUsd(s.debtUsd)}</div>` : ''}
+              </div>
+            </button>
+          `)
+          .join('');
+      }
+
+      // Restock Radar list
+      const radarEl = document.getElementById('restock-radar-list');
+      if (!data.restockRadar.length) {
+        radarEl.innerHTML = `<div class="text-xs text-slate-400 text-center py-6">Sikl aniqlash uchun har bir ta'minotchida kamida 2 ta kelgan yuk bo'lishi kerak.</div>`;
+      } else {
+        radarEl.innerHTML = data.restockRadar
+          .map((r) => {
+            const badgeCls =
+              r.status === 'OVERDUE'
+                ? 'bg-rose-500 text-white'
+                : r.status === 'TODAY' || r.status === 'TOMORROW'
+                ? 'bg-amber-500 text-white'
+                : r.status === 'SOON'
+                ? 'bg-indigo-500/20 text-indigo-500 dark:text-indigo-300'
+                : 'bg-slate-500/15 text-slate-500 dark:text-slate-400';
+            return `
+              <button onclick="openSupplierModal('${escapeHtml(r.supplierId)}')" class="w-full text-left p-3 rounded-xl bg-slate-100 dark:bg-obsidian-900 border ${r.isUrgent ? 'border-amber-500/40' : 'border-slate-200/70 dark:border-slate-800'} flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="text-xs font-bold truncate">${escapeHtml(r.supplierName)}</div>
+                  <div class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Har ${r.avgCycleDays} kunda • Oxirgi: ${r.lastDeliveryDate}
+                  </div>
+                </div>
+                <div class="text-right shrink-0 space-y-1">
+                  <div class="text-[10px] font-extrabold px-2 py-0.5 rounded-full inline-block ${badgeCls}">${escapeHtml(r.badge)}</div>
+                  <div>${deltaBadgeHtml(r.monthlyCoefficientPct, false)}</div>
+                </div>
+              </button>
+            `;
+          })
+          .join('');
+      }
+    }
+
+    window.selectWeekday = function (wd) {
+      haptic('light');
+      state.selectedWeekday = wd;
+      renderCycles();
+    };
+
+    // Navigation switching
+    function switchTab(tab) {
+      haptic('light');
+      state.activeTab = tab;
+      for (const t of ['overview', 'daily', 'expenses', 'cycles']) {
+        document.getElementById(`tab-${t}`).classList.toggle('hidden', t !== tab);
+      }
+      document.querySelectorAll('.nav-btn').forEach((btn) => {
+        const active = btn.dataset.tab === tab;
+        btn.className = `nav-btn flex flex-col items-center gap-0.5 py-1.5 rounded-xl transition ${
+          active ? 'text-indigo-500 dark:text-indigo-400 font-bold' : 'text-slate-500 dark:text-slate-400 font-medium'
+        }`;
+      });
+      if (tab === 'overview') loadOverview();
+      else if (tab === 'daily') loadDaily();
+      else if (tab === 'expenses') loadExpenses();
+      else if (tab === 'cycles') loadCycles();
+    }
+
+    // Bind events
+    document.querySelectorAll('.nav-btn').forEach((btn) => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    document.getElementById('btn-theme').addEventListener('click', () => {
+      haptic('light');
+      const isDark = document.documentElement.classList.contains('dark');
+      applyTheme(isDark ? 'light' : 'dark');
+    });
+
+    document.getElementById('btn-refresh').addEventListener('click', () => {
+      haptic('medium');
+      switchTab(state.activeTab);
+    });
+
+    function syncMonthChange(a, b) {
+      state.monthA = a;
+      state.monthB = b;
+      document.getElementById('select-month-a').value = a;
+      document.getElementById('select-month-b').value = b;
+      document.getElementById('exp-month-a').value = a;
+      document.getElementById('exp-month-b').value = b;
+      if (state.activeTab === 'overview') loadOverview();
+      if (state.activeTab === 'expenses') loadExpenses();
+    }
+
+    document.getElementById('select-month-a').addEventListener('change', (e) => syncMonthChange(e.target.value, state.monthB));
+    document.getElementById('select-month-b').addEventListener('change', (e) => syncMonthChange(state.monthA, e.target.value));
+    document.getElementById('exp-month-a').addEventListener('change', (e) => syncMonthChange(e.target.value, state.monthB));
+    document.getElementById('exp-month-b').addEventListener('change', (e) => syncMonthChange(state.monthA, e.target.value));
+
+    document.querySelectorAll('.ghost-toggle').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        haptic('light');
+        state.ghostMetric = btn.dataset.ghost;
+        document.querySelectorAll('.ghost-toggle').forEach((b) => {
+          const active = b.dataset.ghost === state.ghostMetric;
+          b.className = `ghost-toggle px-2.5 py-1 rounded-lg transition ${
+            active ? 'bg-indigo-500 text-white' : 'text-slate-500 dark:text-slate-400'
+          }`;
+        });
+        renderGhostChart();
+      });
+    });
+
+    document.getElementById('daily-mode-single').addEventListener('click', () => {
+      haptic('light');
+      state.dailyMode = 'single';
+      document.getElementById('daily-mode-single').className = 'py-2 rounded-lg bg-indigo-500 text-white transition';
+      document.getElementById('daily-mode-compare').className = 'py-2 rounded-lg text-slate-600 dark:text-slate-400 transition';
+      document.getElementById('date-b-wrap').classList.add('hidden');
+      loadDaily();
+    });
+
+    document.getElementById('daily-mode-compare').addEventListener('click', () => {
+      haptic('light');
+      state.dailyMode = 'compare';
+      document.getElementById('daily-mode-compare').className = 'py-2 rounded-lg bg-indigo-500 text-white transition';
+      document.getElementById('daily-mode-single').className = 'py-2 rounded-lg text-slate-600 dark:text-slate-400 transition';
+      document.getElementById('date-b-wrap').classList.remove('hidden');
+      loadDaily();
+    });
+
+    document.getElementById('input-date-a').addEventListener('change', (e) => {
+      state.dateA = e.target.value;
+      loadDaily();
+    });
+    document.getElementById('input-date-b').addEventListener('change', (e) => {
+      state.dateB = e.target.value;
+      loadDaily();
+    });
+
+    document.getElementById('modal-close').addEventListener('click', closeSupplierModal);
+    document.getElementById('modal-backdrop').addEventListener('click', closeSupplierModal);
+    document.querySelectorAll('.modal-subtab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        haptic('light');
+        state.modalSubtab = btn.dataset.subtab;
+        updateModalSubtabStyles();
+        renderModalRecords();
+      });
+    });
+
+    document.getElementById('btn-send-pdf').addEventListener('click', async () => {
+      if (!state.modalSupplierId) return;
+      const btn = document.getElementById('btn-send-pdf');
+      const origHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span>⏳ PDF tayyorlanmoqda...</span>';
+      try {
+        await apiFetch(`/api/dashboard/supplier/${encodeURIComponent(state.modalSupplierId)}/send-pdf`, {
+          method: 'POST',
+        });
+        haptic('medium');
+        showToast('✅ PDF Sverka Telegram chatga yuborildi!');
+      } catch (err) {
+        showToast(`❌ ${err.message}`, true);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
+    });
+
+    // Boot
+    applyTheme(localStorage.getItem('dookonchi_theme') || (tg?.colorScheme === 'light' ? 'light' : 'dark'));
+    initMonthOptions();
+    loadOverview();
+  </script>
+</body>
+</html>

@@ -22,6 +22,7 @@ import { suppliersHandler } from './handlers/suppliers';
 import { cashHandler } from './handlers/cash';
 import { startCronJobs } from '../services/cron.service';
 import { sessionCache } from '../utils/cache';
+import { handleDashboardHttpRequest } from '../web/dashboard.router';
 
 const baseStorage = new PrismaAdapter<SessionData>(prisma.session as any);
 
@@ -102,10 +103,23 @@ const healthServer = http.createServer((req, res) => {
       uptime: Math.floor(process.uptime()),
       timestamp: new Date().toISOString()
     }));
-  } else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found' }));
+    return;
   }
+
+  void handleDashboardHttpRequest(req, res, bot)
+    .then((handled) => {
+      if (!handled && !res.writableEnded) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not Found' }));
+      }
+    })
+    .catch((err) => {
+      logger.error({ err, reqPath }, 'Unhandled HTTP server error');
+      if (!res.writableEnded) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal Server Error' }));
+      }
+    });
 });
 
 healthServer.on('error', (err) => {
