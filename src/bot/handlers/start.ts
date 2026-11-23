@@ -1,6 +1,11 @@
 import { Composer, InlineKeyboard, InputMediaBuilder } from 'grammy';
 import { MyContext } from '../context';
-import { getMainMenu, getPendingRegistrationKeyboard, isMenuButton } from '../keyboards/menu';
+import {
+  getDashboardInlineKeyboard,
+  getMainMenu,
+  getPendingRegistrationKeyboard,
+  isMenuButton,
+} from '../keyboards/menu';
 import { getOnboardingCarouselKeyboard } from '../keyboards/inline';
 import { clearSession, safeDelete, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { SubscriptionService } from '../../services/subscription.service';
@@ -241,6 +246,23 @@ startHandler.hears(/^❓\s*Yo[‘'’`]?riqnoma$/i, async (ctx) => {
   clearSession(ctx);
   await sendOnboardingCarousel(ctx, { includeIntroVideo: true });
 });
+
+// CEO Dashboard Mini App launcher via InlineKeyboard web_app (always passes signed initData)
+const sendDashboardInlineLauncher = async (ctx: MyContext) => {
+  clearSession(ctx);
+  const inlineKb = getDashboardInlineKeyboard();
+  if (!inlineKb) {
+    await ctx.reply("⚠️ Dashboard havolasi hali sozlanmagan (APP_URL / RENDER_EXTERNAL_URL).");
+    return;
+  }
+  await ctx.reply(
+    '📊 **CEO Dashboard v4.0**\n\nOylik va kunlik taqqoslashlar, xarajat anomaliyalari, yuk olish sikllari va qarzdorlik xaritasini ochish uchun pastdagi tugmani bosing:',
+    { parse_mode: 'Markdown', reply_markup: inlineKb }
+  );
+};
+
+startHandler.hears('📊 Dashboard', sendDashboardInlineLauncher);
+startHandler.command('dashboard', sendDashboardInlineLauncher);
 
 // Interactive Onboarding Carousel callbacks
 startHandler.callbackQuery(/^onb_slide:(.+)$/, async (ctx) => {

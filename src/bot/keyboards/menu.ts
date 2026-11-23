@@ -1,4 +1,4 @@
-import { Keyboard } from 'grammy';
+import { InlineKeyboard, Keyboard } from 'grammy';
 
 export const SYSTEM_MENU_BUTTONS = [
   '📊 Dashboard',
@@ -15,6 +15,7 @@ export const SYSTEM_MENU_BUTTONS = [
   "❓ Yo'riqnoma",
   '👑 Admin Panel',
   '/start',
+  '/dashboard',
   '/help',
   '/admin',
   '/report',
@@ -26,7 +27,7 @@ export const isMenuButton = (text: string) => SYSTEM_MENU_BUTTONS.some((btn) => 
 /**
  * Resolves the public HTTPS URL for the CEO Telegram Mini App Dashboard.
  * Checks APP_URL, RENDER_EXTERNAL_URL, and KOYEB_PUBLIC_DOMAIN.
- * Returns null if unset or non-HTTPS so Telegram Bot API never rejects Keyboard.webApp().
+ * Returns null if unset or non-HTTPS so Telegram Bot API never rejects web_app buttons.
  */
 export function getDashboardWebAppUrl(
   rawEnv: Record<string, string | undefined> = process.env
@@ -56,6 +57,18 @@ export function getDashboardWebAppUrl(
   return null;
 }
 
+/**
+ * InlineKeyboard WebApp button — unlike ReplyKeyboard web_app buttons, inline web_app
+ * buttons ALWAYS pass full signed Telegram.WebApp.initData on Mobile & Desktop.
+ */
+export function getDashboardInlineKeyboard(
+  rawEnv: Record<string, string | undefined> = process.env
+): InlineKeyboard | null {
+  const dashboardUrl = getDashboardWebAppUrl(rawEnv);
+  if (!dashboardUrl) return null;
+  return new InlineKeyboard().webApp('📊 CEO Dashboardni ochish', dashboardUrl);
+}
+
 export function getMainMenu(
   role: string = 'STORE_OWNER',
   rawEnv: Record<string, string | undefined> = process.env
@@ -64,7 +77,8 @@ export function getMainMenu(
 
   const dashboardUrl = getDashboardWebAppUrl(rawEnv);
   if (dashboardUrl) {
-    kb.webApp('📊 Dashboard', dashboardUrl).row();
+    // Use regular text button on ReplyKeyboard (ReplyKeyboard web_app sends empty initData)
+    kb.text('📊 Dashboard').row();
   }
 
   kb.text('📊 Z-Hisobot (Kunlik)')

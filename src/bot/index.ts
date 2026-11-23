@@ -23,6 +23,7 @@ import { cashHandler } from './handlers/cash';
 import { startCronJobs } from '../services/cron.service';
 import { sessionCache } from '../utils/cache';
 import { handleDashboardHttpRequest } from '../web/dashboard.router';
+import { getDashboardWebAppUrl } from './keyboards/menu';
 
 const baseStorage = new PrismaAdapter<SessionData>(prisma.session as any);
 
@@ -219,6 +220,23 @@ async function bootstrap() {
   await bot.api
     .deleteWebhook({ drop_pending_updates: false })
     .catch((err) => logger.warn({ err }, 'Failed to delete webhook before starting polling'));
+
+  // Configure native Telegram Chat Menu Button so every user has a 1-tap Dashboard button that ALWAYS sends signed initData
+  const dashboardUrl = getDashboardWebAppUrl();
+  if (dashboardUrl) {
+    try {
+      await bot.api.setChatMenuButton({
+        menu_button: {
+          type: 'web_app',
+          text: '📊 Dashboard',
+          web_app: { url: dashboardUrl },
+        },
+      });
+      logger.info({ dashboardUrl }, '📊 Telegram Chat Menu Button configured for CEO Dashboard');
+    } catch (err) {
+      logger.warn({ err, dashboardUrl }, 'Failed to configure Telegram Chat Menu Button');
+    }
+  }
 
   startCronJobs(bot);
   startBotRunner();

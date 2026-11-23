@@ -349,10 +349,31 @@
   </nav>
 
   <script>
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg) {
-      tg.ready();
-      tg.expand();
+    const tg = window.Telegram?.WebApp || null;
+    window.Telegram?.WebApp?.ready?.();
+    window.Telegram?.WebApp?.expand?.();
+
+    function getTelegramInitData() {
+      const direct = window.Telegram?.WebApp?.initData;
+      if (direct && typeof direct === 'string' && direct.trim()) {
+        return direct.trim();
+      }
+      try {
+        const rawHash = window.location.hash ? window.location.hash.replace(/^#/, '') : '';
+        if (rawHash) {
+          const fromHash = new URLSearchParams(rawHash).get('tgWebAppData');
+          if (fromHash && fromHash.trim()) {
+            return fromHash.trim();
+          }
+        }
+      } catch {}
+      try {
+        const fromQuery = new URLSearchParams(window.location.search || '').get('tgWebAppData');
+        if (fromQuery && fromQuery.trim()) {
+          return fromQuery.trim();
+        }
+      } catch {}
+      return '';
     }
 
     const UZ_MONTHS = [
@@ -514,7 +535,7 @@
     }
 
     async function apiFetch(url, opts = {}) {
-      const initData = tg?.initData || '';
+      const initData = getTelegramInitData();
       const res = await fetch(url, {
         ...opts,
         headers: {

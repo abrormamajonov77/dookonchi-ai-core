@@ -196,6 +196,18 @@ exports.startHandler.hears(/^❓\s*Yo[‘'’`]?riqnoma$/i, async (ctx) => {
     (0, telegram_1.clearSession)(ctx);
     await sendOnboardingCarousel(ctx, { includeIntroVideo: true });
 });
+// CEO Dashboard Mini App launcher via InlineKeyboard web_app (always passes signed initData)
+const sendDashboardInlineLauncher = async (ctx) => {
+    (0, telegram_1.clearSession)(ctx);
+    const inlineKb = (0, menu_1.getDashboardInlineKeyboard)();
+    if (!inlineKb) {
+        await ctx.reply("⚠️ Dashboard havolasi hali sozlanmagan (APP_URL / RENDER_EXTERNAL_URL).");
+        return;
+    }
+    await ctx.reply('📊 **CEO Dashboard v4.0**\n\nOylik va kunlik taqqoslashlar, xarajat anomaliyalari, yuk olish sikllari va qarzdorlik xaritasini ochish uchun pastdagi tugmani bosing:', { parse_mode: 'Markdown', reply_markup: inlineKb });
+};
+exports.startHandler.hears('📊 Dashboard', sendDashboardInlineLauncher);
+exports.startHandler.command('dashboard', sendDashboardInlineLauncher);
 // Interactive Onboarding Carousel callbacks
 exports.startHandler.callbackQuery(/^onb_slide:(.+)$/, async (ctx) => {
     const targetIndex = (0, onboarding_service_1.parseOnboardingSlideCallback)(ctx.callbackQuery.data);

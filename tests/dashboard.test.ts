@@ -21,6 +21,7 @@ import {
   buildDailyRestockReminderMessages,
 } from '../src/services/cron.service';
 import {
+  getDashboardInlineKeyboard,
   getDashboardWebAppUrl,
   getMainMenu,
   isMenuButton,
@@ -525,6 +526,8 @@ describe('Telegram WebApp initData HMAC-SHA256 Verification & Dashboard HTTP Rou
     expect(dashRes.getStatus()).toBe(200);
     expect(dashRes.getHeaders()['Content-Type']).toContain('text/html');
     expect(dashRes.getBody()).toContain('Dookonchi AI');
+    expect(dashRes.getBody()).toContain('https://telegram.org/js/telegram-web-app.js');
+    expect(dashRes.getBody()).toContain('tgWebAppData');
 
     // 3. Unauthenticated GET /api/dashboard/overview returns 401
     const apiRes = createMockHttpResponse();
@@ -636,8 +639,9 @@ describe('09:00 Smart Telegram Reminders & Dashboard Menu Entry Button', () => {
     expect(restockMsgs[1]).toContain("2 kundan so'ng «Coca-Cola»dan yuk olish vaqtingiz (o‘rtacha har 5 kunda)");
   });
 
-  it('adds 📊 Dashboard WebApp button when APP_URL/RENDER_EXTERNAL_URL is HTTPS and falls back gracefully when unset', () => {
+  it('adds 📊 Dashboard text button on ReplyKeyboard and InlineKeyboard web_app launcher when HTTPS URL is configured', () => {
     expect(isMenuButton('📊 Dashboard')).toBe(true);
+    expect(isMenuButton('/dashboard')).toBe(true);
 
     expect(getDashboardWebAppUrl({ APP_URL: 'https://dookonchi.onrender.com/' })).toBe(
       'https://dookonchi.onrender.com/dashboard'
@@ -648,11 +652,24 @@ describe('09:00 Smart Telegram Reminders & Dashboard Menu Entry Button', () => {
     expect(getDashboardWebAppUrl({ APP_URL: 'http://localhost:3000' })).toBeNull();
     expect(getDashboardWebAppUrl({})).toBeNull();
 
-    const withWebApp = JSON.stringify(
-      getMainMenu('STORE_OWNER', { APP_URL: 'https://dookonchi.onrender.com' }).build()
-    );
-    expect(withWebApp).toContain('📊 Dashboard');
-    expect(withWebApp).toContain('https://dookonchi.onrender.com/dashboard');
+    // ReplyKeyboard must use regular text button (NOT web_app) so tapping triggers InlineKeyboard web_app with signed initData
+    const replyKb = getMainMenu('STORE_OWNER', { APP_URL: 'https://dookonchi.onrender.com' }).build();
+    const replyKbJson = JSON.stringify(replyKb);
+    expect(replyKbJson).toContain('📊 Dashboard');
+    expect(replyKbJson).not.toContain('web_app');
+
+    // InlineKeyboard web_app button sends full signed initData on Mobile & Desktop
+    const inlineKb = getDashboardInlineKeyboard({ APP_URL: 'https://dookonchi.onrender.com' });
+    expect(inlineKb).not.toBeNull();
+    expect(inlineKb!.inline_keyboard).toEqual([
+      [
+        {
+          text: '📊 CEO Dashboardni ochish',
+          web_app: { url: 'https://dookonchi.onrender.com/dashboard' },
+        },
+      ],
+    ]);
+    expect(getDashboardInlineKeyboard({})).toBeNull();
 
     const withoutWebApp = JSON.stringify(getMainMenu('STORE_OWNER', {}).build());
     expect(withoutWebApp).not.toContain('📊 Dashboard');

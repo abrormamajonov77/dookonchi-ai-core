@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isMenuButton = exports.SYSTEM_MENU_BUTTONS = void 0;
 exports.getDashboardWebAppUrl = getDashboardWebAppUrl;
+exports.getDashboardInlineKeyboard = getDashboardInlineKeyboard;
 exports.getMainMenu = getMainMenu;
 exports.getPendingRegistrationKeyboard = getPendingRegistrationKeyboard;
 const grammy_1 = require("grammy");
@@ -20,6 +21,7 @@ exports.SYSTEM_MENU_BUTTONS = [
     "❓ Yo'riqnoma",
     '👑 Admin Panel',
     '/start',
+    '/dashboard',
     '/help',
     '/admin',
     '/report',
@@ -30,7 +32,7 @@ exports.isMenuButton = isMenuButton;
 /**
  * Resolves the public HTTPS URL for the CEO Telegram Mini App Dashboard.
  * Checks APP_URL, RENDER_EXTERNAL_URL, and KOYEB_PUBLIC_DOMAIN.
- * Returns null if unset or non-HTTPS so Telegram Bot API never rejects Keyboard.webApp().
+ * Returns null if unset or non-HTTPS so Telegram Bot API never rejects web_app buttons.
  */
 function getDashboardWebAppUrl(rawEnv = process.env) {
     const candidates = [
@@ -59,11 +61,22 @@ function getDashboardWebAppUrl(rawEnv = process.env) {
     }
     return null;
 }
+/**
+ * InlineKeyboard WebApp button — unlike ReplyKeyboard web_app buttons, inline web_app
+ * buttons ALWAYS pass full signed Telegram.WebApp.initData on Mobile & Desktop.
+ */
+function getDashboardInlineKeyboard(rawEnv = process.env) {
+    const dashboardUrl = getDashboardWebAppUrl(rawEnv);
+    if (!dashboardUrl)
+        return null;
+    return new grammy_1.InlineKeyboard().webApp('📊 CEO Dashboardni ochish', dashboardUrl);
+}
 function getMainMenu(role = 'STORE_OWNER', rawEnv = process.env) {
     const kb = new grammy_1.Keyboard().resized();
     const dashboardUrl = getDashboardWebAppUrl(rawEnv);
     if (dashboardUrl) {
-        kb.webApp('📊 Dashboard', dashboardUrl).row();
+        // Use regular text button on ReplyKeyboard (ReplyKeyboard web_app sends empty initData)
+        kb.text('📊 Dashboard').row();
     }
     kb.text('📊 Z-Hisobot (Kunlik)')
         .text('📈 Davriy Hisobot')
