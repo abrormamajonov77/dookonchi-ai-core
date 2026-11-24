@@ -8,7 +8,7 @@ exports.parseSubscriptionDuration = parseSubscriptionDuration;
 exports.isEligibleForAutoTrial = isEligibleForAutoTrial;
 const grammy_1 = require("grammy");
 const prisma_1 = require("../database/prisma");
-const env_1 = require("../config/env");
+const admin_1 = require("../utils/admin");
 const formatters_1 = require("../utils/formatters");
 const menu_1 = require("../bot/keyboards/menu");
 const cache_1 = require("../utils/cache");
@@ -184,7 +184,7 @@ exports.AUTO_TRIAL_PLAN_NAME = '7 kunlik sinov (Trial)';
  * or previously-trialed/approved users from receiving another free trial.
  */
 function isEligibleForAutoTrial(user) {
-    if (SubscriptionService.isSuperAdmin(user.telegramId) || user.role === 'SUPER_ADMIN') {
+    if ((0, admin_1.isSuperAdmin)(user.telegramId) || user.role === 'SUPER_ADMIN') {
         return false;
     }
     if (user.status !== 'PENDING') {
@@ -194,7 +194,7 @@ function isEligibleForAutoTrial(user) {
 }
 class SubscriptionService {
     static isSuperAdmin(telegramId) {
-        return String(telegramId).trim() === String(env_1.env.OWNER_TELEGRAM_ID).trim();
+        return (0, admin_1.isSuperAdmin)(telegramId);
     }
     static async getSystemSettings() {
         return prisma_1.prisma.systemSettings.upsert({
@@ -548,11 +548,12 @@ class SubscriptionService {
      */
     static async checkExpiringAndExpiredSubscriptions(sendMessage, now = new Date()) {
         const settings = await this.getSystemSettings();
+        const superAdminIds = Array.from((0, admin_1.getSuperAdminIds)());
         const activeUsers = await prisma_1.prisma.user.findMany({
             where: {
                 status: 'ACTIVE',
                 role: { not: 'SUPER_ADMIN' },
-                telegramId: { not: env_1.env.OWNER_TELEGRAM_ID },
+                ...(superAdminIds.length > 0 ? { telegramId: { notIn: superAdminIds } } : {}),
                 subscriptionExpiresAt: { not: null },
             },
         });
@@ -595,9 +596,10 @@ class SubscriptionService {
     static async getSaasStatistics(now = new Date()) {
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+        const superAdminIds = Array.from((0, admin_1.getSuperAdminIds)());
         const [allUsers, approvedPaymentsAll, approvedPaymentsMonth, pendingPaymentsCount,] = await Promise.all([
             prisma_1.prisma.user.findMany({
-                where: { telegramId: { not: env_1.env.OWNER_TELEGRAM_ID } },
+                where: superAdminIds.length > 0 ? { telegramId: { notIn: superAdminIds } } : undefined,
                 orderBy: { createdAt: 'desc' },
             }),
             prisma_1.prisma.subscriptionPayment.aggregate({

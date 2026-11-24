@@ -1,8 +1,12 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { MyContext } from '../context';
 import { prisma } from '../../database/prisma';
-import { env } from '../../config/env';
+import { getSuperAdminIds, isSuperAdmin } from '../../utils/admin';
 import { SubscriptionService, parseSubscriptionDuration } from '../../services/subscription.service';
+import {
+  AccountRecoveryError,
+  transferTelegramAccount,
+} from '../../services/account-recovery.service';
 import {
   clearOnboardingMedia,
   getOnboardingMedia,
@@ -15,13 +19,18 @@ import { sendOnboardingCarousel } from './start';
 import { formatDate, formatDateShort, formatSom, parseSmartAmount } from '../../utils/formatters';
 import { clearSession, replyOrEdit, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { addPaginationRow } from '../keyboards/inline';
-import { isMenuButton } from '../keyboards/menu';
+import { getMainMenu, isMenuButton } from '../keyboards/menu';
 
 export const adminHandler = new Composer<MyContext>();
 
 function ensureSuperAdmin(ctx: MyContext): boolean {
   if (!ctx.from) return false;
-  return SubscriptionService.isSuperAdmin(ctx.from.id);
+  return isSuperAdmin(ctx.from.id);
+}
+
+function nonSuperAdminWhere() {
+  const adminIds = Array.from(getSuperAdminIds());
+  return adminIds.length > 0 ? { telegramId: { notIn: adminIds } } : {};
 }
 
 function getStatusBadge(status: string): string {
@@ -53,6 +62,8 @@ function getRemainingDaysText(expiresAt?: Date | null): string {
 export function getAdminMainPanelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("👥 Obunachilar ro'yxati va Boshqaruv", 'adm:users:1')
+    .row()
+    .text('🔄 Akkauntni ko‘chirish', 'adm:transfer')
     .row()
     .text("⏳ Yangi so'rovlar va To'lov cheklari", 'adm:pending')
     .row()
@@ -106,7 +117,7 @@ async function showSubscribersList(ctx: MyContext, page = 1, isEdit = true) {
   if (!ensureSuperAdmin(ctx)) return;
   const PER_PAGE = 8;
   const users = await prisma.user.findMany({
-    where: { telegramId: { not: env.OWNER_TELEGRAM_ID } },
+    where: nonSuperAdminWhere(),
     orderBy: { createdAt: 'desc' },
   });
 
@@ -286,7 +297,7 @@ adminHandler.callbackQuery('adm:pending', async (ctx) => {
   if (!ensureSuperAdmin(ctx)) return;
   const [pendingUsers, pendingPayments] = await Promise.all([
     prisma.user.findMany({
-      where: { status: 'PENDING', telegramId: { not: env.OWNER_TELEGRAM_ID } },
+      where: { status: 'PENDING', ...nonSuperAdminWhere() },
       orderBy: { createdAt: 'desc' },
       take: 10,
     }),
@@ -476,7 +487,7 @@ adminHandler.callbackQuery(/^adm:dm_list:(\d+)$/, async (ctx) => {
   const page = parseInt(ctx.match[1], 10) || 1;
   const PER_PAGE = 8;
   const users = await prisma.user.findMany({
-    where: { telegramId: { not: env.OWNER_TELEGRAM_ID } },
+    where: nonSuperAdminWhere(),
     orderBy: { createdAt: 'desc' },
   });
 
@@ -659,6 +670,180 @@ adminHandler.callbackQuery('adm:onb_clear', async (ctx) => {
 });
 
 // ============================================================================
+// 8. 🔄 Akkauntni ko‘chirish (Super-Admin 3-Step Account Transfer Wizard)
+// ============================================================================
+async function findUsersForAdminTransfer(rawQuery: string) {
+  const query = rawQuery.trim();
+  const digits = query.replace(/\D/g, '');
+  const cleanUsername = query.replace(/^@/, '');
+
+  const orConditions: any[] = [
+    { telegramId: query },
+    { fullName: { contains: query, mode: 'insensitive' } },
+    { name: { contains: query, mode: 'insensitive' } },
+    { phone: { contains: query, mode: 'insensitive' } },
+  ];
+  if (cleanUsername) {
+    orConditions.push({ username: { contains: cleanUsername, mode: 'insensitive' } });
+  }
+  if (digits.length >= 4) {
+    orConditions.push({ phone: { contains: digits } });
+    orConditions.push({ telegramId: { contains: digits } });
+  }
+
+  return prisma.user.findMany({
+    where: { OR: orConditions },
+    orderBy: { createdAt: 'desc' },
+    take: 8,
+  });
+}
+
+function formatTransferUserCard(user: {
+  telegramId: string;
+  fullName?: string | null;
+  name?: string | null;
+  phone?: string | null;
+  status: string;
+  subscriptionExpiresAt?: Date | null;
+}): string {
+  const displayName = sanitizeMdV1(user.fullName || user.name || "Noma'lum");
+  const phone = sanitizeMdV1(user.phone || 'Kiritilmagan');
+  const statusText = `${getStatusBadge(user.status)} (${getRemainingDaysText(user.subscriptionExpiresAt)})`;
+  return (
+    `• **Ismi:** ${displayName}\n` +
+    `• **Telefon:** ${phone}\n` +
+    `• **Eski Telegram ID:** \`${user.telegramId}\`\n` +
+    `• **Obuna holati:** ${statusText}`
+  );
+}
+
+async function promptTransferStep2ForUser(
+  ctx: MyContext,
+  user: {
+    id: string;
+    telegramId: string;
+    fullName?: string | null;
+    name?: string | null;
+    phone?: string | null;
+    status: string;
+    subscriptionExpiresAt?: Date | null;
+  },
+  isEdit = false
+) {
+  ctx.session.step = 'ADM_TRANSFER_NEW_ID';
+  ctx.session.tempData = { transferOldUserId: user.id };
+
+  const text =
+    `🔄 **AKKAUNTNI KO‘CHIRISH — 2-QADAM**\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `${formatTransferUserCard(user)}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📥 Ushbu do‘kon ko‘chiriladigan **yangi Telegram ID** raqamini kiriting (faqat raqamlar):`;
+
+  const kb = new InlineKeyboard().text('❌ Bekor qilish', 'adm:transfer_cancel');
+  await replyOrEdit(ctx, text, kb, isEdit);
+}
+
+adminHandler.callbackQuery('adm:transfer', async (ctx) => {
+  if (!ensureSuperAdmin(ctx)) return;
+  ctx.session.step = 'ADM_TRANSFER_FIND_USER';
+  ctx.session.tempData = {};
+
+  const kb = new InlineKeyboard().text('❌ Bekor qilish', 'adm:transfer_cancel');
+  await replyOrEdit(
+    ctx,
+    `🔄 **AKKAUNTNI KO‘CHIRISH — 1-QADAM**\n\n` +
+      `Eski foydalanuvchining **telefon raqami**, **eski Telegram ID** raqami yoki **ismini** kiriting:`,
+    kb,
+    true
+  );
+});
+
+adminHandler.callbackQuery(/^adm:transfer_pick:(.+)$/, async (ctx) => {
+  if (!ensureSuperAdmin(ctx)) return;
+  const userId = ctx.match[1];
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    await ctx.answerCallbackQuery({ text: 'Foydalanuvchi topilmadi.', show_alert: true });
+    return;
+  }
+  await promptTransferStep2ForUser(ctx, user, true);
+});
+
+adminHandler.callbackQuery('adm:transfer_cancel', async (ctx) => {
+  if (!ensureSuperAdmin(ctx)) return;
+  clearSession(ctx);
+  const kb = new InlineKeyboard().text('👑 Admin Panel', 'adm:panel');
+  await replyOrEdit(ctx, '❌ Akkauntni ko‘chirish amaliyoti bekor qilindi.', kb, true);
+});
+
+adminHandler.callbackQuery('adm:transfer_confirm', async (ctx) => {
+  if (!ensureSuperAdmin(ctx) || !ctx.from) return;
+  const oldUserId = ctx.session.tempData?.transferOldUserId;
+  const newTelegramId = ctx.session.tempData?.transferNewTelegramId;
+  clearSession(ctx);
+
+  if (!oldUserId || !newTelegramId) {
+    const kb = new InlineKeyboard().text('👑 Admin Panel', 'adm:panel');
+    await replyOrEdit(
+      ctx,
+      '⚠️ Ko‘chirish sessiyasi topilmadi yoki muddati tugagan. Iltimos, qaytadan boshlang.',
+      kb,
+      true
+    );
+    return;
+  }
+
+  try {
+    const summary = await transferTelegramAccount({
+      oldUserId,
+      newTelegramId,
+      actorTelegramId: String(ctx.from.id),
+      reason: 'ADMIN_TRANSFER',
+    });
+
+    // Best-effort welcome-back notification to the new Telegram account
+    const targetRole = isSuperAdmin(summary.newTelegramId) ? 'SUPER_ADMIN' : summary.role || 'STORE_OWNER';
+    const welcomeText =
+      `🎉 Xush kelibsiz, ${summary.fullName || summary.name || "Do'kon egasi"}!\n\n` +
+      `🔄 Super-Admin tomonidan shaxsiy do‘kon bazangiz va obunangiz ushbu yangi Telegram akkauntingizga to‘liq ko‘chirildi.\n` +
+      `📅 Obuna holati: ${getStatusBadge(summary.status)} (${getRemainingDaysText(summary.subscriptionExpiresAt)})\n\n` +
+      `🔐 Kelajakda o‘zingiz 1 soniyada tiklay olishingiz uchun /kalit buyrug‘i orqali zaxira kalit olib qo‘yishni tavsiya qilamiz!`;
+
+    await ctx.api
+      .sendMessage(summary.newTelegramId, welcomeText, {
+        reply_markup: getMainMenu(targetRole),
+      })
+      .catch(() => {});
+
+    const successText =
+      `✅ **Akkaunt muvaffaqiyatli ko‘chirildi!**\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `• **Mijoz:** ${sanitizeMdV1(summary.fullName || summary.name || "Noma'lum")}\n` +
+      `• **Eski Telegram ID:** \`${summary.oldTelegramId}\`\n` +
+      `• **Yangi Telegram ID:** \`${summary.newTelegramId}\`\n` +
+      `• **Obuna holati:** ${getStatusBadge(summary.status)} (${getRemainingDaysText(summary.subscriptionExpiresAt)})\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📩 Yangi Telegram akkauntga xush kelibsiz xabari yuborildi.`;
+
+    const kb = new InlineKeyboard()
+      .text('👤 Mijoz kartochkasi', `adm:user:${summary.newTelegramId}`)
+      .text('👑 Admin Panel', 'adm:panel');
+
+    await replyOrEdit(ctx, successText, kb, true);
+  } catch (err: any) {
+    const errMsg =
+      err instanceof AccountRecoveryError
+        ? err.message
+        : err?.message || 'Akkauntni ko‘chirishda xatolik yuz berdi.';
+    const kb = new InlineKeyboard()
+      .text('🔄 Qayta urinish', 'adm:transfer')
+      .text('👑 Admin Panel', 'adm:panel');
+    await replyOrEdit(ctx, `❌ **Ko‘chirish amalga oshmadi:**\n\n${sanitizeMdV1(errMsg)}`, kb, true);
+  }
+});
+
+// ============================================================================
 // ADMIN TEXT / MEDIA INPUT HANDLER
 // ============================================================================
 adminHandler.on(
@@ -726,6 +911,102 @@ adminHandler.on(
         '⚠️ Slayd uchun rasm yoki GIF (animation) yuboring:',
         { reply_markup: new InlineKeyboard().text('❌ Bekor qilish', 'adm:onb_media') }
       );
+      return;
+    }
+
+    // 0.5 Super-Admin Account Transfer Step 1 & Step 2
+    if (step === 'ADM_TRANSFER_FIND_USER' && text) {
+      const matches = await findUsersForAdminTransfer(text);
+      if (matches.length === 0) {
+        await ctx.reply(
+          '❌ Bunday foydalanuvchi topilmadi. Iltimos, telefon raqami, eski Telegram ID yoki ismini qayta tekshirib kiriting:',
+          { reply_markup: new InlineKeyboard().text('❌ Bekor qilish', 'adm:transfer_cancel') }
+        );
+        return;
+      }
+
+      if (matches.length === 1) {
+        await promptTransferStep2ForUser(ctx, matches[0], false);
+        return;
+      }
+
+      const kb = new InlineKeyboard();
+      const lines: string[] = [
+        `🔎 **Topilgan foydalanuvchilar (${matches.length} ta):**\n`,
+      ];
+      for (const u of matches) {
+        const rawName = u.fullName || u.name || "Noma'lum";
+        const phone = u.phone || 'Tel yo‘q';
+        lines.push(
+          `• **${sanitizeMdV1(rawName)}** | ${sanitizeMdV1(phone)} | ID: \`${u.telegramId}\` | ${getStatusBadge(u.status)}`
+        );
+        kb.text(
+          `${getStatusBadge(u.status)} ${rawName.slice(0, 16)} (${u.telegramId})`,
+          `adm:transfer_pick:${u.id}`
+        ).row();
+      }
+      kb.text('❌ Bekor qilish', 'adm:transfer_cancel');
+
+      lines.push(`\nKo‘chirmoqchi bo‘lgan foydalanuvchini tanlang:`);
+      await safeReply(ctx, lines.join('\n'), { parse_mode: 'Markdown', reply_markup: kb });
+      return;
+    }
+
+    if (step === 'ADM_TRANSFER_NEW_ID' && text) {
+      const oldUserId = ctx.session.tempData?.transferOldUserId;
+      if (!oldUserId) {
+        clearSession(ctx);
+        return next();
+      }
+
+      if (!/^\d+$/.test(text)) {
+        await safeReply(
+          ctx,
+          '⚠️ Yangi Telegram ID faqat raqamlardan iborat bo‘lishi kerak (masalan: `987654321`). Qaytadan kiriting:',
+          {
+            parse_mode: 'Markdown',
+            reply_markup: new InlineKeyboard().text('❌ Bekor qilish', 'adm:transfer_cancel'),
+          }
+        );
+        return;
+      }
+
+      const oldUser = await prisma.user.findUnique({ where: { id: oldUserId } });
+      if (!oldUser) {
+        clearSession(ctx);
+        await ctx.reply('❌ Eski foydalanuvchi topilmadi.', {
+          reply_markup: new InlineKeyboard().text('👑 Admin Panel', 'adm:panel'),
+        });
+        return;
+      }
+
+      if (String(oldUser.telegramId).trim() === text) {
+        await ctx.reply(
+          '⚠️ Yangi Telegram ID eski Telegram ID bilan bir xil bo‘lishi mumkin emas. Boshqa Telegram ID kiriting:',
+          { reply_markup: new InlineKeyboard().text('❌ Bekor qilish', 'adm:transfer_cancel') }
+        );
+        return;
+      }
+
+      ctx.session.step = 'ADM_TRANSFER_CONFIRM';
+      ctx.session.tempData = {
+        transferOldUserId: oldUser.id,
+        transferNewTelegramId: text,
+      };
+
+      const confirmSummary =
+        `🔄 **AKKAUNTNI KO‘CHIRISH — 3-QADAM (TASDIQLASH)**\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `${formatTransferUserCard(oldUser)}\n` +
+        `• **Yangi Telegram ID:** \`${text}\`\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `⚠️ Ushbu do‘konning barcha tarixi, qarzdorliklari va obunasi \`${oldUser.telegramId}\` dan \`${text}\` ga ko‘chiriladi. Tasdiqlaysizmi?`;
+
+      const confirmKb = new InlineKeyboard()
+        .text('✅ Tasdiqlash', 'adm:transfer_confirm')
+        .text('❌ Bekor qilish', 'adm:transfer_cancel');
+
+      await safeReply(ctx, confirmSummary, { parse_mode: 'Markdown', reply_markup: confirmKb });
       return;
     }
 
@@ -853,7 +1134,7 @@ adminHandler.on(
     const target = ctx.session.tempData?.broadcastTarget || 'ACTIVE';
     clearSession(ctx);
 
-    const whereClause: any = { telegramId: { not: env.OWNER_TELEGRAM_ID } };
+    const whereClause: any = { ...nonSuperAdminWhere() };
     if (target === 'ACTIVE') whereClause.status = 'ACTIVE';
     if (target === 'EXPIRED') whereClause.status = 'EXPIRED';
 

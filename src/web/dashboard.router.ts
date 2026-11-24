@@ -7,7 +7,7 @@ import { env } from '../config/env';
 import { logger } from '../config/logger';
 import { prisma } from '../database/prisma';
 import { MyContext } from '../bot/context';
-import { SubscriptionService } from '../services/subscription.service';
+import { isSuperAdmin } from '../utils/admin';
 import {
   formatTashkentDateIso,
   formatTashkentYearMonth,
@@ -150,7 +150,7 @@ async function authenticateDashboardRequest(req: http.IncomingMessage): Promise<
   }
 
   const telegramId = verified.user.telegramId;
-  const isSuper = SubscriptionService.isSuperAdmin(telegramId);
+  const isSuper = isSuperAdmin(telegramId);
 
   const dbUser = await prisma.user.findUnique({ where: { telegramId } });
 

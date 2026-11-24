@@ -1,5 +1,5 @@
 import { BotError } from 'grammy';
-import { env } from '../../config/env';
+import { getSuperAdminIds } from '../../utils/admin';
 import { logger } from '../../config/logger';
 import { MemoryTtlCache } from '../../utils/cache';
 import { clearSession, formatFriendlyError } from '../../utils/telegram';
@@ -42,15 +42,18 @@ export async function errorMiddleware(err: BotError<MyContext>) {
     : "Amaliyotni yakunlashda vaqtinchalik xatolik yuz berdi. Pastdagi menyudan bo'limni qayta tanlang yoki /start bosing.";
   await ctx.reply(`⚠️ ${friendlyHint}`).catch(() => {});
 
-  // Notify Super-Admin with structured technical context (throttled to avoid alert storms)
+  // Notify Super-Admins with structured technical context (throttled to avoid alert storms)
   const alertKey = `${userId}:${rawErrMsg.slice(0, 80)}`;
-  if (!adminAlertThrottle.get(alertKey) && env.OWNER_TELEGRAM_ID) {
+  const adminIds = Array.from(getSuperAdminIds());
+  if (!adminAlertThrottle.get(alertKey) && adminIds.length > 0) {
     adminAlertThrottle.set(alertKey, true);
     const adminAlert =
       `🚨 SmartBaqqol Xatolik Hisoboti\n` +
       `👤 User ID: ${userId}\n` +
       `⚡ Amal: ${String(action).slice(0, 80)}\n` +
       `❌ Xato: ${rawErrMsg.slice(0, 300)}`;
-    await ctx.api.sendMessage(env.OWNER_TELEGRAM_ID, adminAlert).catch(() => {});
+    await Promise.all(
+      adminIds.map((adminId) => ctx.api.sendMessage(adminId, adminAlert).catch(() => {}))
+    );
   }
 }

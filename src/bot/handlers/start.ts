@@ -10,6 +10,11 @@ import { getOnboardingCarouselKeyboard } from '../keyboards/inline';
 import { clearSession, safeDelete, safeReply, sanitizeMdV1 } from '../../utils/telegram';
 import { SubscriptionService } from '../../services/subscription.service';
 import {
+  AccountRecoveryError,
+  generateRecoveryCode,
+  recoverAccountByCode,
+} from '../../services/account-recovery.service';
+import {
   formatOnboardingSlideText,
   getOnboardingMedia,
   ONBOARDING_FINISH_MESSAGE,
@@ -17,10 +22,62 @@ import {
   OnboardingSlideIndex,
   parseOnboardingSlideCallback,
 } from '../../services/onboarding.service';
-import { env } from '../../config/env';
+import { getSuperAdminIds, isSuperAdmin } from '../../utils/admin';
 import { formatDateShort, formatSom } from '../../utils/formatters';
 
 export const startHandler = new Composer<MyContext>();
+
+function escapeHtml(raw: string): string {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatSubscriptionSummaryUz(user: {
+  telegramId: string;
+  role?: string | null;
+  status: string;
+  subscriptionExpiresAt?: Date | string | null;
+}): string {
+  if (isSuperAdmin(user.telegramId) || user.role === 'SUPER_ADMIN') {
+    return '👑 Cheksiz (Super-Admin)';
+  }
+  if (user.status === 'ACTIVE') {
+    if (user.subscriptionExpiresAt) {
+      const exp = new Date(user.subscriptionExpiresAt);
+      const daysLeft = Math.max(0, Math.ceil((exp.getTime() - Date.now()) / (24 * 60 * 60 * 1000)));
+      return `🟢 Faol (${formatDateShort(exp)} gacha — ${daysLeft} kun qoldi)`;
+    }
+    return '🟢 Faol';
+  }
+  if (user.status === 'EXPIRED') return '⌛️ Muddati tugagan';
+  if (user.status === 'PAUSED') return '⏸ Vaqtincha to‘xtatilgan';
+  if (user.status === 'BLOCKED') return '⛔️ Bloklangan';
+  return '⏳ Tasdiq kutilmoqda';
+}
+
+async function notifyAllSuperAdminsMessage(
+  ctx: MyContext,
+  text: string,
+  extra?: Parameters<MyContext['api']['sendMessage']>[2]
+) {
+  const adminIds = Array.from(getSuperAdminIds());
+  await Promise.all(
+    adminIds.map((adminId) => ctx.api.sendMessage(adminId, text, extra).catch(() => {}))
+  );
+}
+
+async function notifyAllSuperAdminsPhoto(
+  ctx: MyContext,
+  photoFileId: string,
+  extra?: Parameters<MyContext['api']['sendPhoto']>[2]
+) {
+  const adminIds = Array.from(getSuperAdminIds());
+  await Promise.all(
+    adminIds.map((adminId) => ctx.api.sendPhoto(adminId, photoFileId, extra).catch(() => {}))
+  );
+}
 
 /**
  * Sends a single onboarding carousel slide with optional photo/animation media
@@ -155,6 +212,88 @@ export async function handleOnboardingSlideTransition(
   await safeDelete(ctx, chatId, msgId);
 }
 
+// ============================================================================
+// SELF-SERVICE ACCOUNT RECOVERY (/tiklash <KOD> and /kalit | "🔐 Zaxira kalit")
+// ============================================================================
+export async function handleRecoverAccountCommand(ctx: MyContext) {
+  if (!ctx.from) return;
+  clearSession(ctx);
+
+  const matchArg = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+  const fallbackArg =
+    ctx.message?.text?.replace(/^\/tiklash(?:@\S+)?/i, '').trim() || '';
+  const rawCode = matchArg || fallbackArg;
+
+  if (!rawCode) {
+    await ctx.reply(
+      `ℹ️ Akkauntni tiklash uchun zaxira kalitni birga kiriting:\n\n` +
+        `Misol: <code>/tiklash DOOKON-XXXX-XXXX</code>`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  try {
+    const { user, newRecoveryCode } = await recoverAccountByCode(
+      String(ctx.from.id),
+      rawCode
+    );
+    ctx.user = user;
+
+    const role = isSuperAdmin(user.telegramId) ? 'SUPER_ADMIN' : user.role || 'STORE_OWNER';
+    const storeName = escapeHtml(user.fullName || user.name || "Do'kon egasi");
+    const subSummary = escapeHtml(formatSubscriptionSummaryUz(user));
+
+    await ctx.reply(
+      `✅ <b>Akkauntingiz muvaffaqiyatli tiklandi!</b>\n\n` +
+        `🏪 Do‘kon egasi: <b>${storeName}</b>\n` +
+        `📅 Obuna holati: <b>${subSummary}</b>\n\n` +
+        `🔐 <b>Yangi zaxira tiklash kalitingiz:</b> <code>${escapeHtml(newRecoveryCode)}</code>\n\n` +
+        `⚠️ Avvalgi kalit xavfsizlik uchun bekor qilindi. Yangi kalitni skrinshot qilib yoki xavfsiz joyga saqlab qo‘ying!`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: getMainMenu(role),
+      }
+    );
+  } catch (err: any) {
+    if (err instanceof AccountRecoveryError) {
+      await ctx.reply(err.message);
+      return;
+    }
+    throw err;
+  }
+}
+
+export async function handleGenerateBackupKey(ctx: MyContext) {
+  if (!ctx.from) return;
+  clearSession(ctx);
+
+  const telegramId = String(ctx.from.id);
+  let user = ctx.user;
+  if (!user) {
+    const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ').trim();
+    const reg = await SubscriptionService.registerOrGetUser({
+      telegramId,
+      fullName,
+      username: ctx.from.username || null,
+    });
+    user = reg.user;
+    ctx.user = user;
+  }
+  if (!user) return;
+
+  const plainCode = await generateRecoveryCode(user.id);
+  const message =
+    `🔐 Sizning maxfiy tiklash kalitingiz: <code>${escapeHtml(plainCode)}</code>\n\n` +
+    `⚠️ Buni skrinshot qilib yoki xavfsiz joyga yozib qo‘ying. Agar Telegram akkauntingiz bloklansa yoki raqamingiz yo‘qolsa, yangi Telegramdan kirib <code>/tiklash ${escapeHtml(plainCode)}</code> deb yozsangiz, barcha tarixingiz va obunangiz 1 soniyada tiklanadi.`;
+
+  await ctx.reply(message, { parse_mode: 'HTML' });
+}
+
+startHandler.command('tiklash', handleRecoverAccountCommand);
+startHandler.command('kalit', handleGenerateBackupKey);
+startHandler.hears('🔐 Zaxira kalit', handleGenerateBackupKey);
+
 startHandler.command('start', async (ctx) => {
   if (!ctx.from) return;
   clearSession(ctx);
@@ -170,7 +309,7 @@ startHandler.command('start', async (ctx) => {
   ctx.user = user;
 
   // 1. Super-Admin gets immediate full menu + 👑 Admin Panel
-  if (SubscriptionService.isSuperAdmin(telegramId)) {
+  if (isSuperAdmin(telegramId)) {
     await safeReply(
       ctx,
       `👑 Assalomu alaykum, *${sanitizeMdV1(user.fullName || user.name || 'Super Admin')}*!\n\n` +
@@ -297,7 +436,7 @@ startHandler.on('message:contact', async (ctx) => {
   ctx.user = user;
 
   // Keep BLOCKED and PAUSED protections strictly intact
-  if (!SubscriptionService.isSuperAdmin(telegramId)) {
+  if (!isSuperAdmin(telegramId)) {
     if (user.status === 'BLOCKED') {
       await ctx.reply("⛔️ Kechirasiz, sizning hisobingiz bloklangan.");
       return;
@@ -331,9 +470,7 @@ startHandler.on('message:contact', async (ctx) => {
     await sendOnboardingCarousel(ctx, { includeIntroVideo: true }).catch(() => {});
 
     if (trialResult.adminNotification) {
-      await ctx.api
-        .sendMessage(env.OWNER_TELEGRAM_ID, trialResult.adminNotification)
-        .catch(() => {});
+      await notifyAllSuperAdminsMessage(ctx, trialResult.adminNotification);
     }
     return;
   }
@@ -346,9 +483,7 @@ startHandler.on('message:contact', async (ctx) => {
 
     const adminMsg = SubscriptionService.buildAdminNewUserRequestMessage(user);
     const adminKb = SubscriptionService.getAdminUserGrantKeyboard(user.telegramId);
-    await ctx.api
-      .sendMessage(env.OWNER_TELEGRAM_ID, adminMsg, { reply_markup: adminKb })
-      .catch(() => {});
+    await notifyAllSuperAdminsMessage(ctx, adminMsg, { reply_markup: adminKb });
     return;
   }
 
@@ -376,7 +511,7 @@ startHandler.on('message:photo', async (ctx, next) => {
   if (!ctx.from) return next();
   const isWaitingReceipt =
     ctx.session.step === 'AWAIT_SUBSCRIPTION_RECEIPT' ||
-    (!SubscriptionService.isSuperAdmin(ctx.from.id) &&
+    (!isSuperAdmin(ctx.from.id) &&
       (ctx.user?.status === 'EXPIRED' || ctx.user?.status === 'PENDING'));
 
   if (!isWaitingReceipt) return next();
@@ -413,12 +548,10 @@ startHandler.on('message:photo', async (ctx, next) => {
     `Qaysi tarif va bonus bilan obunasini tasdiqlaysiz?`;
 
   const kb = SubscriptionService.getAdminPaymentApprovalKeyboard(payment.id);
-  await ctx.api
-    .sendPhoto(env.OWNER_TELEGRAM_ID, bestPhoto.file_id, {
-      caption,
-      reply_markup: kb,
-    })
-    .catch(() => {});
+  await notifyAllSuperAdminsPhoto(ctx, bestPhoto.file_id, {
+    caption,
+    reply_markup: kb,
+  });
 });
 
 // Direct reply from Customer to Super-Admin
@@ -445,19 +578,17 @@ startHandler.on('message:text', async (ctx, next) => {
   );
 
   const kb = new InlineKeyboard().text('💬 Javob yozish', `adm_msg:${telegramId}`);
-  await ctx.api
-    .sendMessage(
-      env.OWNER_TELEGRAM_ID,
-      `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${sanitizeMdV1(text)}`,
-      { parse_mode: 'Markdown', reply_markup: kb }
-    )
-    .catch(() => {});
+  await notifyAllSuperAdminsMessage(
+    ctx,
+    `📩 **Mijozdan javob xabari keldi!**\n👤 Mijoz: ${senderName} (ID: \`${telegramId}\`)\n\n💬 Xabar:\n${sanitizeMdV1(text)}`,
+    { parse_mode: 'Markdown', reply_markup: kb }
+  );
 
   await ctx.reply('✅ Xabaringiz Adminga yetkazildi!');
 });
 
 startHandler.callbackQuery('menu:main', async (ctx) => {
   await safeDelete(ctx, ctx.chat?.id, ctx.callbackQuery.message?.message_id);
-  const role = SubscriptionService.isSuperAdmin(ctx.from?.id || '') ? 'SUPER_ADMIN' : 'STORE_OWNER';
+  const role = isSuperAdmin(ctx.from?.id) ? 'SUPER_ADMIN' : 'STORE_OWNER';
   await ctx.reply('Bosh menyudasiz 👇', { reply_markup: getMainMenu(role) });
 });

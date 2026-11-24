@@ -1,6 +1,6 @@
 import { InlineKeyboard } from 'grammy';
 import { prisma } from '../database/prisma';
-import { env } from '../config/env';
+import { getSuperAdminIds, isSuperAdmin } from '../utils/admin';
 import { formatDate, formatDateShort, formatSom } from '../utils/formatters';
 import { getMainMenu } from '../bot/keyboards/menu';
 
@@ -203,7 +203,7 @@ export function isEligibleForAutoTrial(user: {
   subscriptionExpiresAt?: Date | string | null;
   approvedAt?: Date | string | null;
 }): boolean {
-  if (SubscriptionService.isSuperAdmin(user.telegramId) || user.role === 'SUPER_ADMIN') {
+  if (isSuperAdmin(user.telegramId) || user.role === 'SUPER_ADMIN') {
     return false;
   }
   if (user.status !== 'PENDING') {
@@ -213,8 +213,8 @@ export function isEligibleForAutoTrial(user: {
 }
 
 export class SubscriptionService {
-  static isSuperAdmin(telegramId: string | number | bigint): boolean {
-    return String(telegramId).trim() === String(env.OWNER_TELEGRAM_ID).trim();
+  static isSuperAdmin(telegramId: string | number | bigint | undefined): boolean {
+    return isSuperAdmin(telegramId);
   }
 
   static async getSystemSettings() {
@@ -702,11 +702,12 @@ export class SubscriptionService {
     now: Date = new Date()
   ) {
     const settings = await this.getSystemSettings();
+    const superAdminIds = Array.from(getSuperAdminIds());
     const activeUsers = await prisma.user.findMany({
       where: {
         status: 'ACTIVE',
         role: { not: 'SUPER_ADMIN' },
-        telegramId: { not: env.OWNER_TELEGRAM_ID },
+        ...(superAdminIds.length > 0 ? { telegramId: { notIn: superAdminIds } } : {}),
         subscriptionExpiresAt: { not: null },
       },
     });
@@ -762,6 +763,7 @@ export class SubscriptionService {
   static async getSaasStatistics(now: Date = new Date()) {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const superAdminIds = Array.from(getSuperAdminIds());
 
     const [
       allUsers,
@@ -770,7 +772,7 @@ export class SubscriptionService {
       pendingPaymentsCount,
     ] = await Promise.all([
       prisma.user.findMany({
-        where: { telegramId: { not: env.OWNER_TELEGRAM_ID } },
+        where: superAdminIds.length > 0 ? { telegramId: { notIn: superAdminIds } } : undefined,
         orderBy: { createdAt: 'desc' },
       }),
       prisma.subscriptionPayment.aggregate({

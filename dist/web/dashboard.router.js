@@ -12,7 +12,7 @@ const grammy_1 = require("grammy");
 const env_1 = require("../config/env");
 const logger_1 = require("../config/logger");
 const prisma_1 = require("../database/prisma");
-const subscription_service_1 = require("../services/subscription.service");
+const admin_1 = require("../utils/admin");
 const dashboard_service_1 = require("../services/dashboard.service");
 const supplier_service_1 = require("../services/supplier.service");
 const export_service_1 = require("../services/export.service");
@@ -111,7 +111,7 @@ async function authenticateDashboardRequest(req) {
         return { ok: false, statusCode: 401, error: verified.error };
     }
     const telegramId = verified.user.telegramId;
-    const isSuper = subscription_service_1.SubscriptionService.isSuperAdmin(telegramId);
+    const isSuper = (0, admin_1.isSuperAdmin)(telegramId);
     const dbUser = await prisma_1.prisma.user.findUnique({ where: { telegramId } });
     if (isSuper) {
         return {

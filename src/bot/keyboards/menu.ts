@@ -11,12 +11,15 @@ export const SYSTEM_MENU_BUTTONS = [
   '📝 Qidiruv',
   '➕ Nakladnoy',
   '📥 Bazani yuklab olish (Excel / PDF)',
+  '🔐 Zaxira kalit',
   '❓ Yo‘riqnoma',
   "❓ Yo'riqnoma",
   '👑 Admin Panel',
   '/start',
   '/dashboard',
   '/help',
+  '/kalit',
+  '/tiklash',
   '/admin',
   '/report',
   '/hisobot',
@@ -94,10 +97,12 @@ export function getMainMenu(
     .text('➕ Nakladnoy')
     .row()
     .text('📥 Bazani yuklab olish (Excel / PDF)')
-    .text('❓ Yo‘riqnoma');
+    .text('❓ Yo‘riqnoma')
+    .row()
+    .text('🔐 Zaxira kalit');
 
   if (role === 'SUPER_ADMIN') {
-    kb.row().text('👑 Admin Panel');
+    kb.text('👑 Admin Panel');
   }
   return kb;
 }

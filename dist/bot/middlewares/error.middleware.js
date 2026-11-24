@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.errorMiddleware = errorMiddleware;
-const env_1 = require("../../config/env");
+const admin_1 = require("../../utils/admin");
 const logger_1 = require("../../config/logger");
 const cache_1 = require("../../utils/cache");
 const telegram_1 = require("../../utils/telegram");
@@ -34,14 +34,15 @@ async function errorMiddleware(err) {
         ? (0, telegram_1.formatFriendlyError)(err.error)
         : "Amaliyotni yakunlashda vaqtinchalik xatolik yuz berdi. Pastdagi menyudan bo'limni qayta tanlang yoki /start bosing.";
     await ctx.reply(`⚠️ ${friendlyHint}`).catch(() => { });
-    // Notify Super-Admin with structured technical context (throttled to avoid alert storms)
+    // Notify Super-Admins with structured technical context (throttled to avoid alert storms)
     const alertKey = `${userId}:${rawErrMsg.slice(0, 80)}`;
-    if (!adminAlertThrottle.get(alertKey) && env_1.env.OWNER_TELEGRAM_ID) {
+    const adminIds = Array.from((0, admin_1.getSuperAdminIds)());
+    if (!adminAlertThrottle.get(alertKey) && adminIds.length > 0) {
         adminAlertThrottle.set(alertKey, true);
         const adminAlert = `🚨 SmartBaqqol Xatolik Hisoboti\n` +
             `👤 User ID: ${userId}\n` +
             `⚡ Amal: ${String(action).slice(0, 80)}\n` +
             `❌ Xato: ${rawErrMsg.slice(0, 300)}`;
-        await ctx.api.sendMessage(env_1.env.OWNER_TELEGRAM_ID, adminAlert).catch(() => { });
+        await Promise.all(adminIds.map((adminId) => ctx.api.sendMessage(adminId, adminAlert).catch(() => { })));
     }
 }

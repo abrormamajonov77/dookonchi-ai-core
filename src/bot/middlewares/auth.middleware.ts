@@ -6,10 +6,19 @@ import {
   getCachedUser,
   setCachedUser,
 } from '../../services/subscription.service';
+import { isSuperAdmin } from '../../utils/admin';
 import { getPendingRegistrationKeyboard } from '../keyboards/menu';
 
 export async function authMiddleware(ctx: MyContext, next: NextFunction) {
   if (!ctx.from) return;
+
+  // Self-service account recovery (/tiklash <KOD>) must ALWAYS work even for
+  // unregistered, brand-new, trial-expired, or paused Telegram accounts.
+  const earlyMsgText = ctx.message?.text?.trim() || '';
+  if (/^\/tiklash(?:@\S+)?(?:\s|$)/i.test(earlyMsgText)) {
+    return next();
+  }
+
   const telegramId = String(ctx.from.id);
   const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ').trim();
   const username = ctx.from.username || null;
@@ -32,7 +41,7 @@ export async function authMiddleware(ctx: MyContext, next: NextFunction) {
   }
 
   // Super-Admin always has full access
-  if (SubscriptionService.isSuperAdmin(telegramId)) {
+  if (isSuperAdmin(telegramId)) {
     ctx.user = user;
     return next();
   }

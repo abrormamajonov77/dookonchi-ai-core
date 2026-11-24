@@ -4,10 +4,17 @@ exports.authMiddleware = authMiddleware;
 const grammy_1 = require("grammy");
 const logger_1 = require("../../config/logger");
 const subscription_service_1 = require("../../services/subscription.service");
+const admin_1 = require("../../utils/admin");
 const menu_1 = require("../keyboards/menu");
 async function authMiddleware(ctx, next) {
     if (!ctx.from)
         return;
+    // Self-service account recovery (/tiklash <KOD>) must ALWAYS work even for
+    // unregistered, brand-new, trial-expired, or paused Telegram accounts.
+    const earlyMsgText = ctx.message?.text?.trim() || '';
+    if (/^\/tiklash(?:@\S+)?(?:\s|$)/i.test(earlyMsgText)) {
+        return next();
+    }
     const telegramId = String(ctx.from.id);
     const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ').trim();
     const username = ctx.from.username || null;
@@ -27,7 +34,7 @@ async function authMiddleware(ctx, next) {
         }
     }
     // Super-Admin always has full access
-    if (subscription_service_1.SubscriptionService.isSuperAdmin(telegramId)) {
+    if ((0, admin_1.isSuperAdmin)(telegramId)) {
         ctx.user = user;
         return next();
     }

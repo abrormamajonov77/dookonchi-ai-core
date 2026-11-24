@@ -32,12 +32,30 @@ const nonEmpty = (val: string | undefined): string | undefined => {
   return trimmed ? trimmed : undefined;
 };
 
+const parseIdListTokens = (raw: string | undefined): string[] => {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+};
+
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   DIRECT_URL: z.string().url().optional(),
   BOT_TOKEN: z.string().min(1),
   GEMINI_API_KEY: z.string().min(1),
   OWNER_TELEGRAM_ID: z.string().regex(/^\d+$/),
+  OWNER_TELEGRAM_IDS: z
+    .string()
+    .refine(
+      (val) => {
+        const tokens = parseIdListTokens(val);
+        return tokens.length > 0 && tokens.every((t) => /^\d+$/.test(t));
+      },
+      { message: 'OWNER_TELEGRAM_IDS must be a comma-separated list of numeric Telegram IDs' }
+    )
+    .optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
@@ -47,12 +65,20 @@ export type EnvConfig = z.infer<typeof envSchema>;
  */
 export function parseEnv(rawEnv: Record<string, string | undefined> = process.env) {
   const isTest = rawEnv.NODE_ENV === 'test';
+  const rawMultiIds = nonEmpty(rawEnv.OWNER_TELEGRAM_IDS);
+  const firstFromMulti = parseIdListTokens(rawMultiIds).find((t) => /^\d+$/.test(t));
+  const resolvedPrimaryOwnerId =
+    nonEmpty(rawEnv.OWNER_TELEGRAM_ID) ??
+    firstFromMulti ??
+    (isTest ? TEST_ENV_DEFAULTS.OWNER_TELEGRAM_ID : undefined);
+
   const candidate = {
     DATABASE_URL: nonEmpty(rawEnv.DATABASE_URL) ?? (isTest ? TEST_ENV_DEFAULTS.DATABASE_URL : undefined),
     DIRECT_URL: nonEmpty(rawEnv.DIRECT_URL),
     BOT_TOKEN: nonEmpty(rawEnv.BOT_TOKEN) ?? (isTest ? TEST_ENV_DEFAULTS.BOT_TOKEN : undefined),
     GEMINI_API_KEY: nonEmpty(rawEnv.GEMINI_API_KEY) ?? (isTest ? TEST_ENV_DEFAULTS.GEMINI_API_KEY : undefined),
-    OWNER_TELEGRAM_ID: nonEmpty(rawEnv.OWNER_TELEGRAM_ID) ?? (isTest ? TEST_ENV_DEFAULTS.OWNER_TELEGRAM_ID : undefined),
+    OWNER_TELEGRAM_ID: resolvedPrimaryOwnerId,
+    OWNER_TELEGRAM_IDS: rawMultiIds,
   };
 
   return envSchema
@@ -82,8 +108,16 @@ if (!_env.success) {
     .map((issue) => `${issue.path.join('.') || 'env'}: ${issue.message}`)
     .join('; ');
   console.error('❌ Invalid or missing environment variables:', details);
-  console.error('ℹ️ Required for dookonchi-ai-core: DATABASE_URL, BOT_TOKEN, GEMINI_API_KEY, OWNER_TELEGRAM_ID (optional: DIRECT_URL)');
+  console.error('ℹ️ Required for dookonchi-ai-core: DATABASE_URL, BOT_TOKEN, GEMINI_API_KEY, OWNER_TELEGRAM_ID or OWNER_TELEGRAM_IDS (optional: DIRECT_URL)');
   process.exit(1);
 }
 
 export const env: EnvConfig = _env.data;
+
+export {
+  isSuperAdmin,
+  getSuperAdminIds,
+  getPrimarySuperAdminId,
+  parseSuperAdminIds,
+} from '../utils/admin';
+

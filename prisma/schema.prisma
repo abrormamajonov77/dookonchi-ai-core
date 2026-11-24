@@ -55,6 +55,8 @@ model User {
   subscriptionExpiresAt DateTime?
   lastReminderSentAt    DateTime?
   approvedAt            DateTime?
+  recoveryCodeHash      String?   @unique
+  recoveryCodeCreatedAt DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @default(now()) @updatedAt
 
