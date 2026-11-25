@@ -79,11 +79,17 @@ closingHandler.on('message:text', async (ctx, next) => {
       `💳 Terminalda savdo: ${formatSom(d.terminalAmount)}`,
       `📱 Click / Karta savdo: ${formatSom(d.clickAmount)}`,
       `💵 Kassada qolgan naqd pul: ${formatSom(d.cashRemainingInDrawer)}`,
-      `📦 Bugungi kassadan naqdga olingan tovarlar: ${formatSom(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta nakladnoy)`,
+      `📦 Bugungi kassadan naqdga olingan tovarlar [Kassadan]: ${formatSom(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta xarid)`,
       `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${formatSom(auto.dailySupplierPaymentsUzs)} (${auto.dailySupplierPaymentsCount} ta to'lov)`,
       `━━━━━━━━━━━━━━━━━━━━━━`,
       `💰 **KUN DAVOMIDA JAMI SAVDO: ${formatSom(totalDailySalesUzs)}**`,
     ];
+
+    if (auto.safeCashPurchasesUzs > 0) {
+      lines.push(
+        `_(ℹ️ Ma'lumot uchun: Seyfdan (kechagi pul) naqdga olingan tovarlar [Seyfdan] — ${formatSom(auto.safeCashPurchasesUzs)} (${auto.safeCashPurchasesCount} ta) bugungi kassadan ayirilmadi va bugungi savdoga qayta qo'shilmadi)_`
+      );
+    }
 
     if (auto.previousSafePaymentsUzs > 0) {
       lines.push(

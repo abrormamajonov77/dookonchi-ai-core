@@ -10,6 +10,7 @@ import {
   parseSmartAmount,
   reconcileInvoiceTotals,
 } from '../utils/formatters';
+import { detectCashSourceFromText } from '../utils/cash-source';
 
 const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
 
@@ -108,6 +109,9 @@ export const VoiceIntentSchema = z.object({
     'UNKNOWN',
   ]),
   txType: z.enum(['INCOMING_GOODS', 'PAYMENT', 'RETURN']).optional().nullable(),
+  paymentType: z.enum(['CASH', 'CREDIT']).optional().nullable(),
+  cashSource: z.enum(['TODAY_REGISTER', 'SAFE']).optional().nullable(),
+  hasExplicitSource: z.boolean().optional().nullable(),
   amount: z.number().optional().nullable(),
   currency: z.enum(['UZS', 'USD']).nullable().optional().default('UZS'),
   name: z.string().optional().nullable(),
@@ -115,6 +119,7 @@ export const VoiceIntentSchema = z.object({
   category: z.string().optional().nullable(),
   comment: z.string().optional().nullable(),
   note: z.string().optional().nullable(),
+  transcript: z.string().optional().nullable(),
   replyText: z.string().optional().nullable(),
 });
 
@@ -126,7 +131,12 @@ const INTENT_RULES = `Maqsadlar (intent):
 - ADD_SUPPLIER_RETURN: Ta'minotchiga tovar qaytarish / vozvrat (masalan: "Milloraga 250 ming yog' vozvrat", "Millora 50 dollar vozvrat", "Azamatga 150 ming singan tovar qaytardim").
   * Majburiy maydonlar: { "intent": "ADD_SUPPLIER_RETURN", "supplierName": "Millora", "name": "Millora", "amount": 250000, "currency": "UZS"|"USD", "note": "yog' singan" }.
   * Ta'minotchi nomidan -ga/-dan qo'shimchalarini olib tashla ("Milloraga" -> "Millora").
-- ADD_CASH_TX: Naqd xarid yoki naqd savdo (masalan: "Naqdga 500 minglik yuk oldim").
+- ADD_CASH_TX: Naqdga tovar / yuk sotib olish (masalan: "Naqdga 500 ming yuk oldim", "Sirok 500 ming naqd", "Bugungi kassadan 300 ming yuk oldim", "Seyfdan 400 ming tovar oldim").
+  * Agar foydalanuvchi pul manbasini ANIQ aytgan bo'lsa:
+    - "bugungi kassadan" / "kassadan" / "bugungi puldan" -> "cashSource": "TODAY_REGISTER", "hasExplicitSource": true
+    - "seyfdan" / "kechagi puldan" / "eski kassadan" -> "cashSource": "SAFE", "hasExplicitSource": true
+  * Agar pul manbasi aytilmagan bo'lsa -> "cashSource": null, "hasExplicitSource": false (hech qachon taxmin qilma!).
+  * Ovozli xabarda foydalanuvchi aytgan matnni "transcript" maydoniga ham yoz.
 - ADD_CUSTOMER_DEBT: Nasiyaga mol berish/mijoz qarzi.
 - SEARCH_PRODUCT: Mahsulot narxini yoki oxirgi kelish narxini so'rash (masalan: "ole narxi", "makaron qancha", "un oxirgi narxi", "shakar bahosi", "Kola necha pul?"). "name" maydoniga faqat toza mahsulot nomini yoz (masalan: "ole", "makaron", "un").
 - GET_DEBT_INFO: Ta'minotchi yoki mijoz qarzini SO'RASH (masalan: "Millora qarz", "Millora qarzi qancha", "Millora hisob", "Milterdan qancha qarzim bor?", "Rustam qarzi", "qarzlarim"). Agar umumiy hamma qarzlar so'ralgan bo'lsa ("qarzlarim", "barcha qarzlar"), "name": "ALL" qilib qaytar; aniq shaxs/ta'minotchi bo'lsa uning toza nomini yoz.
@@ -699,6 +709,42 @@ export class AiService {
     );
   }
 
+  static normalizeIntentCashSource(raw: Record<string, any>, sourceText?: string): Record<string, any> {
+    const combinedText = [sourceText, raw?.transcript, raw?.comment, raw?.note]
+      .filter((v) => typeof v === 'string' && v.trim().length > 0)
+      .join(' ');
+    const detected = detectCashSourceFromText(combinedText);
+    if (detected.hasExplicitSource && detected.cashSource) {
+      raw.cashSource = detected.cashSource;
+      raw.paymentSource = detected.paymentSource;
+      raw.hasExplicitSource = true;
+      return raw;
+    }
+
+    // If verbatim sourceText was provided and contained no explicit source keyword,
+    // never allow the LLM to hallucinate a default cashSource.
+    const hasVerbatimText = typeof sourceText === 'string' && sourceText.trim().length > 0;
+    if (!hasVerbatimText && raw?.hasExplicitSource === true) {
+      const aiVal = String(raw?.cashSource || '').trim().toUpperCase();
+      if (aiVal === 'TODAY_REGISTER' || aiVal === 'TODAY_CASH') {
+        raw.cashSource = 'TODAY_REGISTER';
+        raw.paymentSource = 'TODAY_CASH';
+        raw.hasExplicitSource = true;
+        return raw;
+      }
+      if (aiVal === 'SAFE' || aiVal === 'PREVIOUS_SAFE') {
+        raw.cashSource = 'SAFE';
+        raw.paymentSource = 'PREVIOUS_SAFE';
+        raw.hasExplicitSource = true;
+        return raw;
+      }
+    }
+
+    raw.cashSource = null;
+    raw.hasExplicitSource = false;
+    return raw;
+  }
+
   static async parseVoiceNote(audioBuffer: Buffer, mimeType = 'audio/ogg'): Promise<z.infer<typeof VoiceIntentSchema>> {
     return withRetry(
       async () => {
@@ -724,6 +770,7 @@ export class AiService {
           raw.note = latinNote;
           raw.comment = latinNote;
         }
+        this.normalizeIntentCashSource(raw);
         return VoiceIntentSchema.parse(raw);
       },
       2,
@@ -763,6 +810,7 @@ export class AiService {
           raw.note = latinNote;
           raw.comment = latinNote;
         }
+        this.normalizeIntentCashSource(raw, textMessage);
 
         return VoiceIntentSchema.parse(raw);
       },

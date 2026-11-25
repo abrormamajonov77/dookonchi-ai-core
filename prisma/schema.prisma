@@ -41,6 +41,11 @@ enum UserRole {
   STORE_OWNER
 }
 
+enum CashSource {
+  TODAY_REGISTER
+  SAFE
+}
+
 model User {
   id                    String    @id @default(uuid())
   telegramId            String    @unique
@@ -142,16 +147,17 @@ model Invoice {
   originalAmount     Decimal? @db.Decimal(18, 2)
   discountAmount     Decimal? @db.Decimal(18, 2)
   currency           Currency @default(UZS)
-  paymentType        String   @default("CREDIT")
-  paymentSource      String   @default("TODAY_CASH")
-  paidCashAmount     Decimal  @default(0) @db.Decimal(18, 2)
-  creditAmount       Decimal  @default(0) @db.Decimal(18, 2)
-  imageHash          String?  @db.VarChar(64)
-  contentFingerprint String?  @db.VarChar(128)
+  paymentType        String      @default("CREDIT")
+  paymentSource      String      @default("TODAY_CASH")
+  cashSource         CashSource?
+  paidCashAmount     Decimal     @default(0) @db.Decimal(18, 2)
+  creditAmount       Decimal     @default(0) @db.Decimal(18, 2)
+  imageHash          String?     @db.VarChar(64)
+  contentFingerprint String?     @db.VarChar(128)
   verbatimText       String?
   imageFileId        String?
   rawImageUrl        String?
-  createdAt          DateTime @default(now())
+  createdAt          DateTime    @default(now())
 
   items InvoiceItem[]
 
@@ -160,6 +166,7 @@ model Invoice {
   @@index([ownerId, contentFingerprint])
   @@index([ownerId, createdAt])
   @@index([ownerId, paymentSource, createdAt])
+  @@index([ownerId, cashSource, createdAt])
   @@index([supplierId])
   @@index([createdAt])
   @@index([imageHash])
@@ -222,6 +229,7 @@ model SupplierTransaction {
   type             TransactionType
   sourceType       String          @default("MANUAL")
   paymentSource    String          @default("TODAY_CASH")
+  cashSource       CashSource?
   amount           Decimal         @db.Decimal(18, 2)
   originalAmount   Decimal?        @db.Decimal(18, 2)
   discountAmount   Decimal?        @db.Decimal(18, 2)
@@ -285,18 +293,23 @@ model Expense {
 }
 
 model CashTransaction {
-  id            String   @id @default(uuid())
-  ownerId       String   @default("")
+  id            String      @id @default(uuid())
+  ownerId       String      @default("")
+  invoiceId     String?
   partyName     String
-  amount        Decimal  @db.Decimal(18, 2)
-  currency      Currency @default(UZS)
-  paymentSource String   @default("TODAY_CASH")
+  amount        Decimal     @db.Decimal(18, 2)
+  currency      Currency    @default(UZS)
+  paymentSource String      @default("TODAY_CASH")
+  cashSource    CashSource?
   items         String?
-  createdAt     DateTime @default(now())
+  createdAt     DateTime    @default(now())
   createdBy     String?
 
   @@index([ownerId])
   @@index([ownerId, createdAt])
+  @@index([ownerId, paymentSource, createdAt])
+  @@index([ownerId, cashSource, createdAt])
+  @@index([invoiceId])
   @@index([createdAt])
 }
 

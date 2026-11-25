@@ -17,6 +17,7 @@ const supplier_service_1 = require("../../services/supplier.service");
 const search_service_1 = require("../../services/search.service");
 const transliterate_1 = require("../../utils/transliterate");
 const local_parser_1 = require("../../utils/local-parser");
+const cash_source_1 = require("../../utils/cash-source");
 exports.invoiceHandler = new grammy_1.Composer();
 const CASH_REGEX = /naqd\s*pulga|naqdga|naqd|naqt|cash/i;
 const EXPIRED_MSG = '⚠️ Ushbu operatsiya muddati tugagan. Iltimos, boshqatdan yuboring.';
@@ -855,6 +856,33 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
     const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
     if (!extracted)
         return;
+    const { pendingId, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+    ctx.session.step = `i_${pendingId}`;
+    const promptMsg = `🧾 **Nakladnoy (💵 Naqdga)**\n\n` +
+        `🏢 Ta'minotchi: **${(0, telegram_1.sanitizeMdV1)(supplierName)}**\n` +
+        `📦 Tovarlarning asl summasi: **${(0, formatters_1.formatCurrency)(totalSum, currency)}**\n` +
+        (discountAmount > 0 ? `🏷 Skidka: **-${(0, formatters_1.formatCurrency)(discountAmount, currency)}**\n` : '') +
+        `💵 Naqd to'lanadigan summa (Itogo): **${(0, formatters_1.formatCurrency)(finalPayable, currency)}**\n\n` +
+        `${cash_source_1.CASH_SOURCE_PROMPT_TEXT}`;
+    const kb = (0, inline_1.getCashSourceSelectionKeyboard)(`i_${pendingId}`);
+    if (ctx.callbackQuery.message && ctx.chat?.id) {
+        await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, promptMsg, {
+            parse_mode: 'Markdown',
+            reply_markup: kb,
+        });
+    }
+    else {
+        await (0, telegram_1.safeReply)(ctx, promptMsg, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+});
+exports.invoiceHandler.callbackQuery(/^cs:(T|S):i_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const cashSource = ctx.match[1] === 'S' ? 'SAFE' : 'TODAY_REGISTER';
+    const paymentSource = (0, cash_source_1.cashSourceToPaymentSource)(cashSource);
+    const extracted = await extractPendingInvoice(ctx, ctx.match[2]);
+    if (!extracted)
+        return;
     const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
     try {
         const result = await supplier_service_1.SupplierService.createInvoiceWithItems({
@@ -868,6 +896,8 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
             discountInput: discountAmount,
             currency,
             paymentType: 'CASH',
+            paymentSource,
+            cashSource,
             paidCashAmount: finalPayable,
             creditAmount: 0,
             imageHash: invoiceData.imageHash || null,
@@ -885,12 +915,16 @@ exports.invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => 
             await ctx.editMessageText(result.warningText, { reply_markup: undefined });
             return;
         }
-        const savedMsg = `✅ **Nakladnoy (💵 Naqdga) muvaffaqiyatli saqlandi!**\n\n` +
+        const sourceDisplay = (0, cash_source_1.formatCashSourceDisplay)(cashSource);
+        const sourceBadge = (0, cash_source_1.formatCashSourceBadge)(cashSource);
+        const zNote = (0, cash_source_1.formatCashSourceZReportNote)(cashSource);
+        const savedMsg = `✅ **Nakladnoy (💵 Naqdga — ${sourceBadge}) muvaffaqiyatli saqlandi!**\n\n` +
             `🏢 Ta'minotchi: **${(0, telegram_1.sanitizeMdV1)(result.supplier.name)}**\n` +
             `📦 Tovarlarning asl summasi: **${(0, formatters_1.formatCurrency)(totalSum, currency)}**\n` +
             (discountAmount > 0 ? `🏷 Skidka: **-${(0, formatters_1.formatCurrency)(discountAmount, currency)}**\n` : '') +
             `💵 Naqd to'langan summa (Itogo): **${(0, formatters_1.formatCurrency)(finalPayable, currency)}**\n` +
-            `📊 Qarzga yozilmadi (0). Bugungi Z-Otchyot naqd xaridlariga qo'shildi.`;
+            `🗂 Pul manbasi: **${sourceDisplay}**\n` +
+            `📊 Qarzga yozilmadi (0). ${zNote}`;
         const savedKb = (0, inline_1.getSavedInvoiceCardKeyboard)(result.invoice.id, result.supplier.id, pData.photoFileId, result.transaction?.id);
         await Promise.all([
             ctx.callbackQuery.message && ctx.chat?.id

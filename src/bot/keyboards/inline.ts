@@ -1,11 +1,31 @@
 import { InlineKeyboard } from 'grammy';
 import { formatCurrency, formatCompactAmount, formatSupplierDebtLine } from '../../utils/formatters';
 import { toLatinUz } from '../../utils/transliterate';
+import {
+  CASH_SOURCE_BTN_CANCEL,
+  CASH_SOURCE_BTN_SAFE,
+  CASH_SOURCE_BTN_TODAY,
+} from '../../utils/cash-source';
 
 export function getConfirmationKeyboard(actionId: string, copyTextContent?: string) {
   const kb = new InlineKeyboard();
   if (copyTextContent) kb.switchInlineCurrent('✏️ Tahrirlash', copyTextContent).row();
   return kb.text('✅ Tasdiqlash', `confirm_${actionId}`).text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+
+/**
+ * Mandatory Cash Source Selection Keyboard for Cash Goods Purchases (Today's Register vs. Safe)
+ */
+export function getCashSourceSelectionKeyboard(actionId: string, editCb?: string) {
+  const kb = new InlineKeyboard()
+    .text(CASH_SOURCE_BTN_TODAY, `cs:T:${actionId}`)
+    .row()
+    .text(CASH_SOURCE_BTN_SAFE, `cs:S:${actionId}`)
+    .row();
+  if (editCb) {
+    return kb.text('✏️ Tahrirlash', editCb).text(CASH_SOURCE_BTN_CANCEL, `cancel_${actionId}`);
+  }
+  return kb.text(CASH_SOURCE_BTN_CANCEL, `cancel_${actionId}`);
 }
 
 /**

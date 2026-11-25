@@ -183,7 +183,14 @@ class ExportService {
             const rawAmt = Number(inv.originalAmount ?? inv.totalAmount ?? 0);
             const discAmt = Number(inv.discountAmount ?? 0);
             const finalAmt = Number(inv.totalAmount ?? 0);
-            const payLabel = inv.paymentType === 'CASH' ? 'NAQD' : inv.paymentType === 'PARTIAL' ? 'QISMAN' : 'NASIYA';
+            const srcBadge = inv.cashSource === 'SAFE' || (!inv.cashSource && inv.paymentSource === 'PREVIOUS_SAFE')
+                ? 'Seyfdan'
+                : 'Kassadan';
+            const payLabel = inv.paymentType === 'CASH'
+                ? `NAQD (${srcBadge})`
+                : inv.paymentType === 'PARTIAL'
+                    ? `QISMAN (${srcBadge})`
+                    : 'NASIYA';
             csvRows.push([
                 idx + 1,
                 escapeCsvCell((0, formatters_1.formatDate)(inv.createdAt)),
@@ -244,7 +251,10 @@ class ExportService {
         pdfLines.push(`------------------------------------------------------------`);
         pdfLines.push(`2. OXIRGI NAKLADNOYLAR (Jami: ${invoices.length} ta)`);
         for (const inv of invoices.slice(0, 15)) {
-            const pType = inv.paymentType === 'CASH' ? 'NAQD' : 'NASIYA';
+            const srcBadge = inv.cashSource === 'SAFE' || (!inv.cashSource && inv.paymentSource === 'PREVIOUS_SAFE')
+                ? 'Seyfdan'
+                : 'Kassadan';
+            const pType = inv.paymentType === 'CASH' ? `NAQD (${srcBadge})` : 'NASIYA';
             pdfLines.push(` - ${(0, formatters_1.formatDateShort)(inv.createdAt)} | ${inv.supplier?.name || "Noma'lum"} | ${pType} | ${(0, formatters_1.formatCurrency)(inv.totalAmount, inv.currency)}`);
         }
         pdfLines.push(`------------------------------------------------------------`);
@@ -296,7 +306,13 @@ class ExportService {
     <thead><tr><th>№</th><th>Sana</th><th>Ta'minotchi</th><th>Holati</th><th>Asl summa</th><th>Skidka</th><th>Yakuniy summa</th></tr></thead>
     <tbody>
       ${invoices
-            .map((inv, i) => `<tr><td>${i + 1}</td><td>${escapeHtml((0, formatters_1.formatDate)(inv.createdAt))}</td><td>${escapeHtml(inv.supplier?.name || "Noma'lum")}</td><td>${inv.paymentType === 'CASH' ? '💵 Naqd' : '📝 Nasiya'}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.originalAmount ?? inv.totalAmount, inv.currency))}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.discountAmount ?? 0, inv.currency))}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.totalAmount, inv.currency))}</td></tr>`)
+            .map((inv, i) => {
+            const srcBadge = inv.cashSource === 'SAFE' || (!inv.cashSource && inv.paymentSource === 'PREVIOUS_SAFE')
+                ? 'Seyfdan'
+                : 'Kassadan';
+            const statusHtml = inv.paymentType === 'CASH' ? `💵 Naqd (${srcBadge})` : '📝 Nasiya';
+            return `<tr><td>${i + 1}</td><td>${escapeHtml((0, formatters_1.formatDate)(inv.createdAt))}</td><td>${escapeHtml(inv.supplier?.name || "Noma'lum")}</td><td>${statusHtml}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.originalAmount ?? inv.totalAmount, inv.currency))}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.discountAmount ?? 0, inv.currency))}</td><td>${escapeHtml((0, formatters_1.formatCurrency)(inv.totalAmount, inv.currency))}</td></tr>`;
+        })
             .join('')}
     </tbody>
   </table>

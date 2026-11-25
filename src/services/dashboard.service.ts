@@ -2,6 +2,12 @@ import { Currency, ExpenseCategory } from '@prisma/client';
 import { prisma } from '../database/prisma';
 import { toLatinUz } from '../utils/transliterate';
 import { getSupplierBalance } from './supplier.service';
+import {
+  CashSourceValue,
+  formatCashSourceBadge,
+  resolveEffectiveCashSource,
+} from '../utils/cash-source';
+import { summarizeCashGoodsPurchases } from './report.service';
 
 const TASHKENT_OFFSET_MS = 5 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -160,6 +166,11 @@ export interface MonthlyTotals {
   expensesUzs: number;
   expensesUsd: number;
   cashTransactionsUzs: number;
+  cashPurchasesUzs: number;
+  cashPurchasesTodayRegisterUzs: number;
+  cashPurchasesTodayRegisterCount: number;
+  cashPurchasesSafeUzs: number;
+  cashPurchasesSafeCount: number;
   incomingToSalesRatioPct: number;
   closedDaysCount: number;
 }
@@ -261,7 +272,16 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
       }),
       prisma.invoice.findMany({
         where: { ownerId, createdAt: { gte: range.start, lte: range.end } },
-        select: { id: true, totalAmount: true, currency: true, createdAt: true },
+        select: {
+          id: true,
+          totalAmount: true,
+          paidCashAmount: true,
+          paymentType: true,
+          paymentSource: true,
+          cashSource: true,
+          currency: true,
+          createdAt: true,
+        },
       }),
       prisma.supplierTransaction.findMany({
         where: { ownerId, date: { gte: range.start, lte: range.end } },
@@ -277,7 +297,15 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
       }),
       prisma.cashTransaction.findMany({
         where: { ownerId, createdAt: { gte: range.start, lte: range.end } },
-        select: { amount: true, currency: true, createdAt: true },
+        select: {
+          id: true,
+          invoiceId: true,
+          amount: true,
+          currency: true,
+          cashSource: true,
+          paymentSource: true,
+          createdAt: true,
+        },
       }),
     ]);
 
@@ -310,6 +338,7 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
 
   const dailyIncomingMap = new Map<number, number>();
   const invoiceIds = new Set<string>();
+  const cashInvoiceMarkers: Array<{ currency: Currency; amount: number; time: number; matched: boolean }> = [];
   let incomingUzs = 0;
   let incomingUsd = 0;
 
@@ -321,6 +350,43 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
     } else {
       incomingUzs += amt;
       const day = getTashkentDayOfMonth(inv.createdAt);
+      dailyIncomingMap.set(day, roundMoney((dailyIncomingMap.get(day) || 0) + amt));
+    }
+    const paidCash = Math.abs(Number(inv.paidCashAmount ?? (inv.paymentType === 'CASH' ? inv.totalAmount : 0)));
+    if (paidCash > 0) {
+      cashInvoiceMarkers.push({
+        currency: inv.currency,
+        amount: roundMoney(paidCash),
+        time: new Date(inv.createdAt).getTime(),
+        matched: false,
+      });
+    }
+  }
+
+  // Include standalone CashTransaction rows (not linked to an Invoice) in total incoming goods history
+  for (const c of cashTxs) {
+    const amt = roundMoney(Math.abs(Number(c.amount || 0)));
+    if (amt <= 0) continue;
+    if (c.invoiceId && invoiceIds.has(c.invoiceId)) continue;
+    if (!c.invoiceId && c.createdAt) {
+      const cTime = new Date(c.createdAt).getTime();
+      const match = cashInvoiceMarkers.find(
+        (m) =>
+          !m.matched &&
+          m.currency === c.currency &&
+          Math.abs(m.amount - amt) < 0.01 &&
+          Math.abs(m.time - cTime) <= 10_000
+      );
+      if (match) {
+        match.matched = true;
+        continue;
+      }
+    }
+    if (c.currency === 'USD') {
+      incomingUsd += amt;
+    } else {
+      incomingUzs += amt;
+      const day = getTashkentDayOfMonth(c.createdAt);
       dailyIncomingMap.set(day, roundMoney((dailyIncomingMap.get(day) || 0) + amt));
     }
   }
@@ -385,9 +451,17 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
     else expensesUzs += amt;
   }
 
-  const cashTransactionsUzs = roundMoney(
-    cashTxs.filter((c) => c.currency === 'UZS').reduce((acc, c) => acc + Math.abs(Number(c.amount || 0)), 0)
-  );
+  const cashSummary = summarizeCashGoodsPurchases({
+    invoices: invoices.map((inv) => ({
+      id: inv.id,
+      paidCashAmount: inv.paidCashAmount ?? (inv.paymentType === 'CASH' ? inv.totalAmount : 0),
+      currency: inv.currency,
+      cashSource: inv.cashSource,
+      paymentSource: inv.paymentSource,
+      createdAt: inv.createdAt,
+    })),
+    cashTransactions: cashTxs,
+  });
 
   const totals: MonthlyTotals = {
     month: range.ym,
@@ -400,7 +474,12 @@ async function fetchMonthRawData(ownerId: string, ym: string, now: Date) {
     returnsUsd: roundMoney(returnsUsd),
     expensesUzs: roundMoney(expensesUzs),
     expensesUsd: roundMoney(expensesUsd),
-    cashTransactionsUzs,
+    cashTransactionsUzs: cashSummary.totalUzs,
+    cashPurchasesUzs: cashSummary.totalUzs,
+    cashPurchasesTodayRegisterUzs: cashSummary.todayRegisterUzs,
+    cashPurchasesTodayRegisterCount: cashSummary.todayRegisterCount,
+    cashPurchasesSafeUzs: cashSummary.safeUzs,
+    cashPurchasesSafeCount: cashSummary.safeCount,
     incomingToSalesRatioPct:
       salesUzs > 0 ? Number(((incomingUzs / salesUzs) * 100).toFixed(1)) : 0,
     closedDaysCount: dailySalesMap.size,
@@ -553,6 +632,8 @@ export interface DailySnapshot {
     terminalAmount: number;
     clickAmount: number;
     cashRemainingInDrawer: number;
+    dailyCashPurchasesUzs: number;
+    safeCashPurchasesUzs: number;
     isClosed: boolean;
   };
   incoming: {
@@ -566,6 +647,27 @@ export interface DailySnapshot {
       amount: number;
       currency: Currency;
       paymentType: string;
+      cashSource: CashSourceValue | null;
+      cashSourceBadge: 'Kassadan' | 'Seyfdan' | null;
+      time: string;
+      note: string;
+    }>;
+  };
+  cashPurchases: {
+    count: number;
+    totalUzs: number;
+    totalUsd: number;
+    todayRegisterUzs: number;
+    todayRegisterCount: number;
+    safeUzs: number;
+    safeCount: number;
+    items: Array<{
+      id: string;
+      partyName: string;
+      amount: number;
+      currency: Currency;
+      cashSource: CashSourceValue;
+      cashSourceBadge: 'Kassadan' | 'Seyfdan';
       time: string;
       note: string;
     }>;
@@ -581,6 +683,7 @@ export interface DailySnapshot {
       amount: number;
       currency: Currency;
       paymentSource: string;
+      cashSourceBadge: 'Kassadan' | 'Seyfdan';
       time: string;
       note: string;
     }>;
@@ -630,7 +733,7 @@ export interface DailyTimeMachineResult {
 async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise<DailySnapshot> {
   const { startOfDay, endOfDay, dateKey, dateStr: normalizedDate } = getTashkentSpecificDayRange(dateStr);
 
-  const [zReport, dailyRegister, invoices, supplierTxs, expenses] = await Promise.all([
+  const [zReport, dailyRegister, invoices, supplierTxs, expenses, cashTxs] = await Promise.all([
     prisma.zReport.findUnique({ where: { ownerId_date: { ownerId, date: dateKey } } }),
     prisma.dailyRegister.findUnique({ where: { ownerId_date: { ownerId, date: dateKey } } }),
     prisma.invoice.findMany({
@@ -647,6 +750,10 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
       where: { ownerId, createdAt: { gte: startOfDay, lte: endOfDay } },
       orderBy: { createdAt: 'desc' },
     }),
+    prisma.cashTransaction.findMany({
+      where: { ownerId, createdAt: { gte: startOfDay, lte: endOfDay } },
+      orderBy: { createdAt: 'desc' },
+    }),
   ]);
 
   const salesTotal = zReport
@@ -658,6 +765,149 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
         Math.max(0, Number(dailyRegister.terminalAmount || 0))
     : 0;
 
+  const invoiceIds = new Set<string>();
+  const cashInvoiceMarkers: Array<{ currency: Currency; amount: number; time: number; matched: boolean }> = [];
+  const incomingItems: DailySnapshot['incoming']['items'] = [];
+  const cashPurchaseItems: DailySnapshot['cashPurchases']['items'] = [];
+  let incomingUzs = 0;
+  let incomingUsd = 0;
+  let cashPurchasesTotalUzs = 0;
+  let cashPurchasesTotalUsd = 0;
+  let todayRegisterCashUzs = 0;
+  let todayRegisterCashCount = 0;
+  let safeCashUzs = 0;
+  let safeCashCount = 0;
+
+  for (const inv of invoices) {
+    invoiceIds.add(inv.id);
+    const amt = roundMoney(Math.abs(Number(inv.totalAmount || 0)));
+    if (inv.currency === 'USD') incomingUsd += amt;
+    else incomingUzs += amt;
+
+    const isCashInv = inv.paymentType === 'CASH' || Number(inv.paidCashAmount || 0) > 0;
+    const cashSrc: CashSourceValue | null = isCashInv
+      ? resolveEffectiveCashSource({ cashSource: inv.cashSource, paymentSource: inv.paymentSource })
+      : null;
+    const badge = cashSrc ? formatCashSourceBadge(cashSrc) : null;
+    const supName = toLatinUz(inv.supplier?.name || "Noma'lum");
+    const noteText = toLatinUz(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy');
+    const timeStr = getTashkentTimeHHMM(inv.createdAt);
+
+    incomingItems.push({
+      id: inv.id,
+      supplierId: inv.supplierId,
+      supplierName: supName,
+      amount: amt,
+      currency: inv.currency,
+      paymentType: inv.paymentType,
+      cashSource: cashSrc,
+      cashSourceBadge: badge,
+      time: timeStr,
+      note: noteText,
+    });
+
+    if (isCashInv && cashSrc && badge) {
+      const paidAmt = roundMoney(
+        Math.abs(Number(inv.paidCashAmount ?? (inv.paymentType === 'CASH' ? inv.totalAmount : 0)))
+      );
+      if (paidAmt > 0) {
+        cashInvoiceMarkers.push({
+          currency: inv.currency,
+          amount: paidAmt,
+          time: new Date(inv.createdAt).getTime(),
+          matched: false,
+        });
+        if (inv.currency === 'USD') {
+          cashPurchasesTotalUsd = roundMoney(cashPurchasesTotalUsd + paidAmt);
+        } else {
+          cashPurchasesTotalUzs = roundMoney(cashPurchasesTotalUzs + paidAmt);
+          if (cashSrc === 'SAFE') {
+            safeCashUzs = roundMoney(safeCashUzs + paidAmt);
+            safeCashCount += 1;
+          } else {
+            todayRegisterCashUzs = roundMoney(todayRegisterCashUzs + paidAmt);
+            todayRegisterCashCount += 1;
+          }
+        }
+        cashPurchaseItems.push({
+          id: inv.id,
+          partyName: supName,
+          amount: paidAmt,
+          currency: inv.currency,
+          cashSource: cashSrc,
+          cashSourceBadge: badge,
+          time: timeStr,
+          note: noteText,
+        });
+      }
+    }
+  }
+
+  for (const ct of cashTxs || []) {
+    const amt = roundMoney(Math.abs(Number(ct.amount || 0)));
+    if (amt <= 0) continue;
+    if (ct.invoiceId && invoiceIds.has(ct.invoiceId)) continue;
+    if (!ct.invoiceId && ct.createdAt) {
+      const ctTime = new Date(ct.createdAt).getTime();
+      const match = cashInvoiceMarkers.find(
+        (m) =>
+          !m.matched &&
+          m.currency === ct.currency &&
+          Math.abs(m.amount - amt) < 0.01 &&
+          Math.abs(m.time - ctTime) <= 10_000
+      );
+      if (match) {
+        match.matched = true;
+        continue;
+      }
+    }
+
+    const cashSrc = resolveEffectiveCashSource({ cashSource: ct.cashSource, paymentSource: ct.paymentSource });
+    const badge = formatCashSourceBadge(cashSrc);
+    const partyName = toLatinUz(ct.partyName || 'Naqd xarid');
+    const noteText = toLatinUz(ct.items && !ct.items.startsWith('[') ? ct.items : 'Naqd xarid');
+    const timeStr = getTashkentTimeHHMM(ct.createdAt);
+
+    if (ct.currency === 'USD') {
+      incomingUsd += amt;
+      cashPurchasesTotalUsd = roundMoney(cashPurchasesTotalUsd + amt);
+    } else {
+      incomingUzs += amt;
+      cashPurchasesTotalUzs = roundMoney(cashPurchasesTotalUzs + amt);
+      if (cashSrc === 'SAFE') {
+        safeCashUzs = roundMoney(safeCashUzs + amt);
+        safeCashCount += 1;
+      } else {
+        todayRegisterCashUzs = roundMoney(todayRegisterCashUzs + amt);
+        todayRegisterCashCount += 1;
+      }
+    }
+
+    incomingItems.push({
+      id: ct.id,
+      supplierId: '',
+      supplierName: partyName,
+      amount: amt,
+      currency: ct.currency,
+      paymentType: 'CASH',
+      cashSource: cashSrc,
+      cashSourceBadge: badge,
+      time: timeStr,
+      note: noteText,
+    });
+
+    cashPurchaseItems.push({
+      id: ct.id,
+      partyName,
+      amount: amt,
+      currency: ct.currency,
+      cashSource: cashSrc,
+      cashSourceBadge: badge,
+      time: timeStr,
+      note: noteText,
+    });
+  }
+
   const sales = {
     totalUzs: roundMoney(salesTotal),
     terminalAmount: roundMoney(Number(zReport?.terminalAmount ?? dailyRegister?.terminalAmount ?? 0)),
@@ -665,30 +915,12 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
     cashRemainingInDrawer: roundMoney(
       Number(zReport?.cashRemainingInDrawer ?? dailyRegister?.cashRemainingInDrawer ?? dailyRegister?.cashUzs ?? 0)
     ),
+    dailyCashPurchasesUzs: roundMoney(
+      Number(zReport?.dailyCashPurchasesUzs ?? dailyRegister?.dailyCashPurchasesUzs ?? todayRegisterCashUzs)
+    ),
+    safeCashPurchasesUzs: roundMoney(safeCashUzs),
     isClosed: Boolean(zReport || dailyRegister?.isClosed),
   };
-
-  const invoiceIds = new Set<string>();
-  const incomingItems: DailySnapshot['incoming']['items'] = [];
-  let incomingUzs = 0;
-  let incomingUsd = 0;
-
-  for (const inv of invoices) {
-    invoiceIds.add(inv.id);
-    const amt = roundMoney(Math.abs(Number(inv.totalAmount || 0)));
-    if (inv.currency === 'USD') incomingUsd += amt;
-    else incomingUzs += amt;
-    incomingItems.push({
-      id: inv.id,
-      supplierId: inv.supplierId,
-      supplierName: toLatinUz(inv.supplier?.name || "Noma'lum"),
-      amount: amt,
-      currency: inv.currency,
-      paymentType: inv.paymentType,
-      time: getTashkentTimeHHMM(inv.createdAt),
-      note: toLatinUz(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
-    });
-  }
 
   const paymentItems: DailySnapshot['payments']['items'] = [];
   let paymentsUzs = 0;
@@ -712,6 +944,8 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
         amount: amt,
         currency: tx.currency,
         paymentType: 'CREDIT',
+        cashSource: null,
+        cashSourceBadge: null,
         time: getTashkentTimeHHMM(tx.date),
         note: toLatinUz(tx.description || 'Yuk keldi'),
       });
@@ -725,6 +959,7 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
         amount: amt,
         currency: tx.currency,
         paymentSource: tx.paymentSource,
+        cashSourceBadge: formatCashSourceBadge(tx.cashSource, tx.paymentSource),
         time: getTashkentTimeHHMM(tx.date),
         note: toLatinUz(tx.description || "To'lov"),
       });
@@ -785,6 +1020,16 @@ async function fetchSingleDaySnapshot(ownerId: string, dateStr: string): Promise
       totalUzs: roundMoney(incomingUzs),
       totalUsd: roundMoney(incomingUsd),
       items: incomingItems,
+    },
+    cashPurchases: {
+      count: cashPurchaseItems.length,
+      totalUzs: roundMoney(cashPurchasesTotalUzs),
+      totalUsd: roundMoney(cashPurchasesTotalUsd),
+      todayRegisterUzs: roundMoney(todayRegisterCashUzs),
+      todayRegisterCount: todayRegisterCashCount,
+      safeUzs: roundMoney(safeCashUzs),
+      safeCount: safeCashCount,
+      items: cashPurchaseItems,
     },
     payments: {
       count: paymentItems.length,

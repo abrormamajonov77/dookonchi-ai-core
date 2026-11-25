@@ -15,6 +15,7 @@ const fuzzy_1 = require("../utils/fuzzy");
 const formatters_1 = require("../utils/formatters");
 const ai_service_1 = require("./ai.service");
 const image_service_1 = require("./image.service");
+const cash_source_1 = require("../utils/cash-source");
 function roundMoney(value) {
     const num = Number(value || 0);
     if (!Number.isFinite(num))
@@ -528,7 +529,14 @@ class SupplierService {
         const ownerId = String(params.ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
         const originalFileId = params.imageFileId || params.photoFileId || null;
         const currency = params.currency || 'UZS';
-        const paymentSource = params.paymentSource || 'TODAY_CASH';
+        const paymentType = params.paymentType || 'CREDIT';
+        const isCashInvolved = paymentType === 'CASH' || paymentType === 'PARTIAL';
+        const resolvedCashSource = isCashInvolved
+            ? params.cashSource ?? (0, cash_source_1.paymentSourceToCashSource)(params.paymentSource)
+            : params.cashSource ?? null;
+        const paymentSource = resolvedCashSource
+            ? (0, cash_source_1.cashSourceToPaymentSource)(resolvedCashSource)
+            : params.paymentSource || 'TODAY_CASH';
         const createdAt = params.createdAt || new Date();
         const latinSupplierName = (0, transliterate_1.toLatinUz)(params.supplierName || "Noma'lum").trim();
         const normalizedItems = (params.items || []).map((it) => ai_service_1.InvoiceItemSchema.parse({
@@ -551,7 +559,6 @@ class SupplierService {
             discountAmount: reconciled.discountAmount,
             finalTotal: reconciled.finalTotal,
         };
-        const paymentType = params.paymentType || 'CREDIT';
         const paidCashAmount = paymentType === 'CASH'
             ? math.finalTotal
             : paymentType === 'PARTIAL'
@@ -660,6 +667,7 @@ class SupplierService {
                     currency,
                     paymentType,
                     paymentSource,
+                    cashSource: resolvedCashSource,
                     paidCashAmount,
                     creditAmount,
                     imageHash,
@@ -674,10 +682,12 @@ class SupplierService {
                 await tx.cashTransaction.create({
                     data: {
                         ownerId,
+                        invoiceId: invoice.id,
                         partyName: supplier.name,
                         amount: paidCashAmount,
                         currency,
                         paymentSource,
+                        cashSource: resolvedCashSource || 'TODAY_REGISTER',
                         items: JSON.stringify(normalizedItems),
                         createdBy: ownerId,
                         createdAt,
@@ -762,6 +772,7 @@ class SupplierService {
                 currency,
                 postDebt: currentDebtForCurrency,
             });
+            const cashSourceTag = resolvedCashSource && isCashInvolved ? ` - ${(0, cash_source_1.formatCashSourceBadge)(resolvedCashSource)}` : '';
             const transaction = await tx.supplierTransaction.create({
                 data: {
                     ownerId,
@@ -770,6 +781,7 @@ class SupplierService {
                     type: 'INCOMING_GOODS',
                     sourceType: 'PHOTO',
                     paymentSource,
+                    cashSource: resolvedCashSource,
                     amount: math.finalTotal,
                     originalAmount: math.rawTotal,
                     discountAmount: math.discountAmount,
@@ -777,7 +789,7 @@ class SupplierService {
                     date: createdAt,
                     photoFileId: originalFileId,
                     formattedReceipt,
-                    description: `Nakladnoy ${params.invoiceNo || ''} (${paymentType})`.trim(),
+                    description: `Nakladnoy ${params.invoiceNo || ''} (${paymentType}${cashSourceTag})`.trim(),
                     receiptData: {
                         invoiceId: invoice.id,
                         supplierName: supplier.name,
@@ -787,6 +799,7 @@ class SupplierService {
                         finalTotal: math.finalTotal,
                         paymentType,
                         paymentSource,
+                        cashSource: resolvedCashSource,
                         paidCashAmount,
                         creditAmount,
                         currency,
@@ -1318,6 +1331,14 @@ class SupplierService {
                     linkedInvoiceIds.add(inv.id);
                 const note = (0, transliterate_1.toLatinUz)(tx.description ||
                     (inv?.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Yuk keldi')).trim();
+                const payType = inv?.paymentType || tx.receiptData?.paymentType || 'CREDIT';
+                const isCash = payType === 'CASH' || payType === 'PARTIAL';
+                const effCashSource = isCash
+                    ? (0, cash_source_1.resolveEffectiveCashSource)({
+                        cashSource: inv?.cashSource ?? tx.cashSource ?? tx.receiptData?.cashSource,
+                        paymentSource: inv?.paymentSource ?? tx.paymentSource,
+                    })
+                    : null;
                 records.push({
                     id: tx.id,
                     supplierId: cleanSupplierId,
@@ -1329,8 +1350,10 @@ class SupplierService {
                     date: tx.date,
                     createdAt: tx.date,
                     note,
-                    paymentType: inv?.paymentType || tx.receiptData?.paymentType || 'CREDIT',
+                    paymentType: payType,
                     paymentSource: inv?.paymentSource || tx.paymentSource,
+                    cashSource: effCashSource,
+                    cashSourceBadge: effCashSource ? (0, cash_source_1.formatCashSourceBadge)(effCashSource) : null,
                     invoiceId: inv?.id || tx.invoiceId || null,
                     invoiceNo: inv?.invoiceNo || tx.receiptData?.invoiceNo || null,
                     originalAmount: inv?.originalAmount != null
@@ -1358,6 +1381,10 @@ class SupplierService {
             for (const inv of invoices) {
                 if (linkedInvoiceIds.has(inv.id))
                     continue;
+                const isCash = inv.paymentType === 'CASH' || inv.paymentType === 'PARTIAL';
+                const effCashSource = isCash
+                    ? (0, cash_source_1.resolveEffectiveCashSource)({ cashSource: inv.cashSource, paymentSource: inv.paymentSource })
+                    : null;
                 records.push({
                     id: inv.id,
                     supplierId: cleanSupplierId,
@@ -1371,6 +1398,8 @@ class SupplierService {
                     note: (0, transliterate_1.toLatinUz)(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
                     paymentType: inv.paymentType,
                     paymentSource: inv.paymentSource,
+                    cashSource: effCashSource,
+                    cashSourceBadge: effCashSource ? (0, cash_source_1.formatCashSourceBadge)(effCashSource) : null,
                     invoiceId: inv.id,
                     invoiceNo: inv.invoiceNo,
                     originalAmount: inv.originalAmount != null ? roundMoney(Number(inv.originalAmount)) : null,
@@ -1516,6 +1545,14 @@ class SupplierService {
                     });
                 }
             }
+            const payType = inv?.paymentType || tx.receiptData?.paymentType || null;
+            const isCash = payType === 'CASH' || payType === 'PARTIAL';
+            const effCashSource = isCash
+                ? (0, cash_source_1.resolveEffectiveCashSource)({
+                    cashSource: inv?.cashSource ?? tx.cashSource ?? tx.receiptData?.cashSource,
+                    paymentSource: inv?.paymentSource ?? tx.paymentSource,
+                })
+                : null;
             return {
                 id: tx.id,
                 supplierId: tx.supplierId,
@@ -1532,8 +1569,10 @@ class SupplierService {
                         : recordType === 'PULLAR'
                             ? "To'lov"
                             : 'Yuk keldi')),
-                paymentType: inv?.paymentType || tx.receiptData?.paymentType || null,
+                paymentType: payType,
                 paymentSource: inv?.paymentSource || tx.paymentSource,
+                cashSource: effCashSource,
+                cashSourceBadge: effCashSource ? (0, cash_source_1.formatCashSourceBadge)(effCashSource) : null,
                 invoiceId: inv?.id || tx.invoiceId || null,
                 invoiceNo: inv?.invoiceNo || tx.receiptData?.invoiceNo || null,
                 originalAmount: inv?.originalAmount != null
@@ -1577,6 +1616,10 @@ class SupplierService {
             });
             if (!inv)
                 return null;
+            const isCash = inv.paymentType === 'CASH' || inv.paymentType === 'PARTIAL';
+            const effCashSource = isCash
+                ? (0, cash_source_1.resolveEffectiveCashSource)({ cashSource: inv.cashSource, paymentSource: inv.paymentSource })
+                : null;
             return {
                 id: inv.id,
                 supplierId: inv.supplierId,
@@ -1590,6 +1633,8 @@ class SupplierService {
                 note: (0, transliterate_1.toLatinUz)(inv.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : 'Nakladnoy'),
                 paymentType: inv.paymentType,
                 paymentSource: inv.paymentSource,
+                cashSource: effCashSource,
+                cashSourceBadge: effCashSource ? (0, cash_source_1.formatCashSourceBadge)(effCashSource) : null,
                 invoiceId: inv.id,
                 invoiceNo: inv.invoiceNo,
                 originalAmount: inv.originalAmount != null ? roundMoney(Number(inv.originalAmount)) : null,
@@ -1784,15 +1829,18 @@ class SupplierService {
                 if (payType === 'CASH' && oldAmount > 0) {
                     const winStart = new Date(linkedInvoice.createdAt.getTime() - 10_000);
                     const winEnd = new Date(linkedInvoice.createdAt.getTime() + 10_000);
-                    const matchingCash = await tx.cashTransaction.findFirst({
-                        where: {
-                            ownerId: cleanOwnerId,
-                            currency,
-                            amount: oldAmount,
-                            createdAt: { gte: winStart, lte: winEnd },
-                        },
-                        orderBy: { createdAt: 'desc' },
-                    });
+                    const matchingCash = (await tx.cashTransaction.findFirst({
+                        where: { ownerId: cleanOwnerId, invoiceId: linkedInvoice.id },
+                    })) ||
+                        (await tx.cashTransaction.findFirst({
+                            where: {
+                                ownerId: cleanOwnerId,
+                                currency,
+                                amount: oldAmount,
+                                createdAt: { gte: winStart, lte: winEnd },
+                            },
+                            orderBy: { createdAt: 'desc' },
+                        }));
                     if (matchingCash) {
                         await tx.cashTransaction.update({
                             where: { id: matchingCash.id },
@@ -1944,15 +1992,18 @@ class SupplierService {
                 if (paidCashAmt > 0) {
                     const winStart = new Date(linkedInvoice.createdAt.getTime() - 10_000);
                     const winEnd = new Date(linkedInvoice.createdAt.getTime() + 10_000);
-                    const matchingCash = await tx.cashTransaction.findFirst({
-                        where: {
-                            ownerId: cleanOwnerId,
-                            currency,
-                            amount: paidCashAmt,
-                            createdAt: { gte: winStart, lte: winEnd },
-                        },
-                        orderBy: { createdAt: 'desc' },
-                    });
+                    const matchingCash = (await tx.cashTransaction.findFirst({
+                        where: { ownerId: cleanOwnerId, invoiceId: linkedInvoice.id },
+                    })) ||
+                        (await tx.cashTransaction.findFirst({
+                            where: {
+                                ownerId: cleanOwnerId,
+                                currency,
+                                amount: paidCashAmt,
+                                createdAt: { gte: winStart, lte: winEnd },
+                            },
+                            orderBy: { createdAt: 'desc' },
+                        }));
                     if (matchingCash) {
                         await tx.cashTransaction.delete({ where: { id: matchingCash.id } });
                     }
@@ -2042,7 +2093,14 @@ class SupplierService {
                         ? Math.min(totalAmt, roundMoney(Math.abs(Number(inv?.paidCashAmount ?? tx.receiptData?.paidCashAmount ?? 0))))
                         : 0;
                 const invLabel = inv?.invoiceNo ? `Nakladnoy #${inv.invoiceNo}` : (0, transliterate_1.toLatinUz)(tx.description || 'Yuk keldi');
-                const noteSuffix = payType === 'CASH' ? ' (Naqd)' : payType === 'PARTIAL' ? ' (Qisman naqd)' : '';
+                const cashBadge = payType === 'CASH' || payType === 'PARTIAL'
+                    ? (0, cash_source_1.formatCashSourceBadge)(inv?.cashSource ?? tx.cashSource ?? tx.receiptData?.cashSource, inv?.paymentSource ?? tx.paymentSource)
+                    : null;
+                const noteSuffix = payType === 'CASH'
+                    ? ` (Naqd - ${cashBadge})`
+                    : payType === 'PARTIAL'
+                        ? ` (Qisman naqd - ${cashBadge})`
+                        : '';
                 entries.push({
                     id: tx.id,
                     date: tx.date,
@@ -2064,8 +2122,8 @@ class SupplierService {
                         amount: paidCash,
                         currency: cur,
                         note: (0, transliterate_1.toLatinUz)(payType === 'CASH'
-                            ? `Naqd to'lov (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`
-                            : `Qisman naqd to'lov (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`),
+                            ? `Naqd to'lov - ${cashBadge} (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`
+                            : `Qisman naqd to'lov - ${cashBadge} (${inv?.invoiceNo ? `#${inv.invoiceNo}` : 'Nakladnoy'})`),
                         paymentType: payType,
                     });
                 }

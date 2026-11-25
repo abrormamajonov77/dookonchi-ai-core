@@ -257,7 +257,7 @@ export function startCronJobs(bot: Bot<MyContext>) {
         const users = await getActiveStoreUsers();
         const { dateKey } = getTashkentDayRange();
         for (const u of users) {
-          const [r, supAgg] = await Promise.all([
+          const [r, supAgg, todayAuto] = await Promise.all([
             prisma.dailyRegister.findUnique({
               where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
             }),
@@ -265,10 +265,19 @@ export function startCronJobs(bot: Bot<MyContext>) {
               where: { ownerId: u.telegramId, isActive: true },
               _sum: { debtUzs: true, debtUsd: true },
             }),
+            ReportService.getTodayZReportAutoMetrics(u.telegramId),
           ]);
+          const cashBreakdownLines = [
+            `📦 Naqd tovar xaridlari [Kassadan]: ${formatMoney(todayAuto.dailyCashPurchasesUzs, 'UZS')}`,
+            ...(todayAuto.safeCashPurchasesUzs > 0
+              ? [
+                  `🔐 Naqd tovar xaridlari [Seyfdan]: ${formatMoney(todayAuto.safeCashPurchasesUzs, 'UZS')} _(bugungi kassadan ayirilmadi)_`,
+                ]
+              : []),
+          ].join('\n');
           const body = r
-            ? `Naqd (UZS): ${formatMoney(r.cashUzs, 'UZS')}\nClick: ${formatMoney(r.clickAmount, 'UZS')}\nTerminal: ${formatMoney(r.terminalAmount, 'UZS')}\nJami Savdo: ${formatMoney(r.totalDailySalesUzs || r.cashUzs, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`
-            : `Bugun kassa ma'lumotlari kiritilmadi!\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`;
+            ? `Naqd (UZS): ${formatMoney(r.cashUzs, 'UZS')}\nClick: ${formatMoney(r.clickAmount, 'UZS')}\nTerminal: ${formatMoney(r.terminalAmount, 'UZS')}\n${cashBreakdownLines}\nJami Savdo: ${formatMoney(r.totalDailySalesUzs || r.cashUzs, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`
+            : `Bugun kassa ma'lumotlari kiritilmadi!\n${cashBreakdownLines}\n\n📊 JAMI QARZ (UZS): ${formatMoney(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${formatMoney(supAgg._sum.debtUsd || 0, 'USD')}\n`;
           await bot.api
             .sendMessage(u.telegramId, `📊 **Kunlik Yakuniy Hisobot**\n\n${body}`, {
               parse_mode: 'Markdown',

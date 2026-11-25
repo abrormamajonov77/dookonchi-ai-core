@@ -190,6 +190,7 @@ describe('Dashboard Service — Daily Time-Machine', () => {
         cashRemainingInDrawer: 2_500_000,
       } as any);
     vi.spyOn(prisma.dailyRegister, 'findUnique').mockResolvedValue(null);
+    vi.spyOn(prisma.cashTransaction, 'findMany').mockResolvedValue([]);
     vi.spyOn(prisma.invoice, 'findMany')
       .mockResolvedValueOnce([
         {
@@ -282,6 +283,104 @@ describe('Dashboard Service — Daily Time-Machine', () => {
       paymentsUzsDeltaPct: 50,
       expensesUzsDeltaPct: -50,
     });
+  });
+
+  it('exposes Kassadan vs Seyfdan badges and deduplicates invoice-linked CashTransactions in Daily Time-Machine', async () => {
+    const ownerId = '777124';
+    vi.spyOn(prisma.zReport, 'findUnique').mockResolvedValue({
+      totalDailySalesUzs: 5_000_000,
+      terminalAmount: 1_000_000,
+      clickAmount: 500_000,
+      cashRemainingInDrawer: 2_500_000,
+      dailyCashPurchasesUzs: 800_000,
+    } as any);
+    vi.spyOn(prisma.dailyRegister, 'findUnique').mockResolvedValue(null);
+    vi.spyOn(prisma.invoice, 'findMany').mockResolvedValue([
+      {
+        id: 'inv-reg',
+        supplierId: 'sup-1',
+        supplier: { name: 'Sirok' },
+        totalAmount: 500_000,
+        currency: 'UZS',
+        paymentType: 'CASH',
+        cashSource: 'TODAY_REGISTER',
+        invoiceNo: '201',
+        createdAt: new Date('2026-11-20T07:00:00Z'),
+      } as any,
+      {
+        id: 'inv-safe',
+        supplierId: 'sup-2',
+        supplier: { name: 'Millora' },
+        totalAmount: 1_200_000,
+        currency: 'UZS',
+        paymentType: 'CASH',
+        cashSource: 'SAFE',
+        invoiceNo: '202',
+        createdAt: new Date('2026-11-20T08:00:00Z'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.cashTransaction, 'findMany').mockResolvedValue([
+      // Linked to inv-reg — must be deduplicated, NOT double-counted
+      {
+        id: 'ct-linked',
+        invoiceId: 'inv-reg',
+        partyName: 'Sirok',
+        amount: 500_000,
+        currency: 'UZS',
+        cashSource: 'TODAY_REGISTER',
+        paymentSource: 'TODAY_CASH',
+        items: 'Nakladnoy',
+        createdAt: new Date('2026-11-20T07:00:01Z'),
+      } as any,
+      // Standalone manual cash purchase from today's register
+      {
+        id: 'ct-manual-reg',
+        invoiceId: null,
+        partyName: 'Bozor',
+        amount: 300_000,
+        currency: 'UZS',
+        cashSource: 'TODAY_REGISTER',
+        paymentSource: 'TODAY_CASH',
+        items: 'Meva',
+        createdAt: new Date('2026-11-20T09:00:00Z'),
+      } as any,
+      // Standalone manual cash purchase from safe
+      {
+        id: 'ct-manual-safe',
+        invoiceId: null,
+        partyName: 'Ulgurji',
+        amount: 400_000,
+        currency: 'UZS',
+        cashSource: 'SAFE',
+        paymentSource: 'PREVIOUS_SAFE',
+        items: 'Shakar',
+        createdAt: new Date('2026-11-20T09:30:00Z'),
+      } as any,
+    ]);
+    vi.spyOn(prisma.supplierTransaction, 'findMany').mockResolvedValue([]);
+    vi.spyOn(prisma.expense, 'findMany').mockResolvedValue([]);
+
+    const res = await getDailyTimeMachine(ownerId, '2026-11-20');
+
+    expect(res.dateA.cashPurchases.todayRegisterUzs).toBe(800_000);
+    expect(res.dateA.cashPurchases.todayRegisterCount).toBe(2);
+    expect(res.dateA.cashPurchases.safeUzs).toBe(1_600_000);
+    expect(res.dateA.cashPurchases.safeCount).toBe(2);
+    expect(res.dateA.cashPurchases.totalUzs).toBe(2_400_000);
+    expect(res.dateA.sales.dailyCashPurchasesUzs).toBe(800_000);
+    expect(res.dateA.sales.safeCashPurchasesUzs).toBe(1_600_000);
+
+    const invRegItem = res.dateA.incoming.items.find((i) => i.id === 'inv-reg');
+    const invSafeItem = res.dateA.incoming.items.find((i) => i.id === 'inv-safe');
+    const manualRegItem = res.dateA.incoming.items.find((i) => i.id === 'ct-manual-reg');
+    const manualSafeItem = res.dateA.incoming.items.find((i) => i.id === 'ct-manual-safe');
+    expect(invRegItem?.cashSourceBadge).toBe('Kassadan');
+    expect(invSafeItem?.cashSourceBadge).toBe('Seyfdan');
+    expect(manualRegItem?.cashSourceBadge).toBe('Kassadan');
+    expect(manualSafeItem?.cashSourceBadge).toBe('Seyfdan');
+    // Deduplicated linked CashTransaction should not appear twice
+    expect(res.dateA.incoming.items.find((i) => i.id === 'ct-linked')).toBeUndefined();
+    expect(res.dateA.incoming.totalUzs).toBe(2_400_000);
   });
 });
 

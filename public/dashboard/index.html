@@ -573,7 +573,12 @@
         applyBadgeEl(document.getElementById('kpi-sales-delta'), mc.deltas.salesPct, false);
 
         document.getElementById('kpi-incoming-val').textContent = fmtCompact(mc.monthA.incomingUzs) + " so'm";
-        document.getElementById('kpi-incoming-sub').textContent = `Savdoga nisbati: ${mc.monthA.incomingToSalesRatioPct}%`;
+        const cashKassa = Number(mc.monthA.cashPurchasesTodayRegisterUzs || 0);
+        const cashSeyf = Number(mc.monthA.cashPurchasesSafeUzs || 0);
+        document.getElementById('kpi-incoming-sub').innerHTML =
+          cashKassa > 0 || cashSeyf > 0
+            ? `💵 Kassadan: ${fmtCompact(cashKassa)} • 🔐 Seyfdan: ${fmtCompact(cashSeyf)}`
+            : `Savdoga nisbati: ${mc.monthA.incomingToSalesRatioPct}%`;
         applyBadgeEl(document.getElementById('kpi-incoming-delta'), mc.deltas.incomingUzsPct, false);
 
         document.getElementById('kpi-debt-uzs').textContent = fmtCompact(dm.totalDebtUzs) + " so'm";
@@ -589,6 +594,15 @@
       } catch (err) {
         showToast(err.message, true);
       }
+    }
+
+    function cashSourceBadgeHtml(badge) {
+      if (!badge) return '';
+      const isSafe = badge === 'Seyfdan';
+      const cls = isSafe
+        ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30'
+        : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30';
+      return `<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-md ${cls}">${isSafe ? '🔐 Seyfdan' : '💵 Kassadan'}</span>`;
     }
 
     function renderGhostChart() {
@@ -761,10 +775,14 @@
               : r.type === 'PAYMENT'
               ? 'text-emerald-600 dark:text-emerald-400'
               : 'text-amber-600 dark:text-amber-400';
+          const srcBadge = r.cashSourceBadge ? cashSourceBadgeHtml(r.cashSourceBadge) : '';
           return `
             <div class="p-3 rounded-xl bg-slate-100 dark:bg-obsidian-950 border border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-3">
               <div class="min-w-0">
-                <div class="text-xs font-semibold truncate">${escapeHtml(r.note || 'Amaliyot')}</div>
+                <div class="text-xs font-semibold flex items-center gap-1.5 flex-wrap">
+                  <span class="truncate">${escapeHtml(r.note || 'Amaliyot')}</span>
+                  ${srcBadge}
+                </div>
                 <div class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">${fmtDateShort(r.date)}</div>
               </div>
               <div class="text-xs font-extrabold shrink-0 ${color}">${sign}${amtStr}</div>
@@ -825,6 +843,8 @@
         </div>
       `;
 
+      const cp = a.cashPurchases || { count: 0, totalUzs: 0, todayRegisterUzs: 0, todayRegisterCount: 0, safeUzs: 0, safeCount: 0, items: [] };
+
       const zDetails = `
         <div class="glass-card rounded-2xl p-4 space-y-2">
           <div class="flex items-center justify-between">
@@ -847,13 +867,26 @@
               <div class="text-[11px] font-bold mt-0.5">${fmtCompact(a.sales.cashRemainingInDrawer)}</div>
             </div>
           </div>
+          <div class="grid grid-cols-2 gap-2 text-center pt-1">
+            <div class="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+              <div class="text-[10px] text-emerald-600 dark:text-emerald-300 font-semibold">💵 Naqd xarid (Kassadan)</div>
+              <div class="text-[11px] font-bold mt-0.5">${fmtSom(cp.todayRegisterUzs)}</div>
+            </div>
+            <div class="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20">
+              <div class="text-[10px] text-amber-600 dark:text-amber-300 font-semibold">🔐 Naqd xarid (Seyfdan)</div>
+              <div class="text-[11px] font-bold mt-0.5">${fmtSom(cp.safeUzs)}</div>
+            </div>
+          </div>
         </div>
       `;
 
       const incomingCard = renderListCard('📦 Kelgan yuklar', a.incoming.items, "Bu kunda yuk kelmagan.", (it) => `
         <div class="p-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-900 flex items-center justify-between gap-2">
           <div class="min-w-0">
-            <div class="text-xs font-semibold truncate">${escapeHtml(it.supplierName)}</div>
+            <div class="text-xs font-semibold flex items-center gap-1.5 flex-wrap">
+              <span class="truncate">${escapeHtml(it.supplierName)}</span>
+              ${it.cashSourceBadge ? cashSourceBadgeHtml(it.cashSourceBadge) : ''}
+            </div>
             <div class="text-[10px] text-slate-500">${escapeHtml(it.time)} • ${escapeHtml(it.note)}</div>
           </div>
           <div class="text-xs font-bold text-indigo-500 dark:text-indigo-400 shrink-0">+${it.currency === 'USD' ? fmtUsd(it.amount) : fmtSom(it.amount)}</div>
@@ -863,7 +896,10 @@
       const paymentsCard = renderListCard("💵 Ta'minotchilarga to'lovlar", a.payments.items, "Bu kunda to'lov qilinmagan.", (it) => `
         <div class="p-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-900 flex items-center justify-between gap-2">
           <div class="min-w-0">
-            <div class="text-xs font-semibold truncate">${escapeHtml(it.supplierName)}</div>
+            <div class="text-xs font-semibold flex items-center gap-1.5 flex-wrap">
+              <span class="truncate">${escapeHtml(it.supplierName)}</span>
+              ${it.cashSourceBadge ? cashSourceBadgeHtml(it.cashSourceBadge) : ''}
+            </div>
             <div class="text-[10px] text-slate-500">${escapeHtml(it.time)} • ${escapeHtml(it.note)}</div>
           </div>
           <div class="text-xs font-bold text-emerald-600 dark:text-emerald-400 shrink-0">-${it.currency === 'USD' ? fmtUsd(it.amount) : fmtSom(it.amount)}</div>

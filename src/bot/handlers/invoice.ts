@@ -9,6 +9,7 @@ import {
   getSavedInvoiceCardKeyboard,
   getDuplicateInvoiceWarningKeyboard,
   getFuzzySupplierSuggestionKeyboard,
+  getCashSourceSelectionKeyboard,
 } from '../keyboards/inline';
 import { isMenuButton } from '../keyboards/menu';
 import { logger } from '../../config/logger';
@@ -37,6 +38,14 @@ import { SupplierService } from '../../services/supplier.service';
 import { SearchService, formatPriceIncreaseAlertsBlock } from '../../services/search.service';
 import { toLatinUz } from '../../utils/transliterate';
 import { parseTextCommandLocally } from '../../utils/local-parser';
+import {
+  CASH_SOURCE_PROMPT_TEXT,
+  CashSourceValue,
+  cashSourceToPaymentSource,
+  formatCashSourceBadge,
+  formatCashSourceDisplay,
+  formatCashSourceZReportNote,
+} from '../../utils/cash-source';
 
 export const invoiceHandler = new Composer<MyContext>();
 
@@ -1047,6 +1056,34 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
   if (!ctx.from) return;
   const extracted = await extractPendingInvoice(ctx, ctx.match[1]);
   if (!extracted) return;
+  const { pendingId, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
+
+  ctx.session.step = `i_${pendingId}`;
+  const promptMsg =
+    `🧾 **Nakladnoy (💵 Naqdga)**\n\n` +
+    `🏢 Ta'minotchi: **${sanitizeMdV1(supplierName)}**\n` +
+    `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
+    (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
+    `💵 Naqd to'lanadigan summa (Itogo): **${formatCurrency(finalPayable, currency)}**\n\n` +
+    `${CASH_SOURCE_PROMPT_TEXT}`;
+
+  const kb = getCashSourceSelectionKeyboard(`i_${pendingId}`);
+  if (ctx.callbackQuery.message && ctx.chat?.id) {
+    await safeEditMessageText(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, promptMsg, {
+      parse_mode: 'Markdown',
+      reply_markup: kb,
+    });
+  } else {
+    await safeReply(ctx, promptMsg, { parse_mode: 'Markdown', reply_markup: kb });
+  }
+});
+
+invoiceHandler.callbackQuery(/^cs:(T|S):i_(.+)$/, async (ctx) => {
+  if (!ctx.from) return;
+  const cashSource: CashSourceValue = ctx.match[1] === 'S' ? 'SAFE' : 'TODAY_REGISTER';
+  const paymentSource = cashSourceToPaymentSource(cashSource);
+  const extracted = await extractPendingInvoice(ctx, ctx.match[2]);
+  if (!extracted) return;
   const { pendingId, ownerId, pData, invoiceData, totalSum, discountAmount, finalPayable, currency, supplierName } = extracted;
 
   try {
@@ -1062,6 +1099,8 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
       discountInput: discountAmount,
       currency,
       paymentType: 'CASH',
+      paymentSource,
+      cashSource,
       paidCashAmount: finalPayable,
       creditAmount: 0,
       imageHash: invoiceData.imageHash || null,
@@ -1082,13 +1121,17 @@ invoiceHandler.callbackQuery(/^confirm_invcash_i_(.+)$/, async (ctx) => {
       return;
     }
 
+    const sourceDisplay = formatCashSourceDisplay(cashSource);
+    const sourceBadge = formatCashSourceBadge(cashSource);
+    const zNote = formatCashSourceZReportNote(cashSource);
     const savedMsg =
-      `✅ **Nakladnoy (💵 Naqdga) muvaffaqiyatli saqlandi!**\n\n` +
+      `✅ **Nakladnoy (💵 Naqdga — ${sourceBadge}) muvaffaqiyatli saqlandi!**\n\n` +
       `🏢 Ta'minotchi: **${sanitizeMdV1(result.supplier.name)}**\n` +
       `📦 Tovarlarning asl summasi: **${formatCurrency(totalSum, currency)}**\n` +
       (discountAmount > 0 ? `🏷 Skidka: **-${formatCurrency(discountAmount, currency)}**\n` : '') +
       `💵 Naqd to'langan summa (Itogo): **${formatCurrency(finalPayable, currency)}**\n` +
-      `📊 Qarzga yozilmadi (0). Bugungi Z-Otchyot naqd xaridlariga qo'shildi.`;
+      `🗂 Pul manbasi: **${sourceDisplay}**\n` +
+      `📊 Qarzga yozilmadi (0). ${zNote}`;
 
     const savedKb = getSavedInvoiceCardKeyboard(
       result.invoice.id,

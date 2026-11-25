@@ -5,6 +5,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.voiceHandler = void 0;
 exports.parseShorthandTx = parseShorthandTx;
+exports.resolveExplicitCashSource = resolveExplicitCashSource;
+exports.saveCashGoodsPurchase = saveCashGoodsPurchase;
+exports.processIntent = processIntent;
 const grammy_1 = require("grammy");
 const fuse_js_1 = __importDefault(require("fuse.js"));
 const ai_service_1 = require("../../services/ai.service");
@@ -18,6 +21,7 @@ const supplier_service_1 = require("../../services/supplier.service");
 const search_service_1 = require("../../services/search.service");
 const local_parser_1 = require("../../utils/local-parser");
 const transliterate_1 = require("../../utils/transliterate");
+const cash_source_1 = require("../../utils/cash-source");
 exports.voiceHandler = new grammy_1.Composer();
 const EXPIRED_MSG = "⚠️ Ushbu operatsiya muddati tugagan yoki allaqachon tasdiqlangan. Iltimos, xabarni qaytadan yuboring.";
 const NEW_SUPP_PROMPT = "Ushbu yangi ta'minotchini adashtirmaslik uchun unga qo'shimcha belgi kiriting (masalan: 'Azamat Shakar' yoki 'Azamat Qo'qon'):";
@@ -27,23 +31,107 @@ function parseShorthandTx(text) {
         return null;
     if (local.intent !== 'INVOICE_CASH' &&
         local.intent !== 'INVOICE_CREDIT' &&
-        local.intent !== 'SUPPLIER_PAYMENT') {
+        local.intent !== 'SUPPLIER_PAYMENT' &&
+        local.intent !== 'ADD_CASH_TX') {
         return null;
     }
     return {
         txType: (local.intent === 'SUPPLIER_PAYMENT' ? 'PAYMENT' : 'INCOMING_GOODS'),
         amount: local.amount,
         currency: local.currency,
-        name: local.supplierName,
+        name: local.supplierName || local.name,
         paymentType: local.paymentType,
         paymentSource: local.paymentSource,
+        cashSource: local.cashSource ?? null,
         hasExplicitSource: local.hasExplicitSource,
     };
+}
+function resolveExplicitCashSource(intentData) {
+    if (intentData?.hasExplicitSource) {
+        if (intentData.cashSource === 'SAFE' || intentData.paymentSource === 'PREVIOUS_SAFE') {
+            return 'SAFE';
+        }
+        if (intentData.cashSource === 'TODAY_REGISTER' || intentData.paymentSource === 'TODAY_CASH') {
+            return 'TODAY_REGISTER';
+        }
+    }
+    const fallbackText = [intentData?.transcript, intentData?.comment, intentData?.note]
+        .filter((v) => typeof v === 'string' && v.trim().length > 0)
+        .join(' ');
+    if (fallbackText) {
+        const detected = (0, cash_source_1.detectCashSourceFromText)(fallbackText);
+        if (detected.hasExplicitSource && detected.cashSource) {
+            return detected.cashSource;
+        }
+    }
+    return null;
+}
+async function saveCashGoodsPurchase(data, ownerId, cashSource) {
+    const currency = (data.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
+    const amount = Number(Math.abs(Number(data.amount || 0)).toFixed(2));
+    const paymentSource = (0, cash_source_1.cashSourceToPaymentSource)(cashSource);
+    const rawName = (0, transliterate_1.toLatinUz)(data.supplierName || data.name || '').trim();
+    const isNamedSupplier = data.intent !== 'ADD_CASH_TX' &&
+        rawName.length >= 2 &&
+        rawName.toLowerCase() !== 'naqd xarid' &&
+        rawName.toLowerCase() !== "noma'lum";
+    const sourceDisplay = (0, cash_source_1.formatCashSourceDisplay)(cashSource);
+    const sourceBadge = (0, cash_source_1.formatCashSourceBadge)(cashSource);
+    const zNote = (0, cash_source_1.formatCashSourceZReportNote)(cashSource);
+    if (isNamedSupplier) {
+        const supplierId = data.exactSupplierId && data.exactSupplierId !== 'CREATE_NEW'
+            ? data.exactSupplierId
+            : undefined;
+        const res = await supplier_service_1.SupplierService.createInvoiceWithItems({
+            ownerId,
+            supplierId,
+            supplierName: rawName,
+            rawTotal: amount,
+            discountInput: 0,
+            currency,
+            paymentType: 'CASH',
+            paymentSource,
+            cashSource,
+            paidCashAmount: amount,
+            creditAmount: 0,
+            forceOverrideDuplicate: true,
+        });
+        const safeSup = (0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(res.supplier.name));
+        const replyMsg = `✅ **Naqd tovar xaridi (${sourceBadge}) muvaffaqiyatli saqlandi!**\n\n` +
+            `🏢 Ta'minotchi: **${safeSup}**\n` +
+            `💵 Naqd summa: **${(0, formatters_1.formatCurrency)(amount, currency)}**\n` +
+            `🗂 Pul manbasi: **${sourceDisplay}**\n` +
+            `📊 Qarzga qo'shilmadi (0). ${zNote}`;
+        return { replyMsg, cashSource };
+    }
+    const partyName = rawName && rawName.length >= 2 ? rawName : 'Naqd xarid';
+    const commentText = data.comment ? (0, transliterate_1.toLatinUz)(String(data.comment)).trim() : null;
+    await prisma_1.prisma.cashTransaction.create({
+        data: {
+            ownerId,
+            partyName,
+            amount,
+            currency,
+            paymentSource,
+            cashSource,
+            items: commentText,
+            createdBy: ownerId,
+        },
+    });
+    const safeParty = (0, telegram_1.sanitizeMdV1)(partyName);
+    const replyMsg = `✅ **Naqd tovar xaridi (${sourceBadge}) muvaffaqiyatli saqlandi!**\n\n` +
+        `📦 Amal: **${safeParty}**\n` +
+        `💵 Naqd summa: **${(0, formatters_1.formatCurrency)(amount, currency)}**\n` +
+        (commentText ? `📝 Izoh: ${(0, telegram_1.sanitizeMdV1)(commentText)}\n` : '') +
+        `🗂 Pul manbasi: **${sourceDisplay}**\n` +
+        `📊 Qarzga qo'shilmadi (0). ${zNote}`;
+    return { replyMsg, cashSource };
 }
 async function saveSupplierTxData(data, ownerId, overrideSource) {
     const currency = (data.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
     const amount = Number(Math.abs(Number(data.amount || 0)).toFixed(2));
     const paymentSource = overrideSource || data.paymentSource || 'TODAY_CASH';
+    const cashSource = data.cashSource === 'SAFE' || paymentSource === 'PREVIOUS_SAFE' ? 'SAFE' : 'TODAY_REGISTER';
     const cleanName = (0, transliterate_1.toLatinUz)(data.name || data.supplierName || "Noma'lum").trim();
     const supplierId = data.exactSupplierId && data.exactSupplierId !== 'CREATE_NEW'
         ? data.exactSupplierId
@@ -58,7 +146,8 @@ async function saveSupplierTxData(data, ownerId, overrideSource) {
             discountInput: 0,
             currency,
             paymentType: 'CASH',
-            paymentSource,
+            paymentSource: (0, cash_source_1.cashSourceToPaymentSource)(cashSource),
+            cashSource,
             paidCashAmount: amount,
             creditAmount: 0,
             forceOverrideDuplicate: true,
@@ -345,6 +434,9 @@ async function processIntent(ctx, intentData) {
         intentData.intent = 'ADD_SUPPLIER_TX';
         intentData.txType = 'PAYMENT';
     }
+    else if (intentData.intent === 'ADD_CASH_TX') {
+        intentData.paymentType = 'CASH';
+    }
     // MODUL 4: Fuzzy Supplier Typo Guard ("Dinar" vs "Diner" / "Dinar kalbasa")
     if (intentData.intent === 'ADD_SUPPLIER_TX' && !intentData.exactSupplierId) {
         const targetName = intentData.name || intentData.supplierName || '';
@@ -392,6 +484,60 @@ async function processIntent(ctx, intentData) {
             }
         }
     }
+    const cur = (intentData.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
+    const isCashGoodsPurchase = intentData.intent === 'ADD_CASH_TX' ||
+        (intentData.intent === 'ADD_SUPPLIER_TX' && intentData.paymentType === 'CASH');
+    // Mandatory Cash Source Flow for Zero-Menu Voice / Text Cash Goods Purchases
+    if (isCashGoodsPurchase) {
+        const amt = Number(Math.abs(Number(intentData.amount || 0)).toFixed(2));
+        if (!amt || amt <= 0 || isNaN(amt)) {
+            return ctx.reply("❌ Naqd xarid summasini aniqlab bo'lmadi. Masalan: `Naqdga 500 ming yuk oldim`", {
+                parse_mode: 'Markdown',
+            });
+        }
+        if (amt > 10_000_000_000) {
+            return ctx.reply("❌ Kiritilgan summa o'ta katta (maks: 10 mlrd). Tekshirib qayta yuboring.");
+        }
+        const explicitCashSource = resolveExplicitCashSource(intentData);
+        if (explicitCashSource) {
+            try {
+                const { replyMsg } = await saveCashGoodsPurchase(intentData, ownerId, explicitCashSource);
+                (0, telegram_1.clearSession)(ctx);
+                await (0, telegram_1.safeReply)(ctx, replyMsg, { parse_mode: 'Markdown' });
+            }
+            catch (error) {
+                logger_1.logger.error(error, 'Error saving direct explicit-source cash purchase');
+                await ctx.reply("❌ Naqd xaridni saqlashda xatolik yuz berdi. Qayta urinib ko'ring.");
+            }
+            return;
+        }
+        const pendingAction = await prisma_1.prisma.pendingAction.create({
+            data: {
+                userId: BigInt(ctx.from.id),
+                type: 'VOICE_INTENT',
+                data: { ...intentData, ownerId },
+            },
+        });
+        const actionId = `v_${pendingAction.id}`;
+        ctx.session.step = actionId;
+        ctx.session.tempData = {
+            type: 'CASH_PURCHASE_DRAFT',
+            actionId,
+            data: { ...intentData, ownerId },
+        };
+        const safeParty = (0, telegram_1.sanitizeMdV1)(intentData.name || intentData.supplierName || 'Naqd xarid');
+        const isSupplierNamed = intentData.intent === 'ADD_SUPPLIER_TX' &&
+            safeParty.length >= 2 &&
+            safeParty.toLowerCase() !== 'naqd xarid';
+        const draftDetails = isSupplierNamed
+            ? `▫️ *Operatsiya:* 💵 Naqd tovar xaridi (Qarzga qo'shilmaydi)\n▫️ *Ta'minotchi:* ${safeParty}\n▫️ *Summa:* ${(0, formatters_1.formatCurrency)(amt, cur)}`
+            : `▫️ *Operatsiya:* 💵 Naqd tovar xaridi (Qarzga qo'shilmaydi)\n▫️ *Summa:* ${(0, formatters_1.formatCurrency)(amt, cur)}${intentData.comment ? `\n▫️ *Izoh:* ${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(intentData.comment))}` : ''}`;
+        await (0, telegram_1.safeReply)(ctx, `🧾 **Naqd tovar xaridi**\n\n${draftDetails}\n\n${cash_source_1.CASH_SOURCE_PROMPT_TEXT}`, {
+            parse_mode: 'Markdown',
+            reply_markup: (0, inline_1.getCashSourceSelectionKeyboard)(actionId),
+        });
+        return;
+    }
     const pendingAction = await prisma_1.prisma.pendingAction.create({
         data: {
             userId: BigInt(ctx.from.id),
@@ -401,7 +547,6 @@ async function processIntent(ctx, intentData) {
     });
     const actionId = `v_${pendingAction.id}`;
     ctx.session.step = actionId;
-    const cur = (intentData.currency || 'UZS') === 'USD' ? 'USD' : 'UZS';
     let balancePreview = '';
     if (intentData.intent === 'ADD_SUPPLIER_TX') {
         const isCashPurchase = intentData.paymentType === 'CASH';
@@ -441,15 +586,11 @@ async function processIntent(ctx, intentData) {
     const safeComment = (0, telegram_1.sanitizeMdV1)(intentData.comment || "Yo'q");
     const details = intentData.intent === 'ADD_EXPENSE'
         ? `Operatsiya: Xarajat\nSumma: ${(0, formatters_1.formatCurrency)(intentData.amount, cur)}\nKategoriya: ${safeCategory}\nIzoh: ${safeComment}`
-        : intentData.intent === 'ADD_SUPPLIER_TX' && intentData.paymentType === 'CASH'
-            ? `Operatsiya: 💵 Naqd yuk olish (Qarzga qo'shilmaydi)\nTa'minotchi: ${safeParty}\nSumma: ${(0, formatters_1.formatCurrency)(Math.abs(Number(intentData.amount)), cur)}`
-            : intentData.intent === 'ADD_SUPPLIER_TX'
-                ? `Operatsiya: Ta'minotchi bilan oldi-berdi\nTa'minotchi: ${safeParty}\nAmal turi: ${intentData.txType === 'INCOMING_GOODS' ? "Yuk olish (Kirim - Qarzga qo'shish)" : "To'lov (Chiqim - Qarzdan ayirish)"}\nSumma: ${intentData.txType === 'INCOMING_GOODS' ? '+' : '-'}${(0, formatters_1.formatCurrency)(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
-                : intentData.intent === 'ADD_CASH_TX'
-                    ? `Operatsiya: Naqd xarid\nKimdan: ${safeParty}\nSumma: ${(0, formatters_1.formatCurrency)(intentData.amount, cur)}`
-                    : intentData.intent === 'ADD_CUSTOMER_DEBT'
-                        ? `Operatsiya: Nasiya savdo\nMijoz: ${safeParty}\nSumma: +${(0, formatters_1.formatCurrency)(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
-                        : '';
+        : intentData.intent === 'ADD_SUPPLIER_TX'
+            ? `Operatsiya: Ta'minotchi bilan oldi-berdi\nTa'minotchi: ${safeParty}\nAmal turi: ${intentData.txType === 'INCOMING_GOODS' ? "Yuk olish (Kirim - Qarzga qo'shish)" : "To'lov (Chiqim - Qarzdan ayirish)"}\nSumma: ${intentData.txType === 'INCOMING_GOODS' ? '+' : '-'}${(0, formatters_1.formatCurrency)(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
+            : intentData.intent === 'ADD_CUSTOMER_DEBT'
+                ? `Operatsiya: Nasiya savdo\nMijoz: ${safeParty}\nSumma: +${(0, formatters_1.formatCurrency)(Math.abs(Number(intentData.amount)), cur)}${balancePreview}`
+                : '';
     // MODUL 5.2: For supplier payments without an explicit source, ask 1-click payment source
     if (isPaymentTx && !intentData.hasExplicitSource) {
         await (0, telegram_1.safeReply)(ctx, `💸 **Ta'minotchiga to'lov tasdiqlash**\n\n${details}\n\n👇 **Pul qaysi manbadan berildi?**`, {
@@ -650,6 +791,38 @@ exports.voiceHandler.on('message:text', async (ctx, next) => {
         }
     });
 });
+// Mandatory Cash Source Selection callback for Zero-Menu Voice / Text Cash Goods Purchases
+exports.voiceHandler.callbackQuery(/^cs:(T|S):v_(.+)$/, async (ctx) => {
+    if (!ctx.from)
+        return;
+    const ownerId = String(ctx.from.id);
+    const cashSource = ctx.match[1] === 'S' ? 'SAFE' : 'TODAY_REGISTER';
+    const pendingId = ctx.match[2];
+    const pendingAction = await (0, telegram_1.findOwnedPendingAction)(pendingId, ctx.from.id);
+    const sessionDraft = ctx.session.tempData?.type === 'CASH_PURCHASE_DRAFT' &&
+        ctx.session.tempData?.actionId === `v_${pendingId}`
+        ? ctx.session.tempData.data
+        : null;
+    const data = pendingAction?.data || sessionDraft;
+    if (!data) {
+        return ctx.editMessageText(EXPIRED_MSG, { reply_markup: undefined });
+    }
+    try {
+        const { replyMsg } = await saveCashGoodsPurchase(data, ownerId, cashSource);
+        await (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id);
+        (0, telegram_1.clearSession)(ctx);
+        if (ctx.callbackQuery.message && ctx.chat?.id) {
+            await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, replyMsg, { parse_mode: 'Markdown' });
+        }
+        else {
+            await (0, telegram_1.safeReply)(ctx, replyMsg, { parse_mode: 'Markdown' });
+        }
+    }
+    catch (error) {
+        logger_1.logger.error(error, 'Error saving cash goods purchase with selected cashSource');
+        await ctx.answerCallbackQuery({ text: "Saqlashda xatolik bo'ldi, qayta urinib ko'ring.", show_alert: true });
+    }
+});
 exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
     if (!ctx.from)
         return;
@@ -664,7 +837,23 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
     try {
         let replyMsg = '';
         let useMarkdown = true;
-        if (data.intent === 'ADD_EXPENSE') {
+        const isCashGoodsPurchase = data.intent === 'ADD_CASH_TX' ||
+            (data.intent === 'ADD_SUPPLIER_TX' && data.paymentType === 'CASH');
+        if (isCashGoodsPurchase) {
+            const explicitSource = resolveExplicitCashSource(data);
+            if (!explicitSource) {
+                const actionId = `v_${pendingId}`;
+                ctx.session.step = actionId;
+                ctx.session.tempData = { type: 'CASH_PURCHASE_DRAFT', actionId, data };
+                if (ctx.callbackQuery.message && ctx.chat?.id) {
+                    await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `🧾 **Naqd tovar xaridi**\n\n▫️ Summa: **${(0, formatters_1.formatCurrency)(Math.abs(Number(data.amount)), cur)}**\n\n${cash_source_1.CASH_SOURCE_PROMPT_TEXT}`, { parse_mode: 'Markdown', reply_markup: (0, inline_1.getCashSourceSelectionKeyboard)(actionId) });
+                }
+                return;
+            }
+            const saved = await saveCashGoodsPurchase(data, ownerId, explicitSource);
+            replyMsg = saved.replyMsg;
+        }
+        else if (data.intent === 'ADD_EXPENSE') {
             await prisma_1.prisma.expense.create({
                 data: {
                     ownerId,
@@ -678,23 +867,14 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
             useMarkdown = false;
         }
         else if (data.intent === 'ADD_SUPPLIER_TX') {
-            const isCashPurchase = data.paymentType === 'CASH';
             const isIncoming = data.txType === 'INCOMING_GOODS';
             const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
             const finalDebt = await saveSupplierTxData(data, ownerId);
-            replyMsg = isCashPurchase
-                ? `✅ **Naqd xarid muvaffaqiyatli saqlandi!**\n\n` +
-                    `🏢 Ta'minotchi: **${safeName}**\n` +
-                    `💵 Naqd summa: **${(0, formatters_1.formatCurrency)(amt, cur)}**\n` +
-                    `📊 Qarzga qo'shilmadi (0). Bugungi Z-otchyot naqd xaridlariga kiritildi.`
-                : `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
+            replyMsg =
+                `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
                     `🏢 Ta'minotchi: **${safeName}**\n` +
                     `${isIncoming ? '📥 Yangi kirim' : "💸 To'lov"}: **${isIncoming ? '+' : '-'}${(0, formatters_1.formatCurrency)(amt, cur)}**\n` +
                     `📊 **Yakuniy qarz qoldig'i (${cur}):** **${(0, formatters_1.formatCurrency)(finalDebt, cur)}**`;
-        }
-        else if (data.intent === 'ADD_CASH_TX') {
-            await saveSupplierTxData({ ...data, paymentType: 'CASH' }, ownerId);
-            replyMsg = `✅ Naqd xarid saqlandi:\nKimdan: ${safeName}\nSumma: ${(0, formatters_1.formatCurrency)(data.amount, cur)}${data.comment ? `\nIzoh: ${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(data.comment))}` : ''}\n_(Ushbu summa qarzga ta'sir qilmadi)_`;
         }
         else if (data.intent === 'ADD_CUSTOMER_DEBT') {
             const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
@@ -719,7 +899,7 @@ exports.voiceHandler.callbackQuery(/^confirm_v_(.+)$/, async (ctx) => {
                     `📊 **Mijozning umumiy nasiya qoldig'i (${cur}):** **${(0, formatters_1.formatCurrency)(totalCustRem, cur)}**`;
         }
         await (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id);
-        ctx.session.step = undefined;
+        (0, telegram_1.clearSession)(ctx);
         if (ctx.callbackQuery.message && ctx.chat?.id) {
             await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, replyMsg, useMarkdown ? { parse_mode: 'Markdown' } : {});
         }
@@ -744,7 +924,7 @@ exports.voiceHandler.callbackQuery(/^confirm_suptx_(.+)$/, async (ctx) => {
         const amt = Number(Math.abs(Number(data.amount)).toFixed(2));
         const finalDebt = await saveSupplierTxData(data, ownerId);
         await (0, telegram_1.deleteOwnedPendingAction)(pendingId, ctx.from.id);
-        ctx.session.step = undefined;
+        (0, telegram_1.clearSession)(ctx);
         if (ctx.callbackQuery.message && ctx.chat?.id) {
             await (0, telegram_1.safeEditMessageText)(ctx, ctx.chat.id, ctx.callbackQuery.message.message_id, `✅ ${isIncoming ? 'Yuk olish (Kirim)' : "To'lov"} muvaffaqiyatli saqlandi!\n\n` +
                 `🏢 Ta'minotchi: **${(0, telegram_1.sanitizeMdV1)((0, transliterate_1.toLatinUz)(data.name))}**\n` +
@@ -761,7 +941,7 @@ exports.voiceHandler.callbackQuery(/^cancel_(?:v|suptx|vdis)_(.+)$/, async (ctx)
     if (!ctx.from)
         return;
     await (0, telegram_1.deleteOwnedPendingAction)(ctx.match[1], ctx.from.id);
-    ctx.session.step = undefined;
+    (0, telegram_1.clearSession)(ctx);
     await ctx.editMessageText('❌ Bekor qilindi.', { reply_markup: undefined });
 });
 exports.voiceHandler.callbackQuery(/^vsel_(.+)_(\d+)$/, async (ctx) => {

@@ -1,10 +1,107 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ReportService = void 0;
+exports.summarizeCashGoodsPurchases = summarizeCashGoodsPurchases;
+exports.computeDailyRegisterBalance = computeDailyRegisterBalance;
 const prisma_1 = require("../database/prisma");
 const env_1 = require("../config/env");
 const formatters_1 = require("../utils/formatters");
 const telegram_1 = require("../utils/telegram");
+const cash_source_1 = require("../utils/cash-source");
+function roundMoney2(v) {
+    const n = Number(v || 0);
+    if (!Number.isFinite(n))
+        return 0;
+    const r = Number(n.toFixed(2));
+    return Object.is(r, -0) ? 0 : r;
+}
+/**
+ * Pure, deduplicated cash goods purchase aggregator across Invoice and CashTransaction records.
+ * Splits TODAY_REGISTER ("Kassadan") vs SAFE ("Seyfdan") while keeping legacy rows 100% compatible.
+ */
+function summarizeCashGoodsPurchases(params) {
+    let todayRegisterUzs = 0;
+    let todayRegisterCount = 0;
+    let safeUzs = 0;
+    let safeCount = 0;
+    const invoiceIds = new Set();
+    const invoiceMarkers = [];
+    for (const inv of params.invoices || []) {
+        if (inv.currency && inv.currency !== 'UZS')
+            continue;
+        const amt = roundMoney2(Math.abs(Number(inv.paidCashAmount || 0)));
+        if (amt <= 0)
+            continue;
+        invoiceIds.add(inv.id);
+        invoiceMarkers.push({
+            amount: amt,
+            time: inv.createdAt ? new Date(inv.createdAt).getTime() : null,
+            matched: false,
+        });
+        if ((0, cash_source_1.resolveEffectiveCashSource)(inv) === 'SAFE') {
+            safeUzs = roundMoney2(safeUzs + amt);
+            safeCount += 1;
+        }
+        else {
+            todayRegisterUzs = roundMoney2(todayRegisterUzs + amt);
+            todayRegisterCount += 1;
+        }
+    }
+    for (const ct of params.cashTransactions || []) {
+        if (ct.currency && ct.currency !== 'UZS')
+            continue;
+        const amt = roundMoney2(Math.abs(Number(ct.amount || 0)));
+        if (amt <= 0)
+            continue;
+        if (ct.invoiceId && invoiceIds.has(ct.invoiceId)) {
+            continue;
+        }
+        if (!ct.invoiceId && ct.createdAt) {
+            const ctTime = new Date(ct.createdAt).getTime();
+            const match = invoiceMarkers.find((m) => !m.matched && m.time !== null && Math.abs(m.amount - amt) < 0.01 && Math.abs(m.time - ctTime) <= 10_000);
+            if (match) {
+                match.matched = true;
+                continue;
+            }
+        }
+        if ((0, cash_source_1.resolveEffectiveCashSource)(ct) === 'SAFE') {
+            safeUzs = roundMoney2(safeUzs + amt);
+            safeCount += 1;
+        }
+        else {
+            todayRegisterUzs = roundMoney2(todayRegisterUzs + amt);
+            todayRegisterCount += 1;
+        }
+    }
+    return {
+        todayRegisterUzs,
+        todayRegisterCount,
+        safeUzs,
+        safeCount,
+        totalUzs: roundMoney2(todayRegisterUzs + safeUzs),
+        totalCount: todayRegisterCount + safeCount,
+    };
+}
+/**
+ * Pure daily cash drawer balance calculator:
+ * - Deducts TODAY_REGISTER cash purchases (and today's register outflows) from gross cash sales.
+ * - Excludes SAFE cash purchases from today's cash drawer balance while keeping them in total purchase history.
+ */
+function computeDailyRegisterBalance(params) {
+    const gross = roundMoney2(Math.max(0, Number(params.grossCashSalesUzs || 0)));
+    const deductedCashPurchasesUzs = roundMoney2(Math.max(0, Number(params.cashPurchasesTodayRegisterUzs || 0)));
+    const excludedSafeCashPurchasesUzs = roundMoney2(Math.max(0, Number(params.cashPurchasesSafeUzs || 0)));
+    const supPayments = roundMoney2(Math.max(0, Number(params.supplierPaymentsTodayRegisterUzs || 0)));
+    const expenses = roundMoney2(Math.max(0, Number(params.expensesTodayRegisterUzs || 0)));
+    const expectedCashInDrawerUzs = roundMoney2(gross - deductedCashPurchasesUzs - supPayments - expenses);
+    const totalCashPurchasesHistoryUzs = roundMoney2(deductedCashPurchasesUzs + excludedSafeCashPurchasesUzs);
+    return {
+        expectedCashInDrawerUzs,
+        deductedCashPurchasesUzs,
+        excludedSafeCashPurchasesUzs,
+        totalCashPurchasesHistoryUzs,
+    };
+}
 const formatDualCurrency = (uzs, usd) => {
     const uzsPart = (0, formatters_1.formatMoney)(uzs, 'UZS');
     return usd !== 0 ? `${uzsPart} (+ ${(0, formatters_1.formatMoney)(usd, 'USD')})` : uzsPart;
@@ -88,21 +185,45 @@ class ReportService {
     }
     /**
      * Single source of truth for today's automatic Z-Report columns (used by both closing preview and save).
-     * Strictly isolated by `ownerId` and `paymentSource` ("TODAY_CASH" vs "PREVIOUS_SAFE").
+     * Strictly isolated by `ownerId` and `cashSource` ("TODAY_REGISTER" vs "SAFE", with legacy `paymentSource` fallback).
+     * Includes TODAY_REGISTER cash goods purchases (from both Invoice and standalone CashTransaction) in register outflows,
+     * while excluding SAFE cash purchases from today's register balance.
      */
     static async getTodayZReportAutoMetrics(ownerId, now = new Date()) {
         const cleanOwnerId = String(ownerId || env_1.env.OWNER_TELEGRAM_ID).trim();
         const { startOfDay, endOfDay, dateKey } = (0, formatters_1.getTashkentDayRange)(now);
-        const [cashInvoices, todaySupplierPayments, prevSafeSupplierPayments] = await Promise.all([
+        const [cashInvoices, cashTransactions, todaySupplierPayments, prevSafeSupplierPayments] = await Promise.all([
             prisma_1.prisma.invoice.findMany({
                 where: {
                     ownerId: cleanOwnerId,
                     createdAt: { gte: startOfDay, lte: endOfDay },
                     currency: 'UZS',
                     paidCashAmount: { gt: 0 },
-                    paymentSource: 'TODAY_CASH',
                 },
-                select: { paidCashAmount: true },
+                select: {
+                    id: true,
+                    paidCashAmount: true,
+                    currency: true,
+                    cashSource: true,
+                    paymentSource: true,
+                    createdAt: true,
+                },
+            }),
+            prisma_1.prisma.cashTransaction.findMany({
+                where: {
+                    ownerId: cleanOwnerId,
+                    createdAt: { gte: startOfDay, lte: endOfDay },
+                    currency: 'UZS',
+                },
+                select: {
+                    id: true,
+                    invoiceId: true,
+                    amount: true,
+                    currency: true,
+                    cashSource: true,
+                    paymentSource: true,
+                    createdAt: true,
+                },
             }),
             prisma_1.prisma.supplierPayment.findMany({
                 where: {
@@ -123,11 +244,18 @@ class ReportService {
                 select: { amount: true },
             }),
         ]);
+        const cashSummary = summarizeCashGoodsPurchases({
+            invoices: cashInvoices,
+            cashTransactions,
+        });
         return {
             ownerId: cleanOwnerId,
             dateKey,
-            dailyCashPurchasesUzs: Number(cashInvoices.reduce((acc, inv) => acc + Number(inv.paidCashAmount || 0), 0).toFixed(2)),
-            dailyCashPurchasesCount: cashInvoices.length,
+            dailyCashPurchasesUzs: cashSummary.todayRegisterUzs,
+            dailyCashPurchasesCount: cashSummary.todayRegisterCount,
+            safeCashPurchasesUzs: cashSummary.safeUzs,
+            safeCashPurchasesCount: cashSummary.safeCount,
+            totalCashPurchasesUzs: cashSummary.totalUzs,
             dailySupplierPaymentsUzs: Number(todaySupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)),
             dailySupplierPaymentsCount: todaySupplierPayments.length,
             previousSafePaymentsUzs: Number(prevSafeSupplierPayments.reduce((acc, p) => acc + Number(p.amount || 0), 0).toFixed(2)),
@@ -144,7 +272,7 @@ class ReportService {
         const terminalAmount = Math.max(0, Number(Number(input.terminalAmount || 0).toFixed(2)));
         const clickAmount = Math.max(0, Number(Number(input.clickAmount || 0).toFixed(2)));
         const cashRemainingInDrawer = Math.max(0, Number(Number(input.cashRemainingInDrawer || 0).toFixed(2)));
-        const { dateKey, dailyCashPurchasesUzs, dailyCashPurchasesCount, dailySupplierPaymentsUzs, dailySupplierPaymentsCount, previousSafePaymentsUzs, previousSafePaymentsCount, } = await this.getTodayZReportAutoMetrics(ownerId, now);
+        const { dateKey, dailyCashPurchasesUzs, dailyCashPurchasesCount, safeCashPurchasesUzs, safeCashPurchasesCount, dailySupplierPaymentsUzs, dailySupplierPaymentsCount, previousSafePaymentsUzs, previousSafePaymentsCount, } = await this.getTodayZReportAutoMetrics(ownerId, now);
         const totalDailySalesUzs = Number((terminalAmount +
             clickAmount +
             cashRemainingInDrawer +
@@ -162,11 +290,14 @@ class ReportService {
             `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(terminalAmount)}`,
             `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(clickAmount)}`,
             `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(cashRemainingInDrawer)}`,
-            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)}`,
+            `📦 Bugungi kassadan naqdga olingan tovarlar [Kassadan]: ${(0, formatters_1.formatSom)(dailyCashPurchasesUzs)}`,
             `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(dailySupplierPaymentsUzs)}`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💰 KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}`,
         ];
+        if (safeCashPurchasesUzs > 0) {
+            lines.push(`(ℹ️ Ma'lumot uchun: Seyfdan (kechagi pul) naqdga olingan tovarlar [Seyfdan] — ${(0, formatters_1.formatSom)(safeCashPurchasesUzs)} (${safeCashPurchasesCount} ta) bugungi kassadan ayirilmadi va bugungi savdoga qayta qo'shilmadi)`);
+        }
         if (previousSafePaymentsUzs > 0) {
             lines.push(`(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)`);
         }
@@ -229,6 +360,8 @@ class ReportService {
             cashRemainingInDrawer,
             dailyCashPurchasesUzs,
             dailyCashPurchasesCount,
+            safeCashPurchasesUzs,
+            safeCashPurchasesCount,
             dailySupplierPaymentsUzs,
             dailySupplierPaymentsCount,
             previousSafePaymentsUzs,
@@ -355,8 +488,21 @@ class ReportService {
         const netSupplierDebtChangeUzs = incomingGoodsUzs - supplierPaidUzs - supplierReturnsUzs;
         const netSupplierDebtChangeUsd = incomingGoodsUsd - supplierPaidUsd - supplierReturnsUsd;
         let cashPurchasesUzs = 0;
+        let cashPurchasesTodayRegisterUzs = 0;
+        let cashPurchasesTodayRegisterCount = 0;
+        let cashPurchasesSafeUzs = 0;
+        let cashPurchasesSafeCount = 0;
         for (const c of inputs.cashTransactions) {
-            cashPurchasesUzs += Math.abs(Number(c.amount || 0));
+            const amt = Math.abs(Number(c.amount || 0));
+            cashPurchasesUzs += amt;
+            if ((0, cash_source_1.isSafeCashSource)(c)) {
+                cashPurchasesSafeUzs += amt;
+                cashPurchasesSafeCount++;
+            }
+            else {
+                cashPurchasesTodayRegisterUzs += amt;
+                cashPurchasesTodayRegisterCount++;
+            }
         }
         const cashPurchasesCount = inputs.cashTransactions.length;
         let newCustomerDebtUzs = 0;
@@ -407,7 +553,8 @@ class ReportService {
         const expensesByCategory = Array.from(catMap.values()).sort((a, b) => b.amountUzs - a.amountUzs || b.amountUsd - a.amountUsd);
         const inflowUzs = totalSalesUzs + collectedCustomerDebtUzs;
         const inflowUsd = cashSalesUsd + collectedCustomerDebtUsd;
-        const outflowUzs = supplierPaidUzs + cashPurchasesUzs + expensesUzs;
+        // Register cash outflow includes ONLY TODAY_REGISTER cash purchases (excludes SAFE)
+        const outflowUzs = supplierPaidUzs + cashPurchasesTodayRegisterUzs + expensesUzs;
         const outflowUsd = supplierPaidUsd + expensesUsd;
         const netCashFlowUzs = inflowUzs - outflowUzs;
         const netCashFlowUsd = inflowUsd - outflowUsd;
@@ -436,6 +583,10 @@ class ReportService {
             totalSupplierDebtUsd: inputs.totalSupplierDebtUsd,
             cashPurchasesUzs,
             cashPurchasesCount,
+            cashPurchasesTodayRegisterUzs,
+            cashPurchasesTodayRegisterCount,
+            cashPurchasesSafeUzs,
+            cashPurchasesSafeCount,
             newCustomerDebtUzs,
             newCustomerDebtUsd,
             collectedCustomerDebtUzs,
@@ -484,13 +635,13 @@ class ReportService {
             creditCount: m.incomingGoodsCount,
             prevCreditPercent: m.prevCreditPercent,
         });
-        lines.push(`├ 📦 Nasiyaga kelgan tovar (${m.incomingGoodsCount} ta): **${formatDualCurrency(m.incomingGoodsUzs, m.incomingGoodsUsd)}**`, `├ 📊 JAMI QARZ (UZS): **${(0, formatters_1.formatMoney)(m.totalSupplierDebtUzs, 'UZS')}**`, `├ 💵 JAMI QARZ (USD/USDT): **${(0, formatters_1.formatMoney)(m.totalSupplierDebtUsd, 'USD')}**`, `└ ⚖️ Jami qarzimiz qoldig'i: **${formatDualCurrency(m.totalSupplierDebtUzs, m.totalSupplierDebtUsd)}**${debtDeltaText}`, '', `🛒 **3. NAQD TOVAR XARIDLARI**`, `└ 💵 Naqdga olingan tovar (${m.cashPurchasesCount} ta): **${(0, formatters_1.formatMoney)(m.cashPurchasesUzs, 'UZS')}**`, '', cashVsCredit.formattedBlock, '', `👥 **4. MIJOZLAR NASIYASI**`, `├ 📤 Yangi berilgan nasiya: **${formatDualCurrency(m.newCustomerDebtUzs, m.newCustomerDebtUsd)}**`, `├ 📥 Mijozlardan qaytgan qarz: **${formatDualCurrency(m.collectedCustomerDebtUzs, m.collectedCustomerDebtUsd)}**`, `└ 📊 Aktiv nasiyalar qoldig'i: **${formatDualCurrency(m.activeCustomerDebtUzs, m.activeCustomerDebtUsd)}**`, '', `📉 **5. DO'KON XARAJATLARI**`, `└ 🏢 Jami xarajatlar: **${formatDualCurrency(m.expensesUzs, m.expensesUsd)}**`);
+        lines.push(`├ 📦 Nasiyaga kelgan tovar (${m.incomingGoodsCount} ta): **${formatDualCurrency(m.incomingGoodsUzs, m.incomingGoodsUsd)}**`, `├ 📊 JAMI QARZ (UZS): **${(0, formatters_1.formatMoney)(m.totalSupplierDebtUzs, 'UZS')}**`, `├ 💵 JAMI QARZ (USD/USDT): **${(0, formatters_1.formatMoney)(m.totalSupplierDebtUsd, 'USD')}**`, `└ ⚖️ Jami qarzimiz qoldig'i: **${formatDualCurrency(m.totalSupplierDebtUzs, m.totalSupplierDebtUsd)}**${debtDeltaText}`, '', `🛒 **3. NAQD TOVAR XARIDLARI**`, `├ 💵 Jami naqdga olingan tovar (${m.cashPurchasesCount} ta): **${(0, formatters_1.formatMoney)(m.cashPurchasesUzs, 'UZS')}**`, `├ 💵 Kassadan (${m.cashPurchasesTodayRegisterCount} ta): **${(0, formatters_1.formatMoney)(m.cashPurchasesTodayRegisterUzs, 'UZS')}**`, `└ 🔐 Seyfdan (${m.cashPurchasesSafeCount} ta): **${(0, formatters_1.formatMoney)(m.cashPurchasesSafeUzs, 'UZS')}**`, '', cashVsCredit.formattedBlock, '', `👥 **4. MIJOZLAR NASIYASI**`, `├ 📤 Yangi berilgan nasiya: **${formatDualCurrency(m.newCustomerDebtUzs, m.newCustomerDebtUsd)}**`, `├ 📥 Mijozlardan qaytgan qarz: **${formatDualCurrency(m.collectedCustomerDebtUzs, m.collectedCustomerDebtUsd)}**`, `└ 📊 Aktiv nasiyalar qoldig'i: **${formatDualCurrency(m.activeCustomerDebtUzs, m.activeCustomerDebtUsd)}**`, '', `📉 **5. DO'KON XARAJATLARI**`, `└ 🏢 Jami xarajatlar: **${formatDualCurrency(m.expensesUzs, m.expensesUsd)}**`);
         if (m.expensesByCategory.length > 0) {
             for (const cat of m.expensesByCategory) {
                 lines.push(`    ▫️ ${(0, telegram_1.sanitizeMdV1)(cat.category)}: ${formatDualCurrency(cat.amountUzs, cat.amountUsd)}`);
             }
         }
-        lines.push('', `━━━━━━━━━━━━━━━━━━━━`, `💰 **SOF PUL OQIMI (KASSA BALANSI)**`, `├ 🟢 Jami kirim: **${formatDualCurrency(m.inflowUzs, m.inflowUsd)}** _(Savdo + Mijozdan qarz)_`, `├ 🔴 Jami chiqim: **${formatDualCurrency(m.outflowUzs, m.outflowUsd)}** _(Hamkor + Naqd xarid + Xarajat)_`, `└ 💎 **Sof kassa qoldig'i:** **${formatSignedMoney(m.netCashFlowUzs, 'UZS')}**${m.netCashFlowUsd !== 0 ? ` (**${formatSignedMoney(m.netCashFlowUsd, 'USD')}**)` : ''}`, '');
+        lines.push('', `━━━━━━━━━━━━━━━━━━━━`, `💰 **SOF PUL OQIMI (KASSA BALANSI)**`, `├ 🟢 Jami kirim: **${formatDualCurrency(m.inflowUzs, m.inflowUsd)}** _(Savdo + Mijozdan qarz)_`, `├ 🔴 Jami chiqim: **${formatDualCurrency(m.outflowUzs, m.outflowUsd)}** _(Hamkor + Kassadan naqd xarid + Xarajat)_`, `└ 💎 **Sof kassa qoldig'i:** **${formatSignedMoney(m.netCashFlowUzs, 'UZS')}**${m.netCashFlowUsd !== 0 ? ` (**${formatSignedMoney(m.netCashFlowUsd, 'USD')}**)` : ''}`, '');
         if (m.missingDaysCount === 0) {
             lines.push(`✅ _Davr mobaynida barcha ${m.totalDays} kun Z-Hisobot to'liq yopilgan._`);
         }
@@ -530,10 +681,13 @@ class ReportService {
                 select: {
                     id: true,
                     paymentType: true,
+                    paymentSource: true,
+                    cashSource: true,
                     paidCashAmount: true,
                     creditAmount: true,
                     totalAmount: true,
                     currency: true,
+                    createdAt: true,
                 },
             }),
             prisma_1.prisma.invoice.findMany({
@@ -546,7 +700,15 @@ class ReportService {
             }),
             prisma_1.prisma.cashTransaction.findMany({
                 where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
-                select: { amount: true },
+                select: {
+                    id: true,
+                    invoiceId: true,
+                    amount: true,
+                    currency: true,
+                    cashSource: true,
+                    paymentSource: true,
+                    createdAt: true,
+                },
             }),
             prisma_1.prisma.customerDebt.findMany({
                 where: { ownerId, createdAt: { gte: startDate, lte: endDate } },
@@ -574,15 +736,24 @@ class ReportService {
             supplierTransactions: filteredSupplierTransactions,
             totalSupplierDebtUzs: Number(supplierAggregate._sum.debtUzs || 0),
             totalSupplierDebtUsd: Number(supplierAggregate._sum.debtUsd || 0),
-            cashTransactions,
+            cashTransactions: [],
             newCustomerDebts,
             updatedCustomerDebts,
             activeCustomerDebts,
             expenses,
         }, totalDays);
-        const invoiceCashSumUzs = invoicesInPeriod
-            .filter((i) => i.currency === 'UZS')
-            .reduce((s, i) => s + Number(i.paidCashAmount || 0), 0);
+        const cashSummary = summarizeCashGoodsPurchases({
+            invoices: invoicesInPeriod,
+            cashTransactions,
+        });
+        metrics.cashPurchasesUzs = cashSummary.totalUzs;
+        metrics.cashPurchasesCount = cashSummary.totalCount;
+        metrics.cashPurchasesTodayRegisterUzs = cashSummary.todayRegisterUzs;
+        metrics.cashPurchasesTodayRegisterCount = cashSummary.todayRegisterCount;
+        metrics.cashPurchasesSafeUzs = cashSummary.safeUzs;
+        metrics.cashPurchasesSafeCount = cashSummary.safeCount;
+        metrics.outflowUzs = roundMoney2(metrics.supplierPaidUzs + metrics.cashPurchasesTodayRegisterUzs + metrics.expensesUzs);
+        metrics.netCashFlowUzs = roundMoney2(metrics.inflowUzs - metrics.outflowUzs);
         const invoiceCreditSumUzs = invoicesInPeriod
             .filter((i) => i.currency === 'UZS')
             .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
@@ -590,10 +761,6 @@ class ReportService {
             .filter((i) => i.currency === 'USD')
             .reduce((s, i) => s + Number(i.creditAmount || 0), 0);
         const invoiceCreditCount = invoicesInPeriod.filter((i) => Number(i.creditAmount || 0) > 0).length;
-        if (invoiceCashSumUzs > metrics.cashPurchasesUzs) {
-            metrics.cashPurchasesUzs = invoiceCashSumUzs;
-            metrics.cashPurchasesCount = Math.max(metrics.cashPurchasesCount, invoicesInPeriod.filter((i) => Number(i.paidCashAmount || 0) > 0).length);
-        }
         metrics.incomingGoodsUzs = Number((metrics.incomingGoodsUzs + invoiceCreditSumUzs).toFixed(2));
         metrics.incomingGoodsUsd = Number((metrics.incomingGoodsUsd + invoiceCreditSumUsd).toFixed(2));
         metrics.incomingGoodsCount += invoiceCreditCount;

@@ -178,6 +178,11 @@ async function sendSupplierRecordDetailView(ctx, catCode, recordId, isEdit = tru
                     ? '⚖️ Qisman naqd'
                     : '📝 Nasiya';
             lines.push(`🏷 **To'lov turi:** ${pLabel}`);
+            if (record.paymentType === 'CASH' || record.paymentType === 'PARTIAL') {
+                const badge = record.cashSourceBadge || (record.paymentSource === 'PREVIOUS_SAFE' ? 'Seyfdan' : 'Kassadan');
+                const srcText = badge === 'Seyfdan' ? '🔐 Seyfdan (kechagi pul)' : '💵 Bugungi kassadan';
+                lines.push(`🗂 **Pul manbasi:** ${srcText} (${badge})`);
+            }
         }
         if (record.discountAmount && record.discountAmount > 0 && record.originalAmount) {
             lines.push(`📦 **Asl summa:** ${(0, formatters_1.formatCurrency)(record.originalAmount, record.currency)}`);

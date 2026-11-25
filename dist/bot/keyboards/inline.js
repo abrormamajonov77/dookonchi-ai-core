@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getDiscountConfirmationKeyboard = exports.getTemplateConfirmKeyboard = void 0;
 exports.getConfirmationKeyboard = getConfirmationKeyboard;
+exports.getCashSourceSelectionKeyboard = getCashSourceSelectionKeyboard;
 exports.getPaymentSourceConfirmationKeyboard = getPaymentSourceConfirmationKeyboard;
 exports.getFuzzySupplierSuggestionKeyboard = getFuzzySupplierSuggestionKeyboard;
 exports.getInvoiceConfirmationKeyboard = getInvoiceConfirmationKeyboard;
@@ -21,11 +22,26 @@ exports.getOnboardingCarouselKeyboard = getOnboardingCarouselKeyboard;
 const grammy_1 = require("grammy");
 const formatters_1 = require("../../utils/formatters");
 const transliterate_1 = require("../../utils/transliterate");
+const cash_source_1 = require("../../utils/cash-source");
 function getConfirmationKeyboard(actionId, copyTextContent) {
     const kb = new grammy_1.InlineKeyboard();
     if (copyTextContent)
         kb.switchInlineCurrent('✏️ Tahrirlash', copyTextContent).row();
     return kb.text('✅ Tasdiqlash', `confirm_${actionId}`).text('❌ Bekor qilish', `cancel_${actionId}`);
+}
+/**
+ * Mandatory Cash Source Selection Keyboard for Cash Goods Purchases (Today's Register vs. Safe)
+ */
+function getCashSourceSelectionKeyboard(actionId, editCb) {
+    const kb = new grammy_1.InlineKeyboard()
+        .text(cash_source_1.CASH_SOURCE_BTN_TODAY, `cs:T:${actionId}`)
+        .row()
+        .text(cash_source_1.CASH_SOURCE_BTN_SAFE, `cs:S:${actionId}`)
+        .row();
+    if (editCb) {
+        return kb.text('✏️ Tahrirlash', editCb).text(cash_source_1.CASH_SOURCE_BTN_CANCEL, `cancel_${actionId}`);
+    }
+    return kb.text(cash_source_1.CASH_SOURCE_BTN_CANCEL, `cancel_${actionId}`);
 }
 /**
  * MODUL 5.2: 1-Click Payment Source Selection for Supplier Payments

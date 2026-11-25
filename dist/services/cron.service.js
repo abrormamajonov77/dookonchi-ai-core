@@ -211,7 +211,7 @@ function startCronJobs(bot) {
             const users = await getActiveStoreUsers();
             const { dateKey } = (0, formatters_1.getTashkentDayRange)();
             for (const u of users) {
-                const [r, supAgg] = await Promise.all([
+                const [r, supAgg, todayAuto] = await Promise.all([
                     prisma_1.prisma.dailyRegister.findUnique({
                         where: { ownerId_date: { ownerId: u.telegramId, date: dateKey } },
                     }),
@@ -219,10 +219,19 @@ function startCronJobs(bot) {
                         where: { ownerId: u.telegramId, isActive: true },
                         _sum: { debtUzs: true, debtUsd: true },
                     }),
+                    report_service_1.ReportService.getTodayZReportAutoMetrics(u.telegramId),
                 ]);
+                const cashBreakdownLines = [
+                    `📦 Naqd tovar xaridlari [Kassadan]: ${(0, formatters_1.formatMoney)(todayAuto.dailyCashPurchasesUzs, 'UZS')}`,
+                    ...(todayAuto.safeCashPurchasesUzs > 0
+                        ? [
+                            `🔐 Naqd tovar xaridlari [Seyfdan]: ${(0, formatters_1.formatMoney)(todayAuto.safeCashPurchasesUzs, 'UZS')} _(bugungi kassadan ayirilmadi)_`,
+                        ]
+                        : []),
+                ].join('\n');
                 const body = r
-                    ? `Naqd (UZS): ${(0, formatters_1.formatMoney)(r.cashUzs, 'UZS')}\nClick: ${(0, formatters_1.formatMoney)(r.clickAmount, 'UZS')}\nTerminal: ${(0, formatters_1.formatMoney)(r.terminalAmount, 'UZS')}\nJami Savdo: ${(0, formatters_1.formatMoney)(r.totalDailySalesUzs || r.cashUzs, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`
-                    : `Bugun kassa ma'lumotlari kiritilmadi!\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`;
+                    ? `Naqd (UZS): ${(0, formatters_1.formatMoney)(r.cashUzs, 'UZS')}\nClick: ${(0, formatters_1.formatMoney)(r.clickAmount, 'UZS')}\nTerminal: ${(0, formatters_1.formatMoney)(r.terminalAmount, 'UZS')}\n${cashBreakdownLines}\nJami Savdo: ${(0, formatters_1.formatMoney)(r.totalDailySalesUzs || r.cashUzs, 'UZS')}\nKassa Yopilgan: ${r.isClosed ? 'HA' : "YO'Q"}\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`
+                    : `Bugun kassa ma'lumotlari kiritilmadi!\n${cashBreakdownLines}\n\n📊 JAMI QARZ (UZS): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUzs || 0, 'UZS')}\n💵 JAMI QARZ (USD/USDT): ${(0, formatters_1.formatMoney)(supAgg._sum.debtUsd || 0, 'USD')}\n`;
                 await bot.api
                     .sendMessage(u.telegramId, `📊 **Kunlik Yakuniy Hisobot**\n\n${body}`, {
                     parse_mode: 'Markdown',

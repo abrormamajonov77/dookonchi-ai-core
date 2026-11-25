@@ -70,11 +70,14 @@ exports.closingHandler.on('message:text', async (ctx, next) => {
             `💳 Terminalda savdo: ${(0, formatters_1.formatSom)(d.terminalAmount)}`,
             `📱 Click / Karta savdo: ${(0, formatters_1.formatSom)(d.clickAmount)}`,
             `💵 Kassada qolgan naqd pul: ${(0, formatters_1.formatSom)(d.cashRemainingInDrawer)}`,
-            `📦 Bugungi kassadan naqdga olingan tovarlar: ${(0, formatters_1.formatSom)(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta nakladnoy)`,
+            `📦 Bugungi kassadan naqdga olingan tovarlar [Kassadan]: ${(0, formatters_1.formatSom)(auto.dailyCashPurchasesUzs)} (${auto.dailyCashPurchasesCount} ta xarid)`,
             `🤝 Bugungi kassadan ta'minotchilarga berilgan pul: ${(0, formatters_1.formatSom)(auto.dailySupplierPaymentsUzs)} (${auto.dailySupplierPaymentsCount} ta to'lov)`,
             `━━━━━━━━━━━━━━━━━━━━━━`,
             `💰 **KUN DAVOMIDA JAMI SAVDO: ${(0, formatters_1.formatSom)(totalDailySalesUzs)}**`,
         ];
+        if (auto.safeCashPurchasesUzs > 0) {
+            lines.push(`_(ℹ️ Ma'lumot uchun: Seyfdan (kechagi pul) naqdga olingan tovarlar [Seyfdan] — ${(0, formatters_1.formatSom)(auto.safeCashPurchasesUzs)} (${auto.safeCashPurchasesCount} ta) bugungi kassadan ayirilmadi va bugungi savdoga qayta qo'shilmadi)_`);
+        }
         if (auto.previousSafePaymentsUzs > 0) {
             lines.push(`_(ℹ️ Ma'lumot uchun: Kechagi puldan/seyfdan ta'minotchilarga berilgan ${(0, formatters_1.formatSom)(auto.previousSafePaymentsUzs)} kecha hisoblangani sababli bugungi savdoga qayta qo'shilmadi)_`);
         }

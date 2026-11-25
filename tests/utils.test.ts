@@ -71,6 +71,7 @@ describe('fuzzy matching', () => {
 
 import {
   getPaymentSourceConfirmationKeyboard,
+  getCashSourceSelectionKeyboard,
   getFuzzySupplierSuggestionKeyboard,
   getInvoiceConfirmationKeyboard,
   getDiscountConfirmationKeyboard,
@@ -93,6 +94,9 @@ describe('Telegram callback_data 64-byte & edge-case regressions', () => {
     const keyboards = [
       getPaymentSourceConfirmationKeyboard(`spay_${uuid}`),
       getPaymentSourceConfirmationKeyboard(`v_${uuid}`),
+      getCashSourceSelectionKeyboard(`i_${uuid}`),
+      getCashSourceSelectionKeyboard(`v_${uuid}`),
+      getCashSourceSelectionKeyboard('cash_1700000000000', 'cash:edit'),
       getFuzzySupplierSuggestionKeyboard(uuid2, 'Dinar kalbasa', 'Diner', `inv_${uuid}`),
       getFuzzySupplierSuggestionKeyboard(uuid2, 'Dinar kalbasa', 'Diner', uuid),
       getInvoiceConfirmationKeyboard(`i_${uuid}`, 'table', 'UZS'),
